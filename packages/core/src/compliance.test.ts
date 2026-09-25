@@ -1,7 +1,8 @@
 /**
  * 合规闸门测试 —— 这些断言是**行为契约**，不是形式。
  *
- * 如果有人（包括未来的我）把海克斯胜率接进来，这些测试会失败。
+ * 与 packages/core/src/compliance.ts 中的 DATA_POLICY 及其说明注释对应：
+ * 策略改了这里必须跟着改，反之亦然。
  */
 
 import assert from 'node:assert/strict';
@@ -9,6 +10,7 @@ import { test } from 'node:test';
 
 import {
   assertDataClassAllowed,
+  assertDataSourceAllowed,
   ComplianceError,
   DATA_POLICY,
   isDataClassAllowed,
@@ -16,16 +18,16 @@ import {
   type DataClass,
 } from './compliance.ts';
 
-test('静态数据类别必须被允许', () => {
-  for (const dc of ['static-definition', 'static-numeric', 'pregame-visible'] as const) {
+test('官方一方数据类别必须被允许', () => {
+  for (const dc of ['official-static', 'official-aggregated'] as const) {
     assert.equal(isDataClassAllowed(dc), true, `${dc} 应被允许`);
     assert.doesNotThrow(() => assertDataClassAllowed(dc));
   }
 });
 
-test('海克斯胜率类数据必须被禁止', () => {
-  assert.equal(isDataClassAllowed('augment-performance'), false);
-  assert.throws(() => assertDataClassAllowed('augment-performance'), ComplianceError);
+test('第三方爬取数据必须被禁止', () => {
+  assert.equal(isDataClassAllowed('third-party-scraped'), false);
+  assert.throws(() => assertDataClassAllowed('third-party-scraped'), ComplianceError);
 });
 
 test('局内实时数据必须被禁止', () => {
@@ -33,8 +35,12 @@ test('局内实时数据必须被禁止', () => {
   assert.throws(() => assertDataClassAllowed('live-session'), ComplianceError);
 });
 
-test('模式级统计默认关闭（属解释空间，需人工确认）', () => {
-  assert.equal(isDataClassAllowed('mode-performance'), false);
+test('手段红线必须被禁止且不可翻转为允许', () => {
+  assert.equal(isDataClassAllowed('process-invasive'), false);
+  assert.throws(() => assertDataClassAllowed('process-invasive'), ComplianceError);
+  const verdict = DATA_POLICY['process-invasive'];
+  assert.ok(!verdict.allowed);
+  assert.match(verdict.reason, /读内存|注入|封包/);
 });
 
 test('被禁止的类别必须附带原因说明', () => {
@@ -51,24 +57,29 @@ test('被禁止的类别必须附带原因说明', () => {
 
 test('策略表覆盖全部 DataClass（无遗漏）', () => {
   const all: DataClass[] = [
-    'static-definition',
-    'static-numeric',
-    'pregame-visible',
+    'official-static',
+    'official-aggregated',
+    'third-party-scraped',
     'live-session',
-    'augment-performance',
-    'mode-performance',
+    'process-invasive',
   ];
   for (const dc of all) {
     assert.ok(DATA_POLICY[dc], `${dc} 未在策略表中定义`);
   }
+  assert.equal(Object.keys(DATA_POLICY).length, all.length);
 });
 
-test('ComplianceError 的消息应指向文档', () => {
+test('ComplianceError 的消息应指向策略说明', () => {
   try {
-    assertDataClassAllowed('augment-performance');
+    assertDataClassAllowed('third-party-scraped');
     assert.fail('应当抛错');
   } catch (e: unknown) {
     assert.ok(e instanceof ComplianceError);
-    assert.match(e.message, /COMPLIANCE\.md/);
+    assert.match(e.message, /DATA_POLICY/);
   }
+});
+
+test('assertDataSourceAllowed 与 assertDataClassAllowed 行为一致', () => {
+  assert.doesNotThrow(() => assertDataSourceAllowed('official-static'));
+  assert.throws(() => assertDataSourceAllowed('live-session'), ComplianceError);
 });

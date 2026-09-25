@@ -6,9 +6,11 @@ import {
   RARITY_META,
   useDataset,
   type Augment,
+  type HextechStatic,
 } from './useDataset';
+import RankView from './components/RankView.vue';
 
-const { dataset, loading, error, load } = useDataset();
+const { dataset, rankings, loading, error, load } = useDataset();
 onMounted(load);
 
 const search = ref('');
@@ -16,7 +18,18 @@ const modeFilter = ref<string>('KIWI');
 const rarityFilter = ref<string>('all');
 const sortBy = ref<'name' | 'rarity'>('rarity');
 
-const augments = computed<readonly Augment[]>(() => dataset.value?.augments ?? []);
+// 图鉴主体：CDragon 口径 + 国服官方口径合并展示（去重按名称归一化）
+const augments = computed<readonly Tile[]>(() => {
+  const ds = dataset.value;
+  if (!ds) return [];
+  const norm = (s: string): string => s.replace(/^ARAM_/i, '').toLowerCase();
+  const seen = new Set(ds.augments.map((a) => norm(a.augmentNameId)));
+  const extra: readonly Tile[] = ds.hextechs.filter((h) => !seen.has(norm(h.augmentNameId)));
+  return [...ds.augments, ...extra];
+});
+
+/** 图鉴瓦片：两种官方口径的联合。 */
+type Tile = Augment | HextechStatic;
 
 const modesPresent = computed(() => {
   const s = new Set<string>();
@@ -42,12 +55,17 @@ const filtered = computed(() => {
     );
   }
 
-  return [...list].sort((x: Augment, y: Augment) => {
+  return [...list].sort((x: Tile, y: Tile) => {
     if (sortBy.value === 'name') return x.name.localeCompare(y.name, 'zh-CN');
     const dr = RARITY_META[x.rarity].order - RARITY_META[y.rarity].order;
     return dr !== 0 ? dr : x.name.localeCompare(y.name, 'zh-CN');
   });
 });
+
+/** 图鉴条目图标：CDragon 为资源路径，国服官方为直链。 */
+function tileIcon(a: Tile): string {
+  return 'iconPath' in a ? iconUrl(a.iconPath) : a.smallIcon || a.largeIcon;
+}
 
 const stats = computed(() => {
   const ds = dataset.value;
@@ -56,6 +74,7 @@ const stats = computed(() => {
   for (const a of ds.augments) for (const m of a.modes) byMode.set(m, (byMode.get(m) ?? 0) + 1);
   return {
     augments: ds.augments.length,
+    cnAugments: ds.hextechs.length,
     champions: ds.champions.length,
     items: ds.items.length,
     byMode,
@@ -66,6 +85,15 @@ const stats = computed(() => {
 function modeLabel(m: string): string {
   return MODE_META[m]?.label ?? m;
 }
+
+// 英雄 ID -> 名称/图标（排行榜 join 用）
+const championMap = computed(() => {
+  const m = new Map<number, { name: string; iconPath: string }>();
+  for (const c of dataset.value?.champions ?? []) {
+    m.set(c.id, { name: c.name, iconPath: c.iconPath });
+  }
+  return m;
+});
 </script>
 
 <template>
@@ -79,6 +107,12 @@ function modeLabel(m: string): string {
         静态图鉴 · 数据来源
         <a href="https://raw.communitydragon.org/latest/" target="_blank" rel="noreferrer">
           CommunityDragon
+        </a>
+        与
+        <a href="https://101.qq.com/" target="_blank" rel="noreferrer">腾讯一方官方 CDN</a>
+        · 排行榜来自
+        <a href="https://101.qq.com/#/rankings/hextech" target="_blank" rel="noreferrer">
+          腾讯 101 官方数据站
         </a>
       </p>
     </header>
@@ -95,7 +129,11 @@ function modeLabel(m: string): string {
       <section v-if="stats" class="cards">
         <div class="card">
           <div class="num">{{ stats.augments }}</div>
-          <div class="dim">海克斯</div>
+          <div class="dim">海克斯 (CDragon)</div>
+        </div>
+        <div class="card">
+          <div class="num">{{ stats.cnAugments }}</div>
+          <div class="dim">海克斯 (国服官方)</div>
         </div>
         <div class="card">
           <div class="num">{{ stats.champions }}</div>
@@ -137,7 +175,7 @@ function modeLabel(m: string): string {
 
       <section class="grid">
         <article v-for="a in filtered" :key="a.id" class="tile">
-          <img v-if="a.iconPath" :src="iconUrl(a.iconPath)" :alt="a.name" loading="lazy" />
+          <img v-if="tileIcon(a)" :src="tileIcon(a)" :alt="a.name" loading="lazy" />
           <div v-else class="noicon">?</div>
           <div class="meta">
             <div class="name">{{ a.name }}</div>
@@ -155,6 +193,13 @@ function modeLabel(m: string): string {
       </section>
 
       <p v-if="!filtered.length" class="state">没有匹配的海克斯。</p>
+
+      <!-- 官方排行榜（official-aggregated，标注来源与统计日期） -->
+      <RankView
+        :rankings="rankings"
+        :hextechs="dataset?.hextechs ?? []"
+        :champions="championMap"
+      />
     </template>
 
     <footer class="foot">
@@ -163,8 +208,9 @@ function modeLabel(m: string): string {
         财产的人士的观点或意见。Riot Games 及所有相关财产均为 Riot Games, Inc. 的商标或注册商标。
       </p>
       <p class="dim small">
-        本工具只展示官方公开的<strong>静态</strong>数据，<strong>不提供</strong>海克斯胜率/选取率，
-        也不识别对局内被提供的海克斯。
+        本站只使用官方一方公开数据：静态图鉴来自 CommunityDragon 与腾讯官方 CDN，
+        排行榜来自腾讯 101 官方数据站（101.qq.com）并随数据标注统计日期。
+        不读内存、不注入、不解析封包，也不识别对局内被提供的海克斯。
       </p>
     </footer>
   </div>

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "数据源注册表（含预留的统计类插槽）",
+  "description": "数据源注册表（启用中的静态与统计数据源集中登记）",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
@@ -11,7 +11,8 @@
   },
   "dependencies": {
     "@hexbox/core": "workspace:*",
-    "@hexbox/provider-communitydragon": "workspace:*"
+    "@hexbox/provider-communitydragon": "workspace:*",
+    "@hexbox/provider-tencent": "workspace:*"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json"

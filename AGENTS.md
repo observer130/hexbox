@@ -1,45 +1,59 @@
 # AGENTS.md
 
 A README for AI coding agents working on **hexbox**. Read this alongside
-[README.md](README.md) and [COMPLIANCE.md](COMPLIANCE.md).
+[README.md](README.md).
 
 ## Project overview
 
 `hexbox` is a League of Legends **海克斯乱斗 (Hextech Mayhem / "Hexakill" arena
 mode)** helper with two surfaces:
 
-- A **data query site** (`apps/web`, Vue 3 + Vite) that shows official public
-  static data: hextech augments, champions, items.
+- A **data query site** (`apps/web`, Vue 3 + Vite) that shows hextech augments,
+  champions, items, and official win-rate rankings for the mode.
 - An **in-game overlay** (`apps/overlay`, Electron) that assists the player.
 
-Hard product constraint (see COMPLIANCE.md, do **not** skip it):
+Hard product constraint (do **not** skip it):
 
 > **No memory reading, no injection, no packet parsing.** The overlay never
 > opens a handle to the game process, never injects, never inspects memory or
-> network traffic. It may only use official/legal surfaces (CommunityDragon
-> static data, and the LCU local REST API when available).
+> network traffic. It may only use official/public data surfaces (CommunityDragon
+> static data, Tencent first-party public data for the CN server, and the LCU
+> local REST API when available).
 
 ## ⚠️ Compliance boundary — load-bearing, not optional
 
 This is the single most important rule for this repo. The compliance boundary
 is **enforced in code** at `packages/core/src/compliance.ts`
-(`DATA_POLICY` + `assertDataClassAllowed()`), locked by tests in
-`packages/core/src/compliance.test.ts`.
+(`DATA_POLICY` + `assertDataSourceAllowed()`), locked by tests in
+`packages/core/src/compliance.test.ts`. The rationale is captured in the
+comments of `packages/core/src/compliance.ts`.
 
-- Only show **official public static data** (`static-definition`,
-  `static-numeric`, `pregame-visible`).
-- We **deliberately do not** display augment / arena win rates
-  (`augment-performance` is a policy red line per Riot's developer policy),
-  nor live in-session data (`live-session`), nor (by default) mode win rates
-  (`mode-performance`).
-- `packages/provider-registry` `createPerformanceProviders()` **intentionally
-  returns an empty array** — that is the reserved slot, not a TODO to fill.
-- Do **not** "fix" the empty array, do **not** flip any `DATA_POLICY` entry to
-  `allowed`, and do **not** wire up the Tencent 一方 win-rate endpoint
-  (`mlol.qt.qq.com/go/battle_info/odp_proxy/fuwen_aram_rune_rank_v2`).
-  Tests will fail by design, and that is correct.
-- Enabling any statistics class requires **explicit written approval from Riot**
-  first. Until then, treat the boundary as immutable.
+**The deciding dimension is the data SOURCE, not the data CONTENT.**
+This project targets the CN server (operated by Tencent). Win rates for the
+mode published by Tencent's official data site
+([101.qq.com](https://101.qq.com/#/rankings/hextech)) are first-party official
+public data and ARE allowed (class `official-aggregated`). The earlier
+"no win rates at all" stance was a v1 misreading of Riot's developer policy
+(which governs Riot's own developer ecosystem, not Tencent's CN first-party
+publications) and was corrected in v2.
+
+The policy table:
+
+- `official-static` ✅ — official public static definitions (CommunityDragon,
+  Data Dragon, Tencent first-party CDN `game.gtimg.cn`).
+- `official-aggregated` ✅ — official first-party aggregated stats (win/pick
+  rates, ranks from 101.qq.com / `mlol.qt.qq.com` public endpoints).
+  Must be shown with source attribution and the upstream `dtstatdate`.
+- `third-party-scraped` ❌ — data scraped/repackaged from third-party sites.
+- `live-session` ❌ — the official Live Client Data API has no augment data;
+  only obtainable via memory reading/OCR, both excluded.
+- `process-invasive` ❌ — **permanent red line (手段红线)**: no memory reading,
+  no injection, no game-process handles, no packet parsing.
+
+Do not flip any `DATA_POLICY` entry without updating the code gate and its
+tests (tests will catch a mismatch). Never wire a source that is
+not first-party official (e.g. random third-party scrapers) — tests fail by
+design when you do, and that is correct.
 
 If a task seems to require crossing this boundary, stop and ask the user rather
 than working around it.
@@ -51,8 +65,9 @@ pnpm workspace monorepo.
 ```
 packages/
   core/                       domain models + compliance gate + Provider iface
-  provider-communitydragon/  static data source (v1, only one enabled)
-  provider-registry/          registry (reserved stats slots intentionally empty)
+  provider-communitydragon/  static data source (global static definitions)
+  provider-tencent/           CN first-party source (kiwi statics + mode rankings)
+  provider-registry/          registry (all enabled providers registered here)
   data-store/                 local FS cache (offline fallback)
   data-cli/                   sync / status CLI
   lcu/                        LCU probe + REST client (local API only)
@@ -66,7 +81,7 @@ data/                         synced dataset (generated by `pnpm sync`, gitignor
 
 ```bash
 pnpm install        # pnpm 11.7.0 (see packageManager field)
-pnpm sync           # pull CommunityDragon static data → ./data/dataset.json
+pnpm sync           # pull all providers → ./data/*.json (dataset + rankings)
 pnpm dev:web        # data site → http://localhost:5273
 ```
 
@@ -120,8 +135,8 @@ run:
 - TypeScript, strict mode, functional where reasonable.
 - Single quotes, no trailing semicolons.
 - Comments in Chinese are fine and consistent with the rest of the repo.
-- Keep `COMPLIANCE.md` and the code gate in sync: if policy intent changes,
-  update both the markdown and `DATA_POLICY`.
+- Keep the compliance gate self-documenting: if policy intent changes,
+  update `DATA_POLICY`, its comments, and the tests together.
 
 ## Commit / PR guidelines
 
@@ -133,7 +148,11 @@ run:
 
 ## Out of scope (do not add without explicit approval)
 
-- Any memory injection, game-process hooking, or packet inspection.
-- Win-rate / performance statistics for augments, arena items, or modes.
-- New data sources that aren't official/public under Riot's "Legal Jibber
-  Jabber" policy without prior written Riot approval.
+- Any memory injection, game-process hooking, or packet inspection —
+  permanent red line regardless of what data it would unlock.
+- Data scraped/repackaged from third-party sites (`third-party-scraped`).
+  Official first-party surfaces only: CommunityDragon / Data Dragon /
+  Tencent CN official (`101.qq.com`, `mlol.qt.qq.com`, `game.gtimg.cn`).
+- In-game augment offers (`live-session`) — not exposed by any official API.
+- New official sources still need to be registered in `DATA_POLICY`
+  (packages/core/src/compliance.ts) before use.

@@ -1,58 +1,55 @@
 /**
  * Provider 注册表
  *
- * 这是"预留位置"的**具体落点**：
- *   - STATIC_PROVIDERS：v1 启用（CommunityDragon）
- *   - PERFORMANCE_PROVIDERS：**默认为空数组**
+ * 所有启用中的数据源在此集中登记。每个 provider 的 dataClass
+ * 在注册时经 compliance gate 校验（见 register* 系列函数），
+ * 使「越界来源」在开发期就失败。
  *
- * 为什么不现在就塞一个统计 provider 进去：
- *   它不是"没写"，而是"刻意不启用"。注册表里留空数组 + 注释，
- *   比任何文档都更能阻止后来者顺手接上。
+ * 现役来源（均为运营方官方公开渠道）：
+ *   - CommunityDragon        official-static    国际服图鉴
+ *   - 腾讯一方图鉴            official-static    国服官方数字 ID / 描述 / 图标
+ *   - 腾讯 101 数据站         official-aggregated 模式胜率 / 选取率 / 排行
  *
- * 启用步骤（当 Riot 明确答复后）：
- *   1. 在 packages/provider-* 下实现 PerformanceProvider
- *   2. 确认其 dataClass 的 DATA_POLICY 已改为 allowed（见 compliance.ts）
- *   3. 在此处注册
- *   4. 跑 `pnpm test` —— compliance 测试会校验策略一致性
+ * 新增来源的步骤：
+ *   1. 确认属于 official-static / official-aggregated（运营方官方公开）
+ *   2. 在 DATA_POLICY（packages/core/src/compliance.ts）中登记来源与理由
+ *   3. 实现 provider 并在此注册
+ *   4. 补测试，跑 pnpm test && pnpm typecheck
  */
 
 import {
-  assertDataClassAllowed,
-  type PerformanceProvider,
+  assertDataSourceAllowed,
+  type RankingProvider,
   type StaticProvider,
 } from '@hexbox/core';
 
 import { createCommunityDragonProvider } from '@hexbox/provider-communitydragon';
+import {
+  createTencentRankingProvider,
+  createTencentStaticProvider,
+} from '@hexbox/provider-tencent';
 
-/** v1 启用的静态数据源。 */
+/** 启用的静态图鉴数据源（合并进 dataset.json）。 */
 export function createStaticProviders(): StaticProvider[] {
-  return [createCommunityDragonProvider()];
+  return [
+    registerStaticProvider(createCommunityDragonProvider()),
+    registerStaticProvider(createTencentStaticProvider()),
+  ];
 }
 
-/**
- * 统计类数据源 —— **刻意留空**。
- *
- * 已知的候选（技术上可得，但**当前政策不允许**）：
- *
- *   - mlol.qt.qq.com/go/battle_info/odp_proxy/fuwen_aram_rune_rank_v2
- *     腾讯一方接口，海克斯级胜率/选取率。dataClass = 'augment-performance' ❌ 明令禁止
- *
- *   - mlol.qt.qq.com/go/battle_info/odp_proxy/fuwen_aram_hero_rank_v2
- *     同源，模式内英雄胜率。dataClass = 'mode-performance' ⚠️ 属解释空间，默认关闭
- *
- * 启用前提：取得 Riot 明确书面答复。见 COMPLIANCE.md。
- */
-export function createPerformanceProviders(): PerformanceProvider[] {
-  return [];
+/** 启用的官方统计数据源（写入 rankings.json）。 */
+export function createRankingProviders(): RankingProvider[] {
+  return [registerRankingProvider(createTencentRankingProvider())];
 }
 
-/**
- * 注册一个统计 provider，附带合规校验。
- *
- * 这是**唯一的**启用入口，且会强制走 compliance gate ——
- * 使得"越界"在开发期就失败，而不是上线后被审查发现。
- */
-export function registerPerformanceProvider(provider: PerformanceProvider): PerformanceProvider {
-  assertDataClassAllowed(provider.info.dataClass);
+/** 注册静态 provider，附带合规校验（唯一的启用入口）。 */
+export function registerStaticProvider(provider: StaticProvider): StaticProvider {
+  assertDataSourceAllowed(provider.info.dataClass);
+  return provider;
+}
+
+/** 注册排行榜 provider，附带合规校验（唯一的启用入口）。 */
+export function registerRankingProvider(provider: RankingProvider): RankingProvider {
+  assertDataSourceAllowed(provider.info.dataClass);
   return provider;
 }

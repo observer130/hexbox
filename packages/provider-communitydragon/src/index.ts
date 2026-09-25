@@ -173,15 +173,15 @@ export function createCommunityDragonProvider(
     info: {
       id: 'communitydragon',
       displayName: 'CommunityDragon',
-      dataClass: 'static-definition',
-      attribution: 'CommunityDragon（基于 Riot "Legal Jibber Jabber" 政策）',
+      dataClass: 'official-static',
+      attribution: 'CommunityDragon（基于 Riot "Legal Jibber Jabber" 政策的官方公开静态数据）',
       upstream: `${base}/${locale}/v1/`,
     },
 
     async load(signal?: AbortSignal): Promise<Dataset> {
-      // 合规闸门：静态定义类数据明确允许。
+      // 合规闸门：官方静态类数据明确允许。
       // 若未来有人把 dataClass 改成受限类别，这里会立刻抛错。
-      assertDataClassAllowed('static-definition');
+      assertDataClassAllowed('official-static');
 
       const [rawAugments, rawLists, rawChampions, rawItems] = await Promise.all([
         getJson<RawAugment[]>('cherry-augments.json', signal),
@@ -199,6 +199,7 @@ export function createCommunityDragonProvider(
         augments: normalizeAugments(rawAugments, buildModeIndex(rawLists)),
         champions: normalizeChampions(rawChampions),
         items: normalizeItems(rawItems),
+        hextechs: [], // 国服口径图鉴由 provider-tencent 提供（见 mergeDatasets）
       };
     },
   };

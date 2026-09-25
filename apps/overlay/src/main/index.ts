@@ -223,9 +223,9 @@ async function pollOnce(): Promise<void> {
     augCount: dataset?.augments.length ?? 0,
     picks,
     clickThrough,
-    policyReason: DATA_POLICY['augment-performance'].allowed
+    policyReason: DATA_POLICY['official-aggregated'].allowed
       ? ''
-      : DATA_POLICY['augment-performance'].reason,
+      : DATA_POLICY['official-aggregated'].reason,
   };
 
   if (win && !win.isDestroyed()) {

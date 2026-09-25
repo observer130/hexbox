@@ -119,6 +119,19 @@ importers:
       '@hexbox/provider-communitydragon':
         specifier: workspace:*
         version: link:../provider-communitydragon
+      '@hexbox/provider-tencent':
+        specifier: workspace:*
+        version: link:../provider-tencent
+    devDependencies:
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
+  packages/provider-tencent:
+    dependencies:
+      '@hexbox/core':
+        specifier: workspace:*
+        version: link:../core
     devDependencies:
       typescript:
         specifier: ^5.7.2

@@ -1,25 +1,46 @@
 /**
  * 前端数据加载
  *
- * v1 直接从 `/data/dataset.json` 读取（由 `pnpm sync` 生成）。
- * 不在此处打包数据 —— 763KB JSON 会让构建产物无谓膨胀。
+ * 两个数据文件（均由 `pnpm sync` 生成）：
+ *   - /data/dataset.json  静态图鉴（CDragon + 腾讯一方，合并落盘）
+ *   - /data/rankings.json 官方排行榜（腾讯 101 数据站，official-aggregated）
  *
- * 将来若接入统计 provider，只需在此文件增加一个加载函数，
- * 并在 UI 中标注数据来源 —— 合规边界见 packages/core/src/compliance.ts。
+ * 不在源码中打包数据 —— 800KB+ JSON 会让构建产物无谓膨胀。
+ * 排行榜加载失败不应影响图鉴展示（两份状态独立）。
+ *
+ * 合规边界见 packages/core/src/compliance.ts：
+ * 排行榜展示必须标注来源与统计日期（meta.dataDate）。
  */
 
 import { ref, shallowRef, type Ref } from 'vue';
-import type { Augment, Champion, Dataset, Item } from '@hexbox/core';
+import type {
+  Augment,
+  Champion,
+  Dataset,
+  HextechStatic,
+  Item,
+  RankingSnapshot,
+} from '@hexbox/core';
 
 export interface DataState {
   readonly dataset: Ref<Dataset | null>;
+  readonly rankings: Ref<RankingSnapshot | null>;
   readonly loading: Ref<boolean>;
   readonly error: Ref<string | null>;
   readonly load: () => Promise<void>;
 }
 
+async function fetchJson<T>(url: string, notFoundHint: string): Promise<T> {
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(res.status === 404 ? notFoundHint : `加载 ${url} 失败: HTTP ${res.status}`);
+  }
+  return (await res.json()) as T;
+}
+
 export function useDataset(): DataState {
   const dataset = shallowRef<Dataset | null>(null);
+  const rankings = shallowRef<RankingSnapshot | null>(null);
   const loading = ref(false);
   const error = ref<string | null>(null);
 
@@ -27,15 +48,19 @@ export function useDataset(): DataState {
     loading.value = true;
     error.value = null;
     try {
-      const res = await fetch('/data/dataset.json');
-      if (!res.ok) {
-        throw new Error(
-          res.status === 404
-            ? '未找到数据集。请先在项目根目录运行 `pnpm sync` 生成数据。'
-            : `加载数据集失败: HTTP ${res.status}`,
-        );
-      }
-      dataset.value = (await res.json()) as Dataset;
+      // 排行榜独立容错：失败不阻塞图鉴
+      const [ds, rk] = await Promise.all([
+        fetchJson<Dataset>(
+          '/data/dataset.json',
+          '未找到数据集。请先在项目根目录运行 `pnpm sync` 生成数据。',
+        ),
+        fetchJson<RankingSnapshot>(
+          '/data/rankings.json',
+          '未找到排行榜数据。请先在项目根目录运行 `pnpm sync`。',
+        ).catch(() => null),
+      ]);
+      dataset.value = ds;
+      rankings.value = rk;
     } catch (e) {
       error.value = e instanceof Error ? e.message : String(e);
     } finally {
@@ -43,7 +68,7 @@ export function useDataset(): DataState {
     }
   };
 
-  return { dataset, loading, error, load };
+  return { dataset, rankings, loading, error, load };
 }
 
 /** 稀有度显示配置。 */
@@ -68,4 +93,25 @@ export function iconUrl(iconPath: string): string {
   return iconPath ? `https://raw.communitydragon.org/latest/plugins${iconPath}` : '';
 }
 
-export type { Augment, Champion, Item, Dataset };
+/** 国服官方图标（kiwi_augments 自带绝对直链）。 */
+export function cnIconUrl(h: HextechStatic): string {
+  return h.smallIcon || h.largeIcon;
+}
+
+/** 把 0..1 比率格式化为百分数字符串（保留上游精度）。 */
+export function pct(rate: number, digits = 1): string {
+  return (rate * 100).toFixed(digits) + '%';
+}
+
+/** 排名变化徽标样式。 */
+export function rankChangeClass(n: number): string {
+  return n > 0 ? 'up' : n < 0 ? 'down' : 'flat';
+}
+
+export function rankChangeText(n: number): string {
+  if (n > 0) return `↑${n}`;
+  if (n < 0) return `↓${-n}`;
+  return '—';
+}
+
+export type { Augment, Champion, Dataset, HextechStatic, Item, RankingSnapshot };
