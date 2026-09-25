@@ -1,0 +1,22 @@
+{
+  "name": "@hexbox/provider-registry",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "数据源注册表（含预留的统计类插槽）",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@hexbox/core": "workspace:*",
+    "@hexbox/provider-communitydragon": "workspace:*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  }
+}

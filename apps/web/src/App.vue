@@ -1,0 +1,376 @@
+<script setup lang="ts">
+import { computed, onMounted, ref } from 'vue';
+import {
+  iconUrl,
+  MODE_META,
+  RARITY_META,
+  useDataset,
+  type Augment,
+} from './useDataset';
+
+const { dataset, loading, error, load } = useDataset();
+onMounted(load);
+
+const search = ref('');
+const modeFilter = ref<string>('KIWI');
+const rarityFilter = ref<string>('all');
+const sortBy = ref<'name' | 'rarity'>('rarity');
+
+const augments = computed<readonly Augment[]>(() => dataset.value?.augments ?? []);
+
+const modesPresent = computed(() => {
+  const s = new Set<string>();
+  for (const a of augments.value) for (const m of a.modes) s.add(m);
+  return ['all', ...[...s].sort()];
+});
+
+const filtered = computed(() => {
+  const q = search.value.trim().toLowerCase();
+  let list = augments.value;
+
+  if (modeFilter.value !== 'all') {
+    list = list.filter((a) => a.modes.includes(modeFilter.value as Augment['modes'][number]));
+  }
+  if (rarityFilter.value !== 'all') {
+    list = list.filter((a) => a.rarity === rarityFilter.value);
+  }
+  if (q) {
+    list = list.filter(
+      (a) =>
+        a.name.toLowerCase().includes(q) ||
+        a.augmentNameId.toLowerCase().includes(q),
+    );
+  }
+
+  return [...list].sort((x: Augment, y: Augment) => {
+    if (sortBy.value === 'name') return x.name.localeCompare(y.name, 'zh-CN');
+    const dr = RARITY_META[x.rarity].order - RARITY_META[y.rarity].order;
+    return dr !== 0 ? dr : x.name.localeCompare(y.name, 'zh-CN');
+  });
+});
+
+const stats = computed(() => {
+  const ds = dataset.value;
+  if (!ds) return null;
+  const byMode = new Map<string, number>();
+  for (const a of ds.augments) for (const m of a.modes) byMode.set(m, (byMode.get(m) ?? 0) + 1);
+  return {
+    augments: ds.augments.length,
+    champions: ds.champions.length,
+    items: ds.items.length,
+    byMode,
+    fetchedAt: new Date(ds.meta.fetchedAt).toLocaleString('zh-CN'),
+  };
+});
+
+function modeLabel(m: string): string {
+  return MODE_META[m]?.label ?? m;
+}
+</script>
+
+<template>
+  <div class="wrap">
+    <header class="head">
+      <div class="brand">
+        <h1>hexbox</h1>
+        <span class="badge">海克斯乱斗数据站</span>
+      </div>
+      <p class="dim sub">
+        静态图鉴 · 数据来源
+        <a href="https://raw.communitydragon.org/latest/" target="_blank" rel="noreferrer">
+          CommunityDragon
+        </a>
+      </p>
+    </header>
+
+    <div v-if="loading" class="state">加载中…</div>
+
+    <div v-else-if="error" class="state err">
+      <strong>加载失败</strong>
+      <p>{{ error }}</p>
+      <pre class="dim">pnpm sync</pre>
+    </div>
+
+    <template v-else>
+      <section v-if="stats" class="cards">
+        <div class="card">
+          <div class="num">{{ stats.augments }}</div>
+          <div class="dim">海克斯</div>
+        </div>
+        <div class="card">
+          <div class="num">{{ stats.champions }}</div>
+          <div class="dim">英雄</div>
+        </div>
+        <div class="card">
+          <div class="num">{{ stats.items }}</div>
+          <div class="dim">装备</div>
+        </div>
+        <div class="card wide">
+          <div class="modes">
+            <span v-for="[m, n] in [...stats.byMode]" :key="m" class="modechip">
+              {{ modeLabel(m) }} <b>{{ n }}</b>
+            </span>
+          </div>
+          <div class="dim small">抓取于 {{ stats.fetchedAt }}</div>
+        </div>
+      </section>
+
+      <section class="controls">
+        <input v-model="search" class="input" type="search" placeholder="搜索海克斯名称…" />
+        <select v-model="modeFilter" class="select">
+          <option v-for="m in modesPresent" :key="m" :value="m">
+            {{ m === 'all' ? '全部模式' : modeLabel(m) }}
+          </option>
+        </select>
+        <select v-model="rarityFilter" class="select">
+          <option value="all">全部品质</option>
+          <option v-for="(meta, key) in RARITY_META" :key="key" :value="key">
+            {{ meta.label }}
+          </option>
+        </select>
+        <select v-model="sortBy" class="select">
+          <option value="rarity">按品质</option>
+          <option value="name">按名称</option>
+        </select>
+        <span class="dim count">{{ filtered.length }} 项</span>
+      </section>
+
+      <section class="grid">
+        <article v-for="a in filtered" :key="a.id" class="tile">
+          <img v-if="a.iconPath" :src="iconUrl(a.iconPath)" :alt="a.name" loading="lazy" />
+          <div v-else class="noicon">?</div>
+          <div class="meta">
+            <div class="name">{{ a.name }}</div>
+            <div class="row">
+              <span class="rarity" :style="{ color: RARITY_META[a.rarity].color }">
+                {{ RARITY_META[a.rarity].label }}
+              </span>
+              <span class="dim id">{{ a.augmentNameId }}</span>
+            </div>
+            <div class="row modes">
+              <span v-for="m in a.modes" :key="m" class="mtag">{{ modeLabel(m) }}</span>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <p v-if="!filtered.length" class="state">没有匹配的海克斯。</p>
+    </template>
+
+    <footer class="foot">
+      <p class="dim small">
+        hexbox 未获得 Riot Games 认可，不代表 Riot Games 或任何参与制作、管理 Riot Games
+        财产的人士的观点或意见。Riot Games 及所有相关财产均为 Riot Games, Inc. 的商标或注册商标。
+      </p>
+      <p class="dim small">
+        本工具只展示官方公开的<strong>静态</strong>数据，<strong>不提供</strong>海克斯胜率/选取率，
+        也不识别对局内被提供的海克斯。
+      </p>
+    </footer>
+  </div>
+</template>
+
+<style scoped>
+.wrap {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px 20px 60px;
+}
+
+.head {
+  margin-bottom: 20px;
+}
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+h1 {
+  margin: 0;
+  font-size: 26px;
+  letter-spacing: 0.5px;
+}
+.badge {
+  font-size: 12px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 1px 8px;
+}
+.sub {
+  margin: 6px 0 0;
+  font-size: 13px;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.card.wide {
+  grid-column: span 2;
+  min-width: 260px;
+}
+.num {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--accent);
+}
+.modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.modechip {
+  background: var(--bg-elev2);
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-size: 12px;
+}
+.small {
+  font-size: 12px;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.input,
+.select {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.input {
+  flex: 1;
+  min-width: 200px;
+}
+.input:focus,
+.select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.count {
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+.tile {
+  display: flex;
+  gap: 10px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  transition: border-color 0.15s;
+}
+.tile:hover {
+  border-color: var(--accent);
+}
+.tile img {
+  width: 44px;
+  height: 44px;
+  border-radius: 6px;
+  flex-shrink: 0;
+  background: var(--bg-elev2);
+}
+.noicon {
+  width: 44px;
+  height: 44px;
+  border-radius: 6px;
+  background: var(--bg-elev2);
+  display: grid;
+  place-items: center;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.meta {
+  min-width: 0;
+  flex: 1;
+}
+.name {
+  font-weight: 600;
+  margin-bottom: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.row.modes {
+  margin-top: 4px;
+  gap: 4px;
+}
+.rarity {
+  font-size: 12px;
+  font-weight: 600;
+}
+.id {
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mtag {
+  font-size: 11px;
+  background: var(--bg-elev2);
+  border-radius: 3px;
+  padding: 1px 5px;
+  color: var(--text-dim);
+}
+
+.state {
+  padding: 40px 0;
+  text-align: center;
+  color: var(--text-dim);
+}
+.state.err {
+  color: #e08a8a;
+  text-align: left;
+  background: var(--bg-elev);
+  border: 1px solid #5a2a2a;
+  border-radius: 8px;
+  padding: 16px;
+}
+.state.err pre {
+  background: var(--bg);
+  padding: 8px 10px;
+  border-radius: 5px;
+  margin: 8px 0 0;
+}
+
+.foot {
+  margin-top: 40px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.foot p {
+  margin: 4px 0;
+  line-height: 1.6;
+}
+</style>

@@ -1,0 +1,24 @@
+{
+  "name": "hexbox",
+  "version": "0.1.0",
+  "private": true,
+  "description": "英雄联盟海克斯乱斗助手：数据查询站 + 国服游戏内悬浮窗辅助（不读内存 / 不注入 / 不解析封包）",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "build": "pnpm -r build",
+    "sync": "node --experimental-strip-types packages/data-cli/src/cli.ts sync",
+    "dev:web": "pnpm --filter @hexbox/web dev",
+    "dev:overlay": "pnpm --filter @hexbox/overlay dev"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "typescript": "^5.7.2"
+  }
+}

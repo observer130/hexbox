@@ -1,0 +1,8 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // AbortSignal / fetch 等全局在 Node 18+ 可用
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": ["src/**/*.ts"]
+}

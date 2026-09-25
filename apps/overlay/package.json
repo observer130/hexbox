@@ -1,0 +1,23 @@
+{
+  "name": "@hexbox/overlay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "游戏内悬浮窗（不注入 / 不读内存 / 不打开游戏进程句柄）",
+  "main": "dist/main/index.cjs",
+  "scripts": {
+    "dev": "node build.mjs && electron .",
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@hexbox/core": "workspace:*",
+    "@hexbox/data-store": "workspace:*",
+    "@hexbox/lcu": "workspace:*"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "esbuild": "^0.25.12",
+    "typescript": "^5.7.2"
+  }
+}

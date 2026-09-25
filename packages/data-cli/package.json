@@ -1,0 +1,21 @@
+{
+  "name": "@hexbox/data-cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "数据同步 CLI（拉取 → 规范化 → 落盘）",
+  "dependencies": {
+    "@hexbox/core": "workspace:*",
+    "@hexbox/data-store": "workspace:*",
+    "@hexbox/provider-registry": "workspace:*"
+  },
+  "bin": {
+    "hexbox-sync": "./src/cli.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  }
+}

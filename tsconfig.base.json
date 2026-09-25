@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node"],
+
+    // 我们以源码形式直接运行 TS（node --experimental-strip-types），
+    // 因此 import 必须带 .ts 扩展名。这要求 noEmit（或仅在 bundler 下）。
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+
+    // Node 的 strip-only 模式不支持 enum / 参数属性 / 命名空间。
+    // 相关约束已在代码注释中标注。
+    "erasableSyntaxOnly": true
+  }
+}

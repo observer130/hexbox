@@ -1,0 +1,21 @@
+{
+  "name": "@hexbox/provider-communitydragon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CommunityDragon 静态数据源（海克斯/英雄/装备定义）",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@hexbox/core": "workspace:*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  }
+}

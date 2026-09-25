@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# 同步下来的数据（763KB，可随时用 `pnpm sync` 重新生成）
+data/
+
+# 本地环境
+.env
+.env.local
+.DS_Store
+*.log

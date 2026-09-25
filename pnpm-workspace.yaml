@@ -1,0 +1,11 @@
+packages:
+  - 'packages/*'
+  - 'apps/*'
+
+# 允许执行安装脚本的依赖。这两项都需要下载平台二进制，缺了无法运行：
+#   esbuild  - Vite 与 overlay 构建脚本的依赖
+#   electron - 悬浮窗运行时本体（约 100MB 二进制）
+# 原则：只批准确实必需的；新增项前请说明必要性。
+allowBuilds:
+  electron: true
+  esbuild: true
