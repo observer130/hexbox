@@ -32,7 +32,7 @@ mlol.qt.qq.com/go/battle_info/odp_proxy/fuwen_aram_rune_rank_v2?augmentid_level=
 ```
 
 腾讯**一方**接口公开、免鉴权、纯 GET 即返回 219 个海克斯的胜率与选取率——
-**本项目不使用它**。详见 `docs/101qq-api-findings.md`。
+**本项目不使用它**。
 
 因此"不做胜率"是**纯粹的政策选择**，没有任何技术借口。
 代码里保留了这个判断的痕迹（`DATA_POLICY.augment-performance.reason`）。

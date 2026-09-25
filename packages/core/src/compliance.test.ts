@@ -69,6 +69,6 @@ test('ComplianceError 的消息应指向文档', () => {
     assert.fail('应当抛错');
   } catch (e: unknown) {
     assert.ok(e instanceof ComplianceError);
-    assert.match(e.message, /docs\/research\.md/);
+    assert.match(e.message, /COMPLIANCE\.md/);
   }
 });

@@ -108,7 +108,7 @@ async function queryProcesses(name: string): Promise<ProcessEntry[]> {
  *
  * 国服实测有效：即使 lockfile 被清空、命令行读不到，
  * 仍可通过 `LeagueClient.exe` 的高位监听端口定位 LCU。
- * 见 docs/lcu-probe-findings.md §3。
+ * 注意：该进程监听多个端口，需配合 findLcuPort() 逐个探测判定。
  */
 export async function detectPortByListener(): Promise<Array<{ port: number; pid: number }>> {
   const ps = `Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |

@@ -2,7 +2,7 @@
  * 合规闸门 (Compliance Gate)
  *
  * 本项目刻意不使用某些**技术上可得**的数据（例如海克斯胜率）。
- * 这不是能力缺陷，而是主动的政策选择 —— 见 docs/research.md §4.3。
+ * 这不是能力缺陷，而是主动的政策选择。
  *
  * 之所以把这套规则**写进代码**而不是只写在文档里，是因为：
  *   1. 文档会过时，代码会强制执行；
@@ -54,7 +54,7 @@ export type PolicyVerdict =
  * 数据类别策略表。
  *
  * 修改 `augment-performance` 或 `live-session` 为 allowed 之前，
- * 请先阅读 docs/research.md §3–§4 并取得 Riot 明确答复。
+ * 请先阅读 COMPLIANCE.md 并取得 Riot 明确答复。
  */
 export const DATA_POLICY: Readonly<Record<DataClass, PolicyVerdict>> = Object.freeze({
   'static-definition': { allowed: true },
@@ -99,7 +99,7 @@ export class ComplianceError extends Error {
   constructor(dataClass: DataClass, reason: string) {
     super(
       `[合规拦截] 数据类别 "${dataClass}" 未被允许：${reason}\n` +
-        `详见 docs/research.md §3–§4 与 COMPLIANCE.md。`,
+        `详见 COMPLIANCE.md。`,
     );
     this.name = 'ComplianceError';
     this.dataClass = dataClass;

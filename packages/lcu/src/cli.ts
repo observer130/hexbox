@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 /**
- * LCU 探测 CLI —— 用于回答 docs/research.md §8 中的待验证项：
+ * LCU 探测 CLI
  *
- *   #2 LeagueClientUx.exe 命令行是否含 --app-port / --remoting-auth-token
- *      （决定 WeGame 是否改变了 LCU 启动参数）
- *   #3 真实对局中 swagger 是否包含 augment 字段
- *      （此前结论基于官方样本，需在线上版本复核）
+ * 验证内容：
+ *   - LeagueClientUx.exe 命令行是否含 --app-port / --remoting-auth-token
+ *     （需管理员权限；非管理员下 Windows 会屏蔽 CommandLine）
+ *   - LCU REST 是否可访问
+ *   - 当前游戏流阶段与模式识别
  *
  * 用法:
- *   pnpm --filter @hexbox/lcu probe
- *   pnpm --filter @hexbox/lcu probe --install-dir "C:\Riot Games\League of Legends"
+ *   node --experimental-strip-types packages/lcu/src/cli.ts
+ *   node --experimental-strip-types packages/lcu/src/cli.ts --install-dir <安装目录>
  */
 
 import { LcuClient, LcuEndpoints, isBrawlSession, type GameflowSession } from './client.ts';
@@ -51,8 +52,7 @@ async function main(): Promise<void> {
         console.log(`     （候选 ${candidates.map((c) => c.port).join(', ')} 中，该端口返回 401 = 需鉴权）`);
       }
       console.log('     原因：非管理员无法读进程命令行；且国服 lockfile 可能被清空。');
-      console.log('     建议：以管理员身份重跑本探测以取得密码。');
-      console.log('     详见 docs/lcu-probe-findings.md\n');
+      console.log('     建议：以管理员身份重跑本探测以取得密码。\n');
       process.exitCode = 1;
       return;
     }

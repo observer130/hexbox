@@ -9,7 +9,6 @@
  * ⚠️ 安全边界（本项目核心承诺）：
  *   只创建自己的窗口、只读取**进程元数据/窗口几何**，
  *   绝不打开游戏进程句柄、不读内存、不注入、不解析封包。
- *   详见 docs/research.md §6。
  */
 
 import { app, BrowserWindow, ipcMain, screen, type Rectangle } from 'electron';

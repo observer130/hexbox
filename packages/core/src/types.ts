@@ -1,7 +1,7 @@
 /**
  * 领域模型：英雄联盟「海克斯乱斗」助手
  *
- * 术语对照（见 docs/research.md §1）：
+ * 术语对照：
  *   CHERRY     = 斗魂竞技场 (Arena)
  *   KIWI       = 海克斯乱斗
  *   KIWI_JADE  = 海克斯乱斗 (Jade 变体)

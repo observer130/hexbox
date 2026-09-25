@@ -5,7 +5,7 @@
  * CommunityDragon 声明其数据基于 Riot 的 "Legal Jibber Jabber" 政策使用，
  * 属官方公开静态数据。
  *
- * ⚠️ 路径陷阱（见 docs/research.md §2.1）：
+ * ⚠️ 路径陷阱：
  *   locale 目录真实布局是 `global/<locale>/{content,v1}`。
  *   写成 `global/zh_cn/default/v1/...` 会 404 —— 不要照搬 `global/default/v1/`。
  */

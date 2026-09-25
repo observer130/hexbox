@@ -8,7 +8,7 @@
  * 背景：swagger/v3/openapi.json 已确认 liveclientdata 端点**不含** augment 字段，
  *      但其中存在 `/Help` 与 `/Subscribe` 两个原生元操作，
  *      暗示完整 API 表面可能大于 liveclientdata。
- *      详见 docs/lcu-probe-findings.md
+ *      （低优先级：成熟第三方工具均采用截屏+OCR，侧面印证无隐藏 API。）
  *
  * 用法（在有真实对局时）:
  *   node --experimental-strip-types packages/lcu/src/probe-help.ts

@@ -14,7 +14,6 @@ pnpm dev
 ```
 
 > ⚠️ **必须以管理员身份运行**，否则读不到 LCU 凭证（进程命令行被 Windows 屏蔽）。
-> 详见 [docs/lcu-probe-findings.md](../../docs/lcu-probe-findings.md)。
 
 ## 功能边界（合规）
 

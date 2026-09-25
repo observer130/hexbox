@@ -40,7 +40,7 @@ export function createStaticProviders(): StaticProvider[] {
  *   - mlol.qt.qq.com/go/battle_info/odp_proxy/fuwen_aram_hero_rank_v2
  *     同源，模式内英雄胜率。dataClass = 'mode-performance' ⚠️ 属解释空间，默认关闭
  *
- * 详见 docs/research.md §4.3 与 docs/101qq-api-findings.md。
+ * 启用前提：取得 Riot 明确书面答复。见 COMPLIANCE.md。
  */
 export function createPerformanceProviders(): PerformanceProvider[] {
   return [];

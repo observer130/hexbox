@@ -99,10 +99,9 @@ export const LcuEndpoints = {
 /**
  * 判断是否为海克斯乱斗（BRAWL）。
  *
- * 官方依据（已核实）：
+ * 官方依据（Riot 开发者文档 gameModes.json / queues.json）：
  *   gameModes.json → { "gameMode": "BRAWL" }
  *   queues.json    → { "queueId": 2300, "map": "The Bandlewood", "description": "Brawl" }
- * 见 docs/research.md §1。
  */
 export function isBrawlSession(session: GameflowSession | null): boolean {
   if (!session) return false;

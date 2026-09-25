@@ -8,9 +8,8 @@
  *     便于将来统计 provider 独立落盘、独立失效。
  *   - 记录 `fetchedAt` 供 UI 显示数据新鲜度。
  *
- * ⚠️ 风险提示（见 docs/research.md §8）：CommunityDragon 官方公告其服务器
- * 硬件老化、正在募资升级。因此**必须**支持离线读取已缓存数据，
- * 并准备 Data Dragon 作为降级来源。
+ * ⚠️ 风险提示：CommunityDragon 官方公告其服务器硬件老化、正在募资升级。
+ * 因此本存储**必须**支持离线读取已缓存数据，并准备 Data Dragon 作为降级来源。
  */
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
