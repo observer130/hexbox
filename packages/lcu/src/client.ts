@@ -108,6 +108,53 @@ export class LcuClient {
       throw err;
     }
   }
+
+  /**
+   * 发送带 JSON body 的写请求（PUT / POST）。
+   *
+   * ⚠️ 本项目此前只做只读；写入仅用于「配装方案」，且调用方必须
+   * 遵守 `mergeItemSets` 的安全规则（只动本工具生成的方案）。
+   */
+  async sendJson<T = unknown>(
+    method: 'PUT' | 'POST',
+    path: string,
+    body: unknown,
+    opts: LcuRequestOptions = {},
+  ): Promise<T | null> {
+    const url = `https://127.0.0.1:${this.creds.port}${path.startsWith('/') ? path : `/${path}`}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 8000);
+    if (opts.signal) {
+      opts.signal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+
+    try {
+      const res = await fetch(url, {
+        method,
+        headers: {
+          Authorization: basicAuthHeader(this.creds.password),
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        throw new LcuHttpError(path, res.status);
+      }
+      // 204 No Content 是常见成功响应（写入类接口）
+      if (res.status === 204) return null;
+      const text = await res.text();
+      if (!text) return null;
+      try {
+        return JSON.parse(text) as T;
+      } catch {
+        return null; // 非 JSON 响应（如纯文本 OK）也算成功
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 }
 
 /** 游戏流阶段。 */

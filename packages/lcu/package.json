@@ -10,7 +10,8 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@hexbox/core": "workspace:*"
+    "@hexbox/core": "workspace:*",
+    "@hexbox/data-store": "workspace:*"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",

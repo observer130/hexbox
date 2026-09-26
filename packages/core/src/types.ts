@@ -273,3 +273,69 @@ export interface ChampionDetailSet {
   };
   readonly details: readonly ChampionDetail[];
 }
+
+/* ------------------------------------------------------------------ */
+/* 配装方案（LCU item sets）                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 配装方案里的一个装备条目。
+ *
+ * 注意 `id` 是**字符串**——这是官方客户端自己写出的格式（实测），
+ * 写成数字可能被静默忽略。
+ */
+export interface ItemSetEntry {
+  readonly id: string;
+  readonly count: number;
+}
+
+/** 配装方案里的一个分块（如「出门装」「三件套」）。 */
+export interface ItemSetBlock {
+  readonly type: string;
+  readonly items: readonly ItemSetEntry[];
+  readonly hideIfSummonerSpell: string;
+  readonly showIfSummonerSpell: string;
+}
+
+/**
+ * 一套配装方案（与 LCU `/lol-item-sets/v1/item-sets/{id}/sets` 的结构一致）。
+ *
+ * 字段来自**客户端自己保存的方案**（实测导出），不是社区记忆，
+ * 因此大小写与取值都可靠。
+ */
+export interface ItemSet {
+  readonly title: string;
+  /** 固定 `custom`（自定义方案）。 */
+  readonly type: string;
+  /** `any` 或具体地图名。 */
+  readonly map: string;
+  /** `any` 或具体模式名。 */
+  readonly mode: string;
+  readonly sortrank: number;
+  /** 固定 `blank`（从空白创建）。 */
+  readonly startedFrom: string;
+  /** 关联英雄（championId 列表）。 */
+  readonly associatedChampions: readonly number[];
+  /**
+   * 关联地图 ID 列表。
+   *
+   * ⚠️ 海克斯乱斗用 **12**（官方 `maps.json` 中名为 "Random Map"）。
+   * 注意它同样被嚎哭深渊使用 —— 该模式下每局随机地图，故官方复用此 ID。
+   * 填错会导致方案在游戏内**静默不出现**。
+   */
+  readonly associatedMaps: readonly number[];
+  readonly blocks: readonly ItemSetBlock[];
+  /** 唯一标识（UUID）。更新既有方案时必须沿用原 uid。 */
+  readonly uid: string;
+  readonly preferredItemSlots: readonly unknown[];
+}
+
+/** 写入配装方案的请求体。 */
+export interface ItemSetPayload {
+  readonly accountId: number;
+  readonly itemSets: readonly ItemSet[];
+  readonly timestamp: number;
+}
+
+/** 海克斯乱斗的官方地图 ID（`maps.json` 中 name = "Random Map"）。 */
+export const BRAWL_MAP_ID = 12;

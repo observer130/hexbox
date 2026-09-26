@@ -99,6 +99,9 @@ importers:
       '@hexbox/core':
         specifier: workspace:*
         version: link:../core
+      '@hexbox/data-store':
+        specifier: workspace:*
+        version: link:../data-store
     devDependencies:
       typescript:
         specifier: ^5.7.2
