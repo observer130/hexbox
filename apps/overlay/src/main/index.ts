@@ -17,7 +17,12 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
-import { LcuClient, detectCredentials, detectPortByListener, isBrawlSession } from '@hexbox/lcu';
+import {
+  LcuClient,
+  detectCredentialsDetailed,
+  detectPortByListener,
+  isBrawlSession,
+} from '@hexbox/lcu';
 import { checkRankingsFreshness, readDataset, readRankings } from '@hexbox/data-store';
 import {
   bestAugmentsForChampion,
@@ -42,6 +47,8 @@ let lastPhase: string | null = null;
 let clickThrough = true;
 /** 凭证探测失败只提示一次，避免每 2s 刷屏。 */
 let warnedNoCreds = false;
+/** 凭证探测失败的详细原因（推送给渲染端，让诊断面板能说清是哪一步失败）。 */
+let credsDetail = '';
 
 /** 排行榜快照与派生的面板数据（启动时算一次，不随轮询重算）。 */
 let rankings: RankingSnapshot | null = null;
@@ -88,6 +95,8 @@ interface OverlayStateMsg {
     /** 针对该英雄的高胜率海克斯。 */
     rows: BoardGroupMsg['rows'];
   };
+  /** 未连接时的探测详情（让用户知道卡在哪一步）。 */
+  credsDetail: string;
 }
 
 /** 推送给渲染端的分组（保持扁平，渲染端无需再做任何计算）。 */
@@ -303,24 +312,40 @@ async function pollOnce(): Promise<void> {
   let picks: OverlayStateMsg['picks'] = [];
 
   if (!client) {
-    const creds = await detectCredentials().catch(() => null);
-    if (creds) {
-      client = new LcuClient(creds);
-      console.log(`[hexbox] LCU 已连接 (port ${creds.port}, via ${creds.source})`);
+    const res = await detectCredentialsDetailed().catch(() => null);
+    if (res?.credentials) {
+      client = new LcuClient(res.credentials);
+      console.log(
+        `[hexbox] LCU 已连接 (port ${res.credentials.port}, ${res.detail})`,
+      );
+      credsDetail = '';
     } else if (!warnedNoCreds) {
       // 凭证探测失败是「悬浮窗永不出现」最常见的原因，必须显式报出来，
       // 否则表现为「程序在跑但什么都不显示」，极难排查。
+      //
+      // 四种原因需要区分对待 —— 笼统说「请用管理员运行」会把用户支到
+      // 错误的排查方向（很多情况下管理员也没用）。
       warnedNoCreds = true;
-      // 顺带探一下端口，区分「客户端没开」和「客户端开了但读不到凭证」
-      const alive = await detectPortByListener()
-        .then((cs) => cs.length > 0)
-        .catch(() => false);
-      console.warn(
-        alive
-          ? '[hexbox] 检测到英雄联盟客户端，但读不到 LCU 凭证（命令行/lockfile 均不可读）。' +
-              '\n         悬浮窗需要**以管理员身份运行**才能读到令牌 —— 请用管理员权限重开。'
-          : '[hexbox] 未检测到英雄联盟客户端；请先启动客户端，并以管理员身份运行本工具。',
-      );
+      const running = res?.clientRunning ?? false;
+      const detail = res?.detail ?? '探测未返回结果';
+      credsDetail = detail;
+      const hint = running
+        ? [
+            `[hexbox] 检测到英雄联盟客户端，但读不到 LCU 凭证。`,
+            `         探测详情: ${detail}`,
+            '         排查顺序（逐项尝试，不必全部满足）：',
+            '           1. 确认本工具以**管理员身份**运行（否则读不到进程命令行）',
+            '           2. 若已用管理员仍失败：客户端可能是 WeGame 启动，',
+            '              其 lockfile 常为 0 字节 —— 属已知现象，',
+            '              此时令牌只能从进程命令行获取',
+            '           3. 完全退出客户端（含 WeGame 托盘）后重启，再启动本工具',
+          ].join('\n')
+        : [
+            '[hexbox] 未检测到英雄联盟客户端。',
+            `         探测详情: ${detail}`,
+            '         请先启动客户端（含 WeGame）进入大厅，再启动本工具。',
+          ].join('\n');
+      console.warn(hint);
     }
   }
 
@@ -408,6 +433,7 @@ async function pollOnce(): Promise<void> {
       championName: myChampionId > 0 ? championName(myChampionId) : '',
       rows: myChampionId > 0 ? augmentAdviceFor(myChampionId) : [],
     },
+    credsDetail,
   };
 
   if (win && !win.isDestroyed()) {

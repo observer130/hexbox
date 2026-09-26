@@ -35,6 +35,7 @@ interface OverlayStateMsg {
   board: BoardGroup[];
   rankMeta: { available: boolean; dataDate: string; stale: boolean };
   advice: { championName: string; rows: BoardRow[] };
+  credsDetail: string;
 }
 
 interface OverlayApi {
@@ -150,18 +151,25 @@ function panel(header: string, tag: string, body: string, foot: string): string 
 }
 
 /** 离线诊断面板（连不上 LCU 时显示，避免"什么都没有"的困惑）。 */
-function offlinePanel(): string {
+function offlinePanel(s: OverlayStateMsg): string {
+  const detail = s.credsDetail
+    ? `<div class="li dim">探测详情: ${esc(s.credsDetail)}</div>`
+    : '';
   return panel(
     '未连接',
     '未连接',
     `
       <div class="notice">读不到 LCU 凭证，无法获取对局状态。</div>
-      <div class="li dim">· 客户端未启动，或</div>
-      <div class="li dim">· 本工具未以<b>管理员身份</b>运行</div>
+      ${detail}
       <div class="sep"></div>
       <div class="k">令牌来源（二选一）：</div>
       <div class="li dim">· 进程命令行 —— 需管理员权限</div>
       <div class="li dim">· 安装目录 lockfile</div>
+      <div class="sep"></div>
+      <div class="k">排查顺序</div>
+      <div class="li dim">1. 确认以<b>管理员身份</b>运行本工具</div>
+      <div class="li dim">2. 国服 WeGame 的 lockfile 常为 0 字节，属已知现象</div>
+      <div class="li dim">3. 完全退出客户端后重启，再启动本工具</div>
     `,
     '请关闭本窗口，右键以「管理员身份运行」重新启动。',
   );
@@ -169,7 +177,7 @@ function offlinePanel(): string {
 
 function render(s: OverlayStateMsg): void {
   if (!s.connected) {
-    app.innerHTML = offlinePanel();
+    app.innerHTML = offlinePanel(s);
     return;
   }
 

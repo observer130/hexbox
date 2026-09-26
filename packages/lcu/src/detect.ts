@@ -143,23 +143,52 @@ export async function detectPortByListener(): Promise<Array<{ port: number; pid:
  *
  * 判定方法：无凭证请求 `/lol-summoner/v1/current-summoner`，
  * 返回 **401** 即说明是 LCU（鉴权失败但服务存在）。
+ *
+ * ⚠️ 必须自行关闭 TLS 校验：LCU 用自签证书，Node 的 fetch 会直接抛
+ * `SELF_SIGNED_CERT_IN_CHAIN`（表现为 `TypeError: fetch failed`），
+ * 于是**即使端口正确也判定不出来**。不能依赖调用方预先设置
+ * `NODE_TLS_REJECT_UNAUTHORIZED` —— 那是全局副作用，设置时机不对或被
+ * 其它代码重置就会静默失效（本项目真实踩过）。因此在函数内临时设置并还原。
  */
 export async function findLcuPort(
   candidates: readonly { port: number; pid: number }[],
 ): Promise<{ port: number; pid: number } | null> {
-  for (const c of candidates) {
-    try {
-      const res = await fetch(
-        `https://127.0.0.1:${c.port}/lol-summoner/v1/current-summoner`,
-        { signal: AbortSignal.timeout(2500) },
-      );
-      // 401 = 服务存在但缺凭证 → 就是 LCU
-      if (res.status === 401) return c;
-    } catch {
-      // 超时/证书错误等 → 不是 LCU，或不可达，继续试下一个
+  return await withInsecureTls(async () => {
+    for (const c of candidates) {
+      try {
+        const res = await fetch(
+          `https://127.0.0.1:${c.port}/lol-summoner/v1/current-summoner`,
+          { signal: AbortSignal.timeout(2500) },
+        );
+        // 401 = 服务存在但缺凭证 → 就是 LCU
+        if (res.status === 401) return c;
+      } catch {
+        // 超时/不可达 → 继续试下一个
+      }
     }
+    return null;
+  });
+}
+
+/**
+ * 在回调执行期间临时关闭 TLS 校验，结束后**无论成败都还原**。
+ *
+ * 为什么不用 undici.Agent：`undici` 在本仓库不是可解析的依赖
+ * （Node 内置，但 `import 'undici'` 会 ERR_MODULE_NOT_FOUND），
+ * 为一个探测函数引入新依赖不值得。环境变量方案零依赖、行为一致。
+ *
+ * 已知取舍：这是进程级开关，回调期间并发的 HTTPS 请求也会被一并豁免。
+ * 本函数只用于探测本机 LCU 端口，调用点集中，风险可接受。
+ */
+async function withInsecureTls<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = process.env['NODE_TLS_REJECT_UNAUTHORIZED'];
+  process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
+  try {
+    return await fn();
+  } finally {
+    if (prev === undefined) delete process.env['NODE_TLS_REJECT_UNAUTHORIZED'];
+    else process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = prev;
   }
-  return null;
 }
 
 /**
@@ -271,20 +300,95 @@ export async function findValidLockfile(
 }
 
 /**
+ * 常见安装位置（国服 WeGame / 国际服）——用于 lockfile 自动发现。
+ *
+ * 国服实测路径形如 `E:\Games\WeGameApps\英雄联盟\LeagueClient\lockfile`，
+ * 盘符与目录名都不可假定，因此这里只提供"可能的根"，真正定位靠递归查找。
+ */
+function commonInstallRoots(): string[] {
+  const roots: string[] = [];
+  for (const drive of ['C:', 'D:', 'E:', 'F:']) {
+    roots.push(
+      `${drive}\\Program Files\\Tencent\\LeagueofLegends`,
+      `${drive}\\Program Files (x86)\\Tencent\\LeagueofLegends`,
+      `${drive}\\Games\\WeGameApps\\英雄联盟`,
+      `${drive}\\WeGameApps\\英雄联盟`,
+      `${drive}\\Tencent\\LeagueofLegends`,
+      `${drive}\\Riot Games\\League of Legends`,
+    );
+  }
+  return roots;
+}
+
+/** 探测结果：凭证 + 诊断信息（UI/日志据此给出可操作提示）。 */
+export interface DetectResult {
+  readonly credentials: LcuCredentials | null;
+  /** 是否检测到客户端在运行（端口扫描有结果即为真）。 */
+  readonly clientRunning: boolean;
+  /** 探测阶段说明，供诊断展示。 */
+  readonly detail: string;
+}
+
+/**
+ * 完整探测：命令行 → lockfile（显式目录 + 自动发现）→ 端口扫描。
+ *
+ * 返回**诊断信息**而不只是 null —— 「读不到凭证」有四种完全不同的原因
+ * （客户端没开 / 命令行读不到 / lockfile 为空 / 端口不对），
+ * 不给用户区分就只能是"程序在跑但什么都不显示"，极难排查。
+ *
+ * 注意：端口扫描只能定位端口，**拿不到 token**（token 只在命令行与
+ * lockfile 里）。因此它不产出凭证，只用于区分"客户端没开"与"开了但读不到"。
+ */
+export async function detectCredentialsDetailed(
+  installDirs: readonly string[] = [],
+): Promise<DetectResult> {
+  // 1) 进程命令行（最可靠，但需管理员）
+  const fromCmd = await detectFromCmdline();
+  if (fromCmd) {
+    return { credentials: fromCmd, clientRunning: true, detail: '来自进程命令行' };
+  }
+
+  // 2) 显式给定的安装目录
+  for (const dir of installDirs) {
+    const fromLock = await detectFromLockfile(dir);
+    if (fromLock) {
+      return { credentials: fromLock, clientRunning: true, detail: `来自 lockfile: ${dir}` };
+    }
+  }
+
+  // 3) 自动发现 lockfile（覆盖国服 WeGame 的非常规路径）
+  const auto = await findValidLockfile(commonInstallRoots());
+  if (auto) {
+    return {
+      credentials: auto,
+      clientRunning: true,
+      detail: `来自 lockfile: ${auto.lockfilePath ?? '(自动发现)'}`,
+    };
+  }
+
+  // 4) 端口扫描：仅用于诊断（无法取得 token）
+  const ports = await detectPortByListener();
+  if (ports.length === 0) {
+    return { credentials: null, clientRunning: false, detail: '未检测到客户端进程' };
+  }
+
+  const lcu = await findLcuPort(ports);
+  const detail = lcu
+    ? `检测到客户端（LCU 端口 ${lcu.port}），但命令行不可读、lockfile 无有效内容`
+    : `检测到客户端进程，但未找到 LCU 服务端口（候选: ${ports.map((p) => p.port).join(', ')}）`;
+  return { credentials: null, clientRunning: true, detail };
+}
+
+/**
  * 探测 LCU 凭证：先试进程命令行（无需知道安装路径），
- * 失败则回退到 lockfile（需提供安装目录）。
+ * 失败则回退到 lockfile（显式目录 → 自动发现）。
+ *
+ * 需要诊断信息时请用 `detectCredentialsDetailed()`。
  */
 export async function detectCredentials(
   installDirs: readonly string[] = [],
 ): Promise<LcuCredentials | null> {
-  const fromCmd = await detectFromCmdline();
-  if (fromCmd) return fromCmd;
-
-  for (const dir of installDirs) {
-    const fromLock = await detectFromLockfile(dir);
-    if (fromLock) return fromLock;
-  }
-  return null;
+  return (await detectCredentialsDetailed(installDirs)).credentials;
 }
 
 /** 生成 Basic 认证头（用户名固定为 `riot`）。 */

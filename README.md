@@ -55,9 +55,23 @@ pnpm dev:overlay
 
 `node --experimental-strip-types packages/lcu/src/cli.ts --install-dir <安装目录>`
 
-- 凭证：进程命令行（需管理员）→ 递归查找有效 lockfile → 监听端口探测（返回 401 判定）
+- 凭证来源：进程命令行（需管理员）→ 显式安装目录的 lockfile → 自动发现的 lockfile
+- 端口探测**只用于诊断**：它能定位 LCU 端口，但拿不到 token
+  （token 只在命令行与 lockfile 里），因此不产出凭证
 - 国服（WeGame）实测可用：`LeagueClientUx.exe` 命令行含 `--app-port` / `--remoting-auth-token`
-- 国服特有现象：`LeagueClient\lockfile` 为 0 字节，lockfile 路径不可依赖
+- 国服特有现象：`LeagueClient\lockfile` 为 **0 字节**（实测
+  `E:\Games\WeGameApps\英雄联盟\LeagueClient\lockfile`），lockfile 路径不可依赖
+
+> **两个已踩过的坑（不要重犯）**
+>
+> 1. **探测请求必须自行豁免 TLS**。LCU 用自签证书，Node 的 `fetch` 会抛
+>    `SELF_SIGNED_CERT_IN_CHAIN`（表现为 `TypeError: fetch failed`）。
+>    若不豁免，`findLcuPort` 会**即使端口完全正确也恒返回 null**，
+>    对外表现为"检测到客户端却读不到凭证"。且不要依赖调用方预先设置
+>    `NODE_TLS_REJECT_UNAUTHORIZED` —— 全局副作用，时机不对就静默失效。
+>    现在的做法是在 `withInsecureTls()` 内临时设置并**保证还原**。
+> 2. **端口扫描不能替代凭证获取**。只监听端口没有用：`LeagueClient.exe`
+>    会监听多个端口，且其中多数不提供 LCU REST。
 
 ## 常用命令
 
