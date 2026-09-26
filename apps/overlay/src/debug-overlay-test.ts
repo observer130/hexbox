@@ -2,10 +2,11 @@
 /**
  * S2 覆盖层渲染自测（不需要游戏/选人）
  *
- * 创建与主进程同配置的覆盖窗口 → 加载 overlay.html →
- * 推送假标签 → capturePage 截图 → debug/overlay-test.png
- *
- * 用途：验收反馈"完全没显示"时,区分「渲染端坏了」还是「主进程没推送」。
+ * 两种模式:
+ *   默认        —— 截屏验证(无人值守,输出 debug/overlay-test.png)
+ *   VISIBLE=1  —— 窗口真实显示 12 秒,肉眼确认透明窗口能否显示。
+ *                排查"覆盖层完全不可见": 若此模式也看不见,说明
+ *                窗口/透明/置顶配置在用户机器上失效,与识别无关。
  */
 
 import { app, BrowserWindow, screen } from 'electron';
@@ -15,6 +16,7 @@ import { join, dirname } from 'node:path';
 const OUT_DIR = join(dirname(__dirname), '..', '..', 'debug');
 // __dirname = apps/overlay/dist → renderer 在 dist/renderer
 const RENDERER_DIR = join(__dirname, 'renderer');
+const VISIBLE = process.env['OVERLAY_TEST_VISIBLE'] === '1';
 
 app.whenReady().then(async () => {
   mkdirSync(OUT_DIR, { recursive: true });
@@ -23,8 +25,8 @@ app.whenReady().then(async () => {
   const win = new BrowserWindow({
     x: display.workArea.x,
     y: display.workArea.y,
-    width: 1200,
-    height: 800,
+    width: display.workArea.width,
+    height: display.workArea.height,
     transparent: true,
     frame: false,
     alwaysOnTop: true,
@@ -38,6 +40,8 @@ app.whenReady().then(async () => {
       sandbox: false,
     },
   });
+  win.setAlwaysOnTop(true, 'screen-saver');
+  win.setIgnoreMouseEvents(true, { forward: true });
 
   const errors: string[] = [];
   win.webContents.on('console-message', (_e, level, message) => {
@@ -54,12 +58,22 @@ app.whenReady().then(async () => {
   await new Promise((r) => setTimeout(r, 300));
 
   // 模拟主进程推送(直接走 ipcMain 通道的等价物: 用 webContents.send)
+  // 标签放在屏幕四角+中部,肉眼模式一眼可见覆盖窗口是否生效
+  const W = display.workArea.width;
+  const H = display.workArea.height;
   const fakeLabels = [
-    { x: 300, y: 300, w: 240, h: 34, text: '55.5%', sub: '测试英雄A', hasData: true, championId: 1 },
-    { x: 600, y: 300, w: 240, h: 34, text: '暂无数据', sub: '测试英雄B', hasData: false, championId: 2 },
+    { x: W * 0.4, y: H * 0.45, w: 240, h: 34, text: '55.5%', sub: '测试英雄A', hasData: true, championId: 1 },
+    { x: W * 0.4, y: H * 0.55, w: 240, h: 34, text: '暂无数据', sub: '测试英雄B', hasData: false, championId: 2 },
+    { x: 24, y: 24, w: 240, h: 34, text: '左上角', sub: '可见性标记', hasData: true, championId: 3 },
+    { x: W - 264, y: H - 58, w: 240, h: 34, text: '右下角', sub: '可见性标记', hasData: true, championId: 4 },
   ];
   win.webContents.send('overlay:vision', { active: true, labels: fakeLabels, diag: 'self-test' });
   await new Promise((r) => setTimeout(r, 500));
+
+  if (VISIBLE) {
+    win.showInactive();
+    await new Promise((r) => setTimeout(r, 12_000));
+  }
 
   const state = await win.webContents.executeJavaScript(
     `(() => ({
