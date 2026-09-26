@@ -99,9 +99,13 @@ pnpm --filter @hexbox/web typecheck
 Tests use Node's built-in runner: `node --experimental-strip-types --test ...`.
 **Make the suite green before committing.** New behavior should include tests.
 
-Current coverage: 60 tests — `core` 3 / `lcu` 8 / `provider-communitydragon` 12 /
+Current coverage: 77 tests — `core` 20 / `lcu` 8 / `provider-communitydragon` 12 /
 `provider-tencent` 16 / `data-store` 14 / `data-cli` 7. CI
 (`.github/workflows/ci.yml`) runs `typecheck` → `test` → `build` on every push/PR.
+
+> **The overlay cannot be tested in CI** (needs admin + a real desktop session).
+> Keep its logic in pure functions under `packages/core` where tests can reach it —
+> see `core/src/rankboard.ts` (join / grouping / per-champion advice).
 
 > **Do not write date-dependent tests.** Candidate stat dates are generated from the
 > real current date, so hardcoding one (e.g. `20260924` as "T-1") makes the test go

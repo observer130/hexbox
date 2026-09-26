@@ -18,8 +18,16 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { LcuClient, detectCredentials, detectPortByListener, isBrawlSession } from '@hexbox/lcu';
-import { readDataset } from '@hexbox/data-store';
-import { type Dataset } from '@hexbox/core';
+import { checkRankingsFreshness, readDataset, readRankings } from '@hexbox/data-store';
+import {
+  bestAugmentsForChampion,
+  buildRankBoard,
+  hasRankingData,
+  RARITY_LABEL,
+  type Dataset,
+  type RarityGroup,
+  type RankingSnapshot,
+} from '@hexbox/core';
 
 const execFileAsync = promisify(execFile);
 
@@ -35,6 +43,15 @@ let clickThrough = true;
 /** 凭证探测失败只提示一次，避免每 2s 刷屏。 */
 let warnedNoCreds = false;
 
+/** 排行榜快照与派生的面板数据（启动时算一次，不随轮询重算）。 */
+let rankings: RankingSnapshot | null = null;
+/** 按稀有度分组的强度榜（已在启动时 join 好图鉴）。 */
+let rankBoard: readonly RarityGroup[] = [];
+/** 排行榜是否过期（用于标注，不阻断展示）。 */
+let rankingsStale = false;
+/** 本次选人中「我」选的英雄（0 = 未知），用于给出针对性建议。 */
+let myChampionId = 0;
+
 const POLL_MS = 2000;
 
 /** 推送给渲染端的状态（渲染端据此渲染，不做任何 IO）。 */
@@ -48,6 +65,45 @@ interface OverlayStateMsg {
   /** 选人阶段我方已选英雄（pregame-visible，政策允许）。 */
   picks: Array<{ championId: number; name: string }>;
   clickThrough: boolean;
+  /** 强度榜（按稀有度分组，已截断到一屏可读的量）。 */
+  board: BoardGroupMsg[];
+  /** 排行榜元信息，用于在 UI 上标注来源与统计日期。 */
+  rankMeta: {
+    /** 是否有可用排行数据。 */
+    available: boolean;
+    /** 上游统计日期（YYYYMMDD）。 */
+    dataDate: string;
+    /** 数据是否已过期（仍展示，但需标注）。 */
+    stale: boolean;
+  };
+  /**
+   * 「我」当前英雄的适配海克斯。
+   *
+   * 注意命名：这是**基于官方统计的推荐**，不是「你被提供了什么」——
+   * 本项目不识别局内三选一（那需要截屏 + OCR，属后续计划）。
+   */
+  advice: {
+    /** 我的英雄名（空串 = 尚未确定）。 */
+    championName: string;
+    /** 针对该英雄的高胜率海克斯。 */
+    rows: BoardGroupMsg['rows'];
+  };
+}
+
+/** 推送给渲染端的分组（保持扁平，渲染端无需再做任何计算）。 */
+interface BoardGroupMsg {
+  rarity: string;
+  label: string;
+  rows: Array<{
+    name: string;
+    icon: string;
+    winRate: number;
+    pickRate: number;
+    winRankChange: number;
+    bestHeroes: string[];
+    /** 是否命中图鉴（false 时 UI 可标示为「仅统计」）。 */
+    hasDef: boolean;
+  }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +208,84 @@ async function loadDataset(): Promise<void> {
     console.warn('[hexbox] 数据集读取失败:', e instanceof Error ? e.message : e);
     dataset = null;
   }
+
+  // 排行榜独立加载：失败不影响图鉴（两者本就独立落盘）
+  await loadRankings(dir);
+}
+
+/**
+ * 加载排行榜并预先算好强度榜。
+ *
+ * 在启动时算一次而不是每次轮询都算：榜单是静态数据（每日更新），
+ * 每 2s 重算 211 条纯属浪费。
+ */
+async function loadRankings(dir: string): Promise<void> {
+  try {
+    rankings = await readRankings(dir);
+  } catch (e) {
+    console.warn('[hexbox] 排行榜读取失败:', e instanceof Error ? e.message : e);
+    rankings = null;
+  }
+
+  if (!hasRankingData(rankings)) {
+    rankBoard = [];
+    rankingsStale = false;
+    console.warn(`[hexbox] 排行榜无可用数据 (${dir})，请运行 pnpm sync`);
+    return;
+  }
+
+  const freshness = checkRankingsFreshness(rankings);
+  rankingsStale = freshness.stale;
+
+  rankBoard = buildRankBoard({
+    rankings,
+    // ID 桥：排行榜用国服数字 ID，必须用国服图鉴 join
+    hextechs: dataset?.hextechs ?? [],
+    champions: dataset?.champions ?? [],
+    perGroup: 6,
+  });
+
+  const total = rankBoard.reduce((n, g) => n + g.rows.length, 0);
+  console.log(
+    `[hexbox] 排行榜已加载: ${total} 条 / ${rankBoard.length} 组  ` +
+      `统计日期 ${rankings?.meta.dataDate || '未知'}${rankingsStale ? '  ⚠ 已过期' : ''}`,
+  );
+}
+
+/** 把强度榜转成渲染端可直接用的扁平结构。 */
+function boardMsg(): BoardGroupMsg[] {
+  return rankBoard.map((g) => ({
+    rarity: g.rarity,
+    label: RARITY_LABEL[g.rarity],
+    rows: g.rows.map((r) => ({
+      name: r.name,
+      icon: r.icon,
+      winRate: r.winRate,
+      pickRate: r.pickRate,
+      winRankChange: r.winRankChange,
+      bestHeroes: [...r.bestHeroes],
+      hasDef: r.hasDef,
+    })),
+  }));
+}
+
+/** 当前对局英雄的适配海克斯（无数据时返回空数组）。 */
+function augmentAdviceFor(championId: number): BoardGroupMsg['rows'] {
+  if (!hasRankingData(rankings)) return [];
+  return bestAugmentsForChampion(championId, {
+    rankings,
+    hextechs: dataset?.hextechs ?? [],
+    champions: dataset?.champions ?? [],
+    limit: 5,
+  }).map((r) => ({
+    name: r.name,
+    icon: r.icon,
+    winRate: r.winRate,
+    pickRate: r.pickRate,
+    winRankChange: r.winRankChange,
+    bestHeroes: [...r.bestHeroes],
+    hasDef: r.hasDef,
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -210,11 +344,28 @@ async function pollOnce(): Promise<void> {
     // 选人阶段：读取我方已选英雄（pregame-visible）
     if (phase === 'ChampSelect' && client) {
       const cs = await client
-        .get<{ myTeam?: Array<{ championId?: number }> }>('/lol-champ-select/v1/session')
+        .get<{
+          myTeam?: Array<{ championId?: number; cellId?: number; summonerId?: number }>;
+          localPlayerCellId?: number;
+        }>('/lol-champ-select/v1/session')
         .catch(() => null);
-      picks = (cs?.myTeam ?? [])
+      const team = cs?.myTeam ?? [];
+      picks = team
         .filter((m) => typeof m.championId === 'number' && m.championId > 0)
         .map((m) => ({ championId: m.championId as number, name: championName(m.championId as number) }));
+
+      // 找出「我」选的英雄：优先按 localPlayerCellId 定位。
+      // 拿不到就退回「我方唯一的已选英雄」——选人早期往往只有自己选了。
+      const me = team.find((m) => m.cellId === cs?.localPlayerCellId);
+      const myId =
+        typeof me?.championId === 'number' && me.championId > 0
+          ? me.championId
+          : picks.length === 1
+            ? picks[0]!.championId
+            : 0;
+      myChampionId = myId;
+    } else {
+      myChampionId = 0;
     }
   }
 
@@ -247,6 +398,16 @@ async function pollOnce(): Promise<void> {
     augCount: dataset?.augments.length ?? 0,
     picks,
     clickThrough,
+    board: boardMsg(),
+    rankMeta: {
+      available: hasRankingData(rankings),
+      dataDate: rankings?.meta.dataDate ?? '',
+      stale: rankingsStale,
+    },
+    advice: {
+      championName: myChampionId > 0 ? championName(myChampionId) : '',
+      rows: myChampionId > 0 ? augmentAdviceFor(myChampionId) : [],
+    },
   };
 
   if (win && !win.isDestroyed()) {
