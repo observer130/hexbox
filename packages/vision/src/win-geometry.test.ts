@@ -51,7 +51,7 @@ test('captureScale：截屏宽为 0 时按 1.0 兜底', () => {
 test('snapshotKind：截屏与显示器纵横比一致、窗口同比但未占满 → display（联合判据）', () => {
   // 三方同比但窗口只占显示器 83%(2000/2400) → 联合判据归 display
   assert.equal(
-    snapshotKind({ width: 4800, height: 2700 }, { width: 2400, height: 1350 }, { width: 2000, height: 1125 }),
+    snapshotKind({ width: 4800, height: 2700 }, { width: 2400, height: 1350 }, { width: 2000, height: 1125 }, 2000 / 2400),
     'display',
   );
 });
@@ -66,18 +66,18 @@ test('snapshotKind：截屏与显示器同比而窗口不同比 → display', ()
 });
 
 test('snapshotKind：三方同比且窗口未占满显示器 → display（S2 真机退化场景）', () => {
-  // 真机 S2 第二轮验收: 全部 16:9,窗口 1600×900 逻辑占显示器 2400×1350 的 67%
+  // 真机 S2 第二轮验收: 全部 16:9,窗口逻辑 1600 占显示器逻辑 2400 的 67%
   // → desktopCapturer 返回的是显示器快照（含窗口外桌面）,
   //   按窗口快照处理会让标签偏移一个窗口宽度
   assert.equal(
-    snapshotKind({ width: 3413, height: 1920 }, { width: 3000, height: 1688 }, { width: 1600, height: 900 }),
+    snapshotKind({ width: 3413, height: 1920 }, { width: 3000, height: 1688 }, { width: 1600, height: 900 }, 1600 / 2400),
     'display',
   );
 });
 
 test('snapshotKind：窗口占满显示器（>0.9）→ window（等价直通）', () => {
   assert.equal(
-    snapshotKind({ width: 3440, height: 1440 }, { width: 3440, height: 1440 }, { width: 3440, height: 1440 }),
+    snapshotKind({ width: 3440, height: 1440 }, { width: 3440, height: 1440 }, { width: 3440, height: 1440 }, 1),
     'window',
   );
 });
@@ -124,14 +124,15 @@ test('makeScreenGeometry：显示器快照形态下标签落在窗口内（S2 �
 });
 
 test('makeScreenGeometry：窗口快照形态下无偏移直通', () => {
-  // S1 场景变体:截屏 3413×1920 与窗口同比,且窗口占满显示器（无边框全屏）
-  // → snapshotKind 判 window,截屏即窗口内容,无偏移
+  // 窗口与显示器同比且窗口占满显示器物理屏 → snapshotKind 判 window,
+  // nw=1 无偏移,截屏内归一化直通窗口逻辑坐标
+  // （GetWindowRect 直出逻辑 2560×1440;显示器物理 3200×1800,share=1）
   const display = {
-    bounds: { x: 0, y: 0, width: 2730, height: 1536 },
+    bounds: { x: 0, y: 0, width: 2560, height: 1440 },
     scaleFactor: 1.25,
-    workArea: { x: 0, y: 0, width: 2730, height: 1536 },
+    workArea: { x: 0, y: 0, width: 2560, height: 1440 },
   };
-  const winPhysical = { x: 0, y: 0, width: 3413, height: 1920 };
+  const winPhysical = { x: 0, y: 0, width: 2560, height: 1440 };
   const { geo, kind } = makeScreenGeometry(
     { width: 3413, height: 1920 },
     winPhysical,
@@ -139,5 +140,6 @@ test('makeScreenGeometry：窗口快照形态下无偏移直通', () => {
   );
   assert.equal(kind, 'window');
   assert.ok(Math.abs(geo.windowX - 0) < 1e-6);
-  assert.ok(Math.abs(geo.windowWidth - 3413 / 1.25) < 1e-6);
+  // nw = 2560/2560 = 1 → windowWidth = 2560（窗口逻辑宽）
+  assert.ok(Math.abs(geo.windowWidth - 2560) < 1e-6, `windowWidth=${geo.windowWidth}`);
 });
