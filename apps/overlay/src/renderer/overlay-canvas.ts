@@ -86,6 +86,11 @@ function draw(msg: VisionMsg): void {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (!msg.active) return;
 
+  console.log(
+    `[overlay-canvas] draw labels=${msg.labels.length} ` +
+      `canvas=${canvas.width}x${canvas.height}`,
+  );
+
   for (const l of msg.labels) {
     const accent = l.hasData ? '#4ade80' : '#8b96ad';
     // 底

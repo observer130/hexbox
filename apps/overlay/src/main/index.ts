@@ -539,19 +539,25 @@ function createWindow(): void {
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   win.setIgnoreMouseEvents(clickThrough, { forward: true });
 
+  // 路径口径（S2 真机教训,勿改）:
+  //   esbuild outbase=src → __dirname = dist/main
+  //   preload   = dist/preload/index.cjs  = join(__dirname, '..', 'preload')
+  //   renderer  = dist/renderer/*.html    = join(__dirname, '..', 'renderer')
   void win.loadFile(join(__dirname, '..', 'renderer', 'index.html'));
 }
 
 /**
  * preload 绝对路径。
  *
- * ⚠️ esbuild 以 outbase=src 打包,产物是 dist/main/index.cjs 与
- * dist/preload/index.cjs —— __dirname = dist/main,向上一级即 dist。
- * 此前误写 join(__dirname, '..', 'preload'),解析到 apps/overlay/preload
- * (不存在) → "Unable to load preload script" → window.overlay 未定义 →
- * 覆盖层与侧边窗都收不到任何推送（真机表现为"完全没有显示"）。
+ * ⚠️ dist 结构（S2 教训,勿改）: esbuild outbase=src 打包后
+ * __dirname = dist/main,因此:
+ *   preload  = dist/preload  = join(__dirname, '..', 'preload')
+ *   renderer = dist/renderer = join(__dirname, '..', 'renderer')
+ * 任何一层写成 join(__dirname, 'preload') 都会解析到
+ * dist/main/preload（不存在）→ "Unable to load preload script" →
+ * window.overlay 未定义 → 两个窗口都收不到推送（真机踩过两次）。
  */
-const PRELOAD_PATH = join(__dirname, 'preload', 'index.cjs');
+const PRELOAD_PATH = join(__dirname, '..', 'preload', 'index.cjs');
 
 /**
  * S2 覆盖窗口：全屏透明、点击穿透、绝不抢焦点。
@@ -589,6 +595,7 @@ function createOverlayWindow(): void {
   overlayWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   // 覆盖层永远穿透 —— 它只展示,不接受任何输入
   overlayWin.setIgnoreMouseEvents(true, { forward: true });
+  attachOverlayDiagnostics(overlayWin);
   void overlayWin.loadFile(join(__dirname, '..', 'renderer', 'overlay.html'));
 }
 
@@ -629,6 +636,24 @@ function pushOverlayVision(msg: VisionOverlayMsg, display: Electron.Display): vo
         ? ` 首标签@(${msg.labels[0].x.toFixed(0)},${msg.labels[0].y.toFixed(0)}) ${msg.labels[0].text}`
         : '') +
       (msg.diag ? ` [${msg.diag}]` : ''),
+  );
+}
+
+/**
+ * 把覆盖窗口渲染端的 console / 加载错误转发到主进程终端。
+ * 渲染端的错误（preload 失败、JS 异常）默认不可见 —— 这层转发
+ * 是"覆盖层空白"类问题的唯一观察窗口（真机教训）。
+ */
+function attachOverlayDiagnostics(win: BrowserWindow): void {
+  const fwd = (label: string, text: string): void => {
+    if (text.includes('Electron Security Warning')) return; // 噪音过滤
+    console.log(`[overlay:renderer] ${label}: ${text}`);
+  };
+  win.webContents.on('console-message', (_e, _level, message) => fwd('console', message));
+  win.webContents.on('preload-error', (_e, path, err) => fwd('preload-error', `${path}: ${err}`));
+  win.webContents.on('did-fail-load', (_e, code, desc) => fwd('did-fail-load', `${code} ${desc}`));
+  win.webContents.on('render-process-gone', (_e, details) =>
+    fwd('render-process-gone', details.reason),
   );
 }
 
