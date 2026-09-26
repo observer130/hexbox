@@ -17,6 +17,7 @@
 
 import { resolve } from 'node:path';
 import { stat } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
 
 import {
   checkFreshness,
@@ -192,7 +193,30 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err: unknown) => {
-  console.error('未捕获错误:', err);
-  process.exitCode = 1;
-});
+/**
+ * 仅在**直接运行本文件**时执行 CLI。
+ *
+ * 不能无条件调用 main()：那样任何 `import`（包括单元测试）
+ * 都会立刻跑一遍 CLI、打印帮助并设置 process.exitCode，
+ * 使得本文件里的纯函数（如 mergeDatasets）无法被测试。
+ *
+ * 用 `import.meta.url` 与 argv[1] 比对实现「入口保护」，
+ * 等价于 Python 的 `if __name__ == '__main__'`。
+ */
+function isDirectRun(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return import.meta.url === pathToFileURL(entry).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectRun()) {
+  main().catch((err: unknown) => {
+    console.error('未捕获错误:', err);
+    process.exitCode = 1;
+  });
+}
+

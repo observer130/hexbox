@@ -1,0 +1,57 @@
+# CI：三道闸门
+#
+# 目的（源自 docs/ROADMAP.md P0-T4）：
+#   1. 防「时间炸弹测试」类回归再次悄悄溜进主干 ——
+#      这类缺陷平时是绿的，只在特定日期附近爆红。
+#   2. 保证 test / typecheck / build 三项在任何提交上都成立。
+#
+# 说明：
+#   - 悬浮窗（apps/overlay）**不在 CI 中运行**：它需要管理员权限 + 真实桌面会话，
+#     无法在 headless runner 上启动。这里只做它的 typecheck 与 build（打包）。
+#   - `pnpm sync` 不在此运行：数据目录是 gitignored 的生成物，
+#     且 CI 不应依赖外部上游（CommunityDragon / 腾讯）的可用性。
+
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的新推送取消进行中的旧任务
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: test / typecheck / build
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 类型检查
+        run: pnpm typecheck
+
+      - name: 单元测试
+        run: pnpm test
+
+      - name: 构建
+        run: pnpm build

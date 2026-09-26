@@ -123,14 +123,30 @@ const firstCandidate = Array.from({ length: 5 }, (_, i) =>
 
 ## 五、开发路线
 
-### P0 — 收口与固化（建议先做，成本低）
+### P0 — 收口与固化 ✅ **已完成**
 
-| # | 任务 | 理由 |
+| # | 任务 | 状态 |
 |---|---|---|
-| T1 | 提交当前改动（本次修复 + 文档重写） | 工作区有 16 个文件未提交 |
-| T2 | 给 `provider-communitydragon` 补测试 | 唯一的**零测试**数据源，且含 `buildModeIndex` 归一化逻辑（易错）|
-| T3 | 给 `data-store` / `data-cli` 补测试 | 原子写、`mergeDatasets`、新鲜度判定均无覆盖 |
-| T4 | CI 化：`pnpm test` + `typecheck` + `build` | 防时间炸弹类回归再次悄悄溜进主干 |
+| T1 | 提交既有改动（日期回退修复 + 文档重写） | ✅ commit `3e289ed` |
+| T2 | 给 `provider-communitydragon` 补测试 | ✅ 12 项：`buildModeIndex` 归一化、规范化、provider 加载、URL 布局、错误路径 |
+| T3 | 给 `data-store` / `data-cli` 补测试 | ✅ 14 + 7 项：原子写、损坏检测、新鲜度阈值、`mergeDatasets` |
+| T4 | CI 化：`test` + `typecheck` + `build` | ✅ `.github/workflows/ci.yml`（windows-latest）|
+
+**P0 执行附带的两项改进：**
+
+1. **`cli.ts` 入口保护**。`main()` 原先是无条件调用的，导致任何 `import`
+   （包括单元测试）都会立刻跑一遍 CLI、打印帮助并设置 `process.exitCode`——
+   `mergeDatasets` 因此根本无法测试。已加 `isDirectRun()` 守卫
+   （`import.meta.url` 比对 `process.argv[1]`，等价于 Python 的
+   `if __name__ == '__main__'`），两条路径均验证通过：
+   `import` 无副作用、`pnpm sync` / `status` 照常工作。
+
+2. **`mergeDatasets` 的已知边界已钉成显式契约**。
+   "只合并 `hextechs`" 这一行为现由测试固定：将来若新增第二个需要合并的字段，
+   该测试会失败并提醒扩展，而不是静默丢数据。
+
+**测试规模变化：24 → 60 项**（`core` 3 / `lcu` 8 / `cdragon` 12 /
+`tencent` 16 / `data-store` 14 / `data-cli` 7），三项闸门全绿。
 
 ### P1 — 悬浮窗"对局中有用"（核心价值，不碰 OCR）
 
@@ -165,9 +181,9 @@ const firstCandidate = Array.from({ length: 5 }, (_, i) =>
 
 ## 六、建议的下一步
 
-最小可验证增量：**T1 → T5 → T6**。
+P0 已完成，最小可验证增量更新为：**T5 → T6**。
 
-先提交，再把排行榜接进悬浮窗、在对局中显示按稀有度分组的强度榜。
+把排行榜接进悬浮窗、在对局中显示按稀有度分组的强度榜。
 这一步不引入新数据源、不碰 OCR、不触碰硬约束，却能把悬浮窗
 从"显示阶段名"变成"真正能参考的工具"，且可立即在真机验证。
 
@@ -176,7 +192,7 @@ const firstCandidate = Array.from({ length: 5 }, (_, i) =>
 ### 附：常用验证命令
 
 ```bash
-pnpm test        # 24 项，应全绿
+pnpm test        # 60 项，应全绿
 pnpm typecheck   # 9 个 workspace 项目
 pnpm build       # web + overlay
 pnpm sync        # 重新拉取数据（联网）

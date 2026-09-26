@@ -99,6 +99,19 @@ pnpm --filter @hexbox/web typecheck
 Tests use Node's built-in runner: `node --experimental-strip-types --test ...`.
 **Make the suite green before committing.** New behavior should include tests.
 
+Current coverage: 60 tests — `core` 3 / `lcu` 8 / `provider-communitydragon` 12 /
+`provider-tencent` 16 / `data-store` 14 / `data-cli` 7. CI
+(`.github/workflows/ci.yml`) runs `typecheck` → `test` → `build` on every push/PR.
+
+> **Do not write date-dependent tests.** Candidate stat dates are generated from the
+> real current date, so hardcoding one (e.g. `20260924` as "T-1") makes the test go
+> red purely with the passage of time. See the fixed case in
+> `provider-tencent/src/index.test.ts`; derive dates dynamically instead.
+
+> **`packages/data-cli/src/cli.ts` is entry-guarded** (`isDirectRun()`), so importing
+> it in tests does not execute the CLI. Keep that guard — without it `import` runs
+> `main()`, prints help, and sets `process.exitCode`.
+
 ## TypeScript conventions (enforced in tsconfig.base.json)
 
 The project runs TS **as source** via `node --experimental-strip-types`

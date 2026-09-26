@@ -13,7 +13,8 @@
     "hexbox-sync": "./src/cli.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --experimental-strip-types --test src/**/*.test.ts"
   },
   "devDependencies": {
     "typescript": "^5.7.2"
