@@ -528,8 +528,7 @@ function createWindow(): void {
     hasShadow: false,
     show: false, // 由阶段驱动显示
     webPreferences: {
-      // __dirname 是 dist/main，preload/renderer 都是它的兄弟目录
-      preload: join(__dirname, '..', 'preload', 'index.cjs'),
+      preload: PRELOAD_PATH,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
@@ -542,6 +541,17 @@ function createWindow(): void {
 
   void win.loadFile(join(__dirname, '..', 'renderer', 'index.html'));
 }
+
+/**
+ * preload 绝对路径。
+ *
+ * ⚠️ esbuild 以 outbase=src 打包,产物是 dist/main/index.cjs 与
+ * dist/preload/index.cjs —— __dirname = dist/main,向上一级即 dist。
+ * 此前误写 join(__dirname, '..', 'preload'),解析到 apps/overlay/preload
+ * (不存在) → "Unable to load preload script" → window.overlay 未定义 →
+ * 覆盖层与侧边窗都收不到任何推送（真机表现为"完全没有显示"）。
+ */
+const PRELOAD_PATH = join(__dirname, 'preload', 'index.cjs');
 
 /**
  * S2 覆盖窗口：全屏透明、点击穿透、绝不抢焦点。
@@ -569,7 +579,7 @@ function createOverlayWindow(): void {
     hasShadow: false,
     show: false,
     webPreferences: {
-      preload: join(__dirname, '..', 'preload', 'index.cjs'),
+      preload: PRELOAD_PATH,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,

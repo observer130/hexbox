@@ -33,6 +33,8 @@ await build({
     join(here, 'src', 'preload', 'index.ts'),
     // 截屏识别调试工具（独立入口，不参与常规运行）
     join(here, 'src', 'debug-capture.ts'),
+    // 覆盖层渲染自测（无需游戏即可验证渲染端）
+    join(here, 'src', 'debug-overlay-test.ts'),
   ],
   outdir: out,
   outExtension: { '.js': '.cjs' },
