@@ -6,10 +6,10 @@
   "description": "游戏内悬浮窗（不注入 / 不读内存 / 不打开游戏进程句柄）",
   "main": "dist/main/index.cjs",
   "scripts": {
-    "dev": "node build.mjs && electron .",
+    "dev": "node build.mjs && node run-electron.mjs .",
     "build": "node build.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "debug:capture": "node build.mjs && electron dist/debug-capture.cjs"
+    "debug:capture": "node build.mjs && node run-electron.mjs dist/debug-capture.cjs"
   },
   "dependencies": {
     "@hexbox/core": "workspace:*",

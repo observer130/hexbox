@@ -26,7 +26,7 @@
 import { app, BrowserWindow, desktopCapturer, screen } from 'electron';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import {
   captureScale,
@@ -43,7 +43,16 @@ import {
   type Rect,
 } from '@hexbox/vision';
 
-const OUT_DIR = join(process.cwd(), 'debug');
+/**
+ * 产物目录：固定在**仓库根**的 debug/（与文档、.gitignore 一致）。
+ *
+ * 不能用 process.cwd()：`pnpm --filter` 运行时 cwd 是 apps/overlay，
+ * 产物会散落到包目录里。dist 的深度固定（apps/overlay/dist），
+ * 因此从 __dirname 向上三级即仓库根；prod 模式 app.isPackaged 时退回 cwd。
+ */
+const OUT_DIR = app.isPackaged
+  ? join(process.cwd(), 'debug')
+  : join(__dirname, '..', '..', '..', 'debug');
 
 /** 卡片内头像区域的相对位置（避开金色边框）。 */
 const PORTRAIT_INSET = { x: 0.08, y: 0.06, w: 0.84, h: 0.62 };
@@ -90,19 +99,32 @@ async function currentPhase(): Promise<string | null> {
 /* 截屏                                                                */
 /* ------------------------------------------------------------------ */
 
-async function grabGameWindow(): Promise<{
+/** 窗口枚举结果（缩略图 + 原始字节尺寸，供截屏缩放校准）。 */
+interface Grabbed {
   img: Electron.NativeImage;
-} | null> {
+  /** desktopCapturer 请求的缩略图上限（原始字节尺寸）。 */
+  requested: { width: number; height: number };
+}
+
+async function grabGameWindow(): Promise<Grabbed | null> {
   const display = screen.getPrimaryDisplay();
-  const { width, height } = display.size;
+  const requested = { width: display.size.width * 2, height: display.size.height * 2 };
 
   const sources = await desktopCapturer.getSources({
     types: ['window'],
-    thumbnailSize: { width: width * 2, height: height * 2 },
+    thumbnailSize: requested,
+    fetchWindowIcons: false,
   });
-  const lol = sources.find((s) => /League of Legends/i.test(s.name));
-  if (!lol) return null;
-  return { img: lol.thumbnail };
+  // 匹配策略：精确名 "League of Legends"（游戏本体），其次包含匹配。
+  // 注意 LeagueClientUx（客户端 UI）窗口名是「英雄联盟客户端」等，不会被误选。
+  const lol =
+    sources.find((s) => s.name === 'League of Legends') ??
+    sources.find((s) => /League of Legends/i.test(s.name));
+  if (!lol) {
+    console.error('[debug] 当前窗口列表：' + sources.map((s) => `"${s.name}"`).join(', '));
+    return null;
+  }
+  return { img: lol.thumbnail, requested };
 }
 
 /** NativeImage → Bitmap（RGBA）。 */
@@ -124,10 +146,9 @@ function toBitmap(img: Electron.NativeImage): Bitmap {
 /* ------------------------------------------------------------------ */
 
 async function loadTemplates(): Promise<PreparedTemplate[]> {
-  const candidates = [
-    join(process.cwd(), 'data', 'templates.json'),
-    join(process.cwd(), '..', '..', 'data', 'templates.json'),
-  ];
+  // 模板与数据都在仓库根 data/：从 OUT_DIR 推导，与 cwd 解耦
+  const dataDir = dirname(OUT_DIR);
+  const candidates = [join(dataDir, 'templates.json')];
   for (const path of candidates) {
     try {
       const encoded = await readFile(path, 'utf8');
@@ -242,7 +263,11 @@ app.whenReady().then(async () => {
 
   const grabbed = await grabGameWindow();
   if (!grabbed) {
-    console.error('✗ 未找到「League of Legends」窗口 —— 请先进入游戏（选人阶段）再运行。');
+    console.error(
+      '✗ 未找到「League of Legends」窗口，或其处于最小化状态。\n' +
+        '  - 请进入游戏（选人阶段），且**不要最小化**游戏窗口；\n' +
+        '  - 无边框/全屏模式均可，最小化会导致系统截屏失败。\n',
+    );
     app.quit();
     process.exitCode = 1;
     return;
@@ -267,9 +292,8 @@ app.whenReady().then(async () => {
   const templates = await loadTemplates();
   const nameById = new Map<number, string>();
   try {
-    const dsPath = join(process.cwd(), '..', '..', 'data', 'dataset.json');
-    const altPath = join(process.cwd(), 'data', 'dataset.json');
-    const raw = await readFile(altPath, 'utf8').catch(() => readFile(dsPath, 'utf8'));
+    const dsPath = join(dirname(OUT_DIR), 'dataset.json');
+    const raw = await readFile(dsPath, 'utf8');
     const ds = JSON.parse(raw) as { champions: Array<{ id: number; name: string }> };
     for (const c of ds.champions) nameById.set(c.id, c.name);
   } catch {
