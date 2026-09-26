@@ -15,6 +15,7 @@
  */
 
 import type {
+  BuildItemStat,
   ChampionBuild,
   ItemSet,
   ItemSetBlock,
@@ -36,19 +37,23 @@ export function toEntries(itemIds: readonly number[]): ItemSetEntry[] {
 }
 
 /**
- * 由出装统计构造分块。
+ * 由出装统计构造分块（口径与 101 站「出装」页签一致）。
  *
- * 分块顺序即游戏内的显示顺序，按「玩家实际会依次购买」排列：
- * 出门装 → 鞋 → 核心三件套 → 成型六件套。
+ * 分块与条数（依据 docs/build-slots.md 的核实结果）：
+ *   - **出门装**：只取第 1 套（官方按登场率降序的第 1 名）
+ *   - **鞋**：取前 2
+ *   - **优先成装**：取前 3 套三件套（官方最多约 10 条，取前 3 足够）
+ *   - **其余成装**：单件列表，合并成一栏（官方展示全部 20 条）
  *
- * ⚠️ 每个块必须是**一套连贯的出装**，不能把上游所有候选方案倒进同一个块。
- * 实测教训：上游 `start` 有 20+ 个候选出门装，全部塞进去会让这个块
- * 变成一长串互斥装备，游戏内完全没法参考。
- * 因此这里对每个槽位只取**登场率最高的前 N 套**，且每套独立成块。
+ * ⚠️ 两处易错点：
+ *   1. 上游**不是**按登场率排序的，必须自己降序排（否则第一套是随机的）；
+ *   2. 不要用 `itemover_rec` —— 官方页面不展示该字段，
+ *      此前误当作「成型六件套」，属擅自扩大数据用途。
  *
- * 块标题带胜率与序号，便于玩家区分与取舍。
+ * ⚠️ 每个块是一套**连贯出装**，不能把互斥候选全塞进同一块
+ * （实测：20 多件出门装堆在一起，游戏内完全没法参考）。
  */
-export function buildBlocks(build: ChampionBuild, perSlot = 2): ItemSetBlock[] {
+export function buildBlocks(build: ChampionBuild): ItemSetBlock[] {
   const mk = (type: string, items: ItemSetEntry[]): ItemSetBlock => ({
     type,
     items,
@@ -57,23 +62,41 @@ export function buildBlocks(build: ChampionBuild, perSlot = 2): ItemSetBlock[] {
   });
 
   const blocks: ItemSetBlock[] = [];
+  /** 按登场率降序（上游顺序不可靠），并去掉空方案。 */
+  const byPick = (xs: readonly BuildItemStat[]): BuildItemStat[] =>
+    xs.filter((x) => x.itemIds.length > 0).sort((a, b) => b.pickRate - a.pickRate);
 
-  /** 给一组方案生成若干块（每套独立一块）。 */
-  const pushGroup = (stats: ChampionBuild['start'], label: string): void => {
-    const picked = stats.filter((s) => s.itemIds.length > 0).slice(0, perSlot);
-    picked.forEach((s, i) => {
-      const wr = `${(s.winRate * 100).toFixed(1)}%`;
-      const suffix = picked.length > 1 ? ` ${i + 1}` : '';
-      blocks.push(mk(`${label}${suffix}（${wr}）`, toEntries(s.itemIds)));
-    });
-  };
+  // 出门装：只给排名第一的一套
+  const start = byPick(build.start)[0];
+  if (start) {
+    blocks.push(mk(`出门装（${(start.winRate * 100).toFixed(1)}%）`, toEntries(start.itemIds)));
+  } else {
+    // 回退：没有单件数据时用组合
+    const combo = byPick(build.startCombo)[0];
+    if (combo) {
+      blocks.push(mk(`出门装（${(combo.winRate * 100).toFixed(1)}%）`, toEntries(combo.itemIds)));
+    }
+  }
 
-  // 出门装：单件与组合分开成块（语义不同：一件 vs 一套）
-  pushGroup(build.start, '出门装');
-  pushGroup(build.startCombo, '出门组合');
-  pushGroup(build.shoes, '鞋子');
-  pushGroup(build.core, '核心三件套');
-  pushGroup(build.full, '成型六件套');
+  // 鞋：前 2
+  for (const [i, s] of byPick(build.shoes).slice(0, 2).entries()) {
+    blocks.push(mk(`鞋 ${i + 1}（${(s.winRate * 100).toFixed(1)}%）`, toEntries(s.itemIds)));
+  }
+
+  // 优先成装（三件套）：前 3
+  for (const [i, s] of byPick(build.core).slice(0, 3).entries()) {
+    blocks.push(
+      mk(`优先成装 ${i + 1}（${(s.winRate * 100).toFixed(1)}%）`, toEntries(s.itemIds)),
+    );
+  }
+
+  // 其余成装：单件合并成一栏（官方展示全部，这里保留前 10 以免过长）
+  const rest = byPick(build.start)
+    .slice(1, 11)
+    .flatMap((s) => s.itemIds);
+  if (rest.length > 0) {
+    blocks.push(mk('其余成装', toEntries(rest)));
+  }
 
   return blocks;
 }

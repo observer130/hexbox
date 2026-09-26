@@ -157,7 +157,7 @@ test('parseItemOverRec：解析成型六件套（`;` 分隔）', () => {
   assert.equal(out[0]!.winRate, 0.5622);
 });
 
-test('parseChampionBuild：五个槽位取自各自正确的字段（不可混用）', () => {
+test('parseChampionBuild：各槽位取自正确字段；不采集官方未展示的 itemover_rec', () => {
   const raw: RawHeroDetail = {
     itemone_json: '{"1":{"itemone":"1055","winrate":5000,"showrate":8000}}',
     itemout: '1018,1052$0.0371$0.6347',
@@ -166,11 +166,12 @@ test('parseChampionBuild：五个槽位取自各自正确的字段（不可混�
     itemover_rec: '1_1,2,3,4,5,6_0.0177_0.5622',
   };
   const b = parseChampionBuild(raw);
-  assert.deepEqual(b.start[0]!.itemIds, [1055]); // 单件
-  assert.deepEqual(b.startCombo[0]!.itemIds, [1018, 1052]); // 出门装组合
+  assert.deepEqual(b.start[0]!.itemIds, [1055]); // 出门装单件
+  assert.deepEqual(b.startCombo[0]!.itemIds, [1018, 1052]); // 出门组合
   assert.deepEqual(b.shoes[0]!.itemIds, [3006]);
-  assert.deepEqual(b.core[0]!.itemIds, [1, 2, 3]); // 三件套
-  assert.equal(b.full[0]!.itemIds.length, 6); // 六件套，不是出门装
+  assert.deepEqual(b.core[0]!.itemIds, [1, 2, 3]); // 优先成装（三件套）
+  // itemover_rec 官方页面不展示，不应被采集为「成型六件套」
+  assert.deepEqual(b.full, []);
 });
 
 /* ------------------------------------------------------------------ */
@@ -256,7 +257,7 @@ test('parseChampionDetail：汇总所有字段并取 dtstatdate', () => {
   assert.equal(d.dataDate, '20260925');
   assert.equal(d.augments.length, 1);
   assert.equal(d.build.shoes.length, 1);
-  assert.equal(d.build.full.length, 1);
+  assert.equal(d.build.start.length, 1); // 出门装单件
   assert.equal(d.skills.length, 1);
   assert.equal(d.partners.length, 1);
 });

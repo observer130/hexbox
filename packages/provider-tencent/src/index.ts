@@ -492,16 +492,19 @@ export function parseItemStatJson(
   return out.sort((a, b) => b.pickRate - a.pickRate);
 }
 
-/** 解析出装（汇总五个上游字段）。 */
+/** 解析出装（口径与 101 站「出装」页签一致，见 docs/build-slots.md）。 */
 export function parseChampionBuild(raw: RawHeroDetail): ChampionBuild {
   return {
+    // 出门装：单件（官方展示前 5），另有 combo 组合
     start: parseItemStatJson(raw.itemone_json, 'itemone'),
     shoes: parseItemStatList(raw.itemshoes),
+    // 优先成装（三件套）
     core: parseItemStatJson(raw.itemcore_json, 'itemcore'),
-    // 出门装组合（如「灵巧披风+增幅典籍」），与 itemone 的单件不同
+    // 出门组合（官方与出门装同源展示，保留以备后用）
     startCombo: parseItemStatList(raw.itemout),
-    // 完整六件套（上游 itemover_rec，`排名_6件_登场率_胜率`，`;` 分隔）
-    full: parseItemOverRec(raw.itemover_rec),
+    // ⚠️ itemover_rec（六件组合）**官方页面不展示**，此前误当作
+    // 「成型六件套」写进配装方案，属擅自扩大数据用途。现不再采集。
+    full: [],
   };
 }
 

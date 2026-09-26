@@ -81,47 +81,84 @@ test('toEntries：装备 id 必须是字符串（客户端自己的格式）', (
   assert.equal(out[0]!.count, 1);
 });
 
-test('buildBlocks：按 出门装→鞋→核心→六件套 顺序出块', () => {
+test('buildBlocks：槽位顺序为 出门装→鞋→优先成装→其余成装', () => {
   const blocks = buildBlocks(
     build({
-      start: [{ itemIds: [1055], pickRate: 0.6, winRate: 0.55 }],
+      start: [
+        { itemIds: [1055], pickRate: 0.68, winRate: 0.55 },
+        { itemIds: [1054], pickRate: 0.28, winRate: 0.49 },
+      ],
       shoes: [{ itemIds: [3006], pickRate: 0.5, winRate: 0.57 }],
       core: [{ itemIds: [6672, 6673, 3031], pickRate: 0.07, winRate: 0.61 }],
-      full: [{ itemIds: [1, 2, 3, 4, 5, 6], pickRate: 0.01, winRate: 0.56 }],
     }),
   );
-  assert.equal(blocks.length, 4);
   assert.match(blocks[0]!.type, /^出门装/);
-  assert.match(blocks[1]!.type, /^鞋子/);
-  assert.match(blocks[2]!.type, /核心三件套/);
-  assert.match(blocks[3]!.type, /成型六件套/);
+  assert.match(blocks[1]!.type, /^鞋/);
+  assert.match(blocks[2]!.type, /^优先成装/);
+  assert.match(blocks[3]!.type, /^其余成装/);
 });
 
-test('buildBlocks：每个块只装**一套**出装，不把候选全倒进同一块', () => {
-  // 上游 start 常有 20+ 个候选；全塞进一个块会让游戏内完全没法看。
-  const many = Array.from({ length: 20 }, (_, i) => ({
-    itemIds: [1000 + i],
-    pickRate: 0.5 - i / 100,
-    winRate: 0.5,
-  }));
-  const blocks = buildBlocks(build({ start: many }), 2);
-  // 默认每槽位最多 2 套 → 2 个块，每块 1 件
-  assert.equal(blocks.length, 2);
-  for (const b of blocks) assert.equal(b.items.length, 1);
-});
-
-test('buildBlocks：出门装单件与组合分属不同的块（语义不同）', () => {
+test('buildBlocks：出门装只给排名第一的一套', () => {
   const blocks = buildBlocks(
     build({
-      start: [{ itemIds: [1055], pickRate: 0.6, winRate: 0.55 }],
-      startCombo: [{ itemIds: [1018, 1052], pickRate: 0.03, winRate: 0.63 }],
+      start: [
+        { itemIds: [1054], pickRate: 0.28, winRate: 0.49 },
+        { itemIds: [1055], pickRate: 0.68, winRate: 0.55 }, // 登场率最高
+      ],
     }),
   );
-  assert.equal(blocks.length, 2);
-  assert.match(blocks[0]!.type, /^出门装/);
-  assert.deepEqual(blocks[0]!.items.map((i) => i.id), ['1055']);
-  assert.match(blocks[1]!.type, /^出门组合/);
-  assert.deepEqual(blocks[1]!.items.map((i) => i.id), ['1018', '1052']);
+  const startBlocks = blocks.filter((b) => b.type.startsWith('出门装'));
+  assert.equal(startBlocks.length, 1);
+  assert.deepEqual(startBlocks[0]!.items.map((i) => i.id), ['1055']);
+});
+
+test('buildBlocks：按登场率降序取（上游原始顺序不可靠）', () => {
+  // 上游常见：第一套并不是登场率最高的
+  const blocks = buildBlocks(
+    build({
+      core: [
+        { itemIds: [1, 2, 3], pickRate: 0.02, winRate: 0.5 },
+        { itemIds: [4, 5, 6], pickRate: 0.16, winRate: 0.47 }, // 应为第 1
+      ],
+    }),
+  );
+  assert.match(blocks[0]!.type, /优先成装 1/);
+  assert.deepEqual(blocks[0]!.items.map((i) => i.id), ['4', '5', '6']);
+});
+
+test('buildBlocks：优先成装最多 3 套，鞋最多 2 套', () => {
+  const many = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      itemIds: [100 + i, 200 + i, 300 + i],
+      pickRate: 0.2 - i / 100,
+      winRate: 0.5,
+    }));
+  const blocks = buildBlocks(
+    build({
+      core: many(10),
+      shoes: [
+        { itemIds: [1], pickRate: 0.5, winRate: 0.5 },
+        { itemIds: [2], pickRate: 0.4, winRate: 0.5 },
+        { itemIds: [3], pickRate: 0.3, winRate: 0.5 },
+      ],
+    }),
+  );
+  assert.equal(blocks.filter((b) => b.type.startsWith('优先成装')).length, 3);
+  assert.equal(blocks.filter((b) => b.type.startsWith('鞋')).length, 2);
+});
+
+test('buildBlocks：其余成装把单件合并进**一个**栏位', () => {
+  const start = Array.from({ length: 20 }, (_, i) => ({
+    itemIds: [1000 + i],
+    pickRate: 0.7 - i / 100,
+    winRate: 0.5,
+  }));
+  const blocks = buildBlocks(build({ start }));
+  const rest = blocks.filter((b) => b.type === '其余成装');
+  assert.equal(rest.length, 1, '其余成装应只有一栏');
+  assert.ok(rest[0]!.items.length > 1, '该栏应包含多个单件');
+  // 不含第 1 名（那是「出门装」）
+  assert.equal(rest[0]!.items.some((i) => i.id === '1000'), false);
 });
 
 test('buildBlocks：块标题带胜率（游戏内也能看到依据）', () => {
@@ -129,20 +166,6 @@ test('buildBlocks：块标题带胜率（游戏内也能看到依据）', () => 
     build({ core: [{ itemIds: [1, 2, 3], pickRate: 0.07, winRate: 0.617 }] }),
   );
   assert.match(blocks[0]!.type, /61\.7%/);
-});
-
-test('buildBlocks：多个方案时编号区分', () => {
-  const blocks = buildBlocks(
-    build({
-      core: [
-        { itemIds: [1, 2, 3], pickRate: 0.07, winRate: 0.6 },
-        { itemIds: [4, 5, 6], pickRate: 0.05, winRate: 0.58 },
-      ],
-    }),
-  );
-  assert.equal(blocks.length, 2);
-  assert.match(blocks[0]!.type, /核心三件套 1/);
-  assert.match(blocks[1]!.type, /核心三件套 2/);
 });
 
 test('buildBlocks：空出装返回空数组（不产生空块）', () => {
