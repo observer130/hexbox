@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { deflateSync } from 'node:zlib';
 
-import { decodePng } from './png.ts';
+import { decodePng, encodePng } from './png.ts';
 
 /* ------------------------------------------------------------------ */
 /* 手工 PNG 编码（测试专用，未做任何优化）                              */
@@ -313,4 +313,42 @@ test('decodePng：截断的 IDAT 数据报错', () => {
   // 砍掉文件尾部：IEND 被移除，且 IDAT 缺 CRC —— 解析必然失败
   const cut = png.subarray(0, png.length - 12);
   assert.throws(() => decodePng(cut));
+});
+
+/* ------------------------------------------------------------------ */
+/* 编码器                                                              */
+/* ------------------------------------------------------------------ */
+
+test('encodePng → decodePng：RGBA 往返无损', () => {
+  const w = 7;
+  const h = 5;
+  const data = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < w * h; i++) {
+    data[i * 4] = (i * 29) % 256;
+    data[i * 4 + 1] = (i * 53) % 256;
+    data[i * 4 + 2] = (i * 97) % 256;
+    data[i * 4 + 3] = (i * 13) % 256; // alpha 会被丢弃
+  }
+  const png = encodePng({ width: w, height: h, data });
+  const back = decodePng(png);
+  assert.equal(back.width, w);
+  assert.equal(back.height, h);
+  for (let i = 0; i < w * h; i++) {
+    assert.equal(back.data[i * 4], data[i * 4], `#${i} R`);
+    assert.equal(back.data[i * 4 + 1], data[i * 4 + 1], `#${i} G`);
+    assert.equal(back.data[i * 4 + 2], data[i * 4 + 2], `#${i} B`);
+    assert.equal(back.data[i * 4 + 3], 255, `#${i} A(编码后不透明)`);
+  }
+});
+
+test('encodePng：单像素与全尺寸边界', () => {
+  const one = encodePng({
+    width: 1,
+    height: 1,
+    data: new Uint8ClampedArray([1, 2, 3, 255]),
+  });
+  const back = decodePng(one);
+  expectRgba(back, 0, 1, 2, 3, 255);
+
+  assert.throws(() => encodePng({ width: 0, height: 0, data: new Uint8ClampedArray(0) }), /尺寸非法/);
 });

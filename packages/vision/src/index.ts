@@ -5,3 +5,4 @@ export * from './match.ts';
 export * from './png.ts';
 export * from './templates.ts';
 export * from './win-geometry.ts';
+export * from './ocr.ts';

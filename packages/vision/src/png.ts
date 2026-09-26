@@ -13,7 +13,7 @@
  * 输出统一为 RGBA（每像素 4 字节），与 `Bitmap` 的约定一致。
  */
 
-import { inflateSync } from 'node:zlib';
+import { deflateSync, inflateSync } from 'node:zlib';
 
 /** PNG 文件签名（8 字节）。 */
 const SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] as const;
@@ -48,6 +48,71 @@ interface Chunk {
   readonly type: string;
   readonly start: number; // data 起始（不含 type/length）
   readonly end: number; // data 结束
+}
+
+/** 组装一个 PNG chunk（length + type + data + crc）。 */
+function writeChunk(type: string, data: Uint8Array): Uint8Array {
+  const out = new Uint8Array(12 + data.length);
+  const dv = new DataView(out.buffer);
+  dv.setUint32(0, data.length);
+  for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+  out.set(data, 8);
+  // crc32 的签名是 (buf, start, end)：此处对整块 out 按 [4, 8+len) 计算
+  dv.setUint32(8 + data.length, crc32(out, 4, 8 + data.length));
+  return out;
+}
+
+/**
+ * PNG 编码（RGBA 位图 → 8bit RGB PNG，行滤波 0）。
+ *
+ * 用途：标注图合成（debug-capture 把检测框画到位图副本上再落盘）。
+ * 此前用隐藏窗口 canvas 渲染 + capturePage —— 时序不确定
+ * （同一代码三次运行一次产出空图），纯 Node 合成完全确定。
+ *
+ * alpha 通道被忽略（输出不透明）；与 `decodePng` 互逆，有往返测试锁定。
+ */
+export function encodePng(img: {
+  readonly width: number;
+  readonly height: number;
+  readonly data: Uint8ClampedArray;
+}): Uint8Array {
+  const { width, height } = img;
+  if (width <= 0 || height <= 0) throw new Error(`图像尺寸非法 ${width}x${height}`);
+
+  // 像素 → 行滤波 0 的 RGB 扫描线
+  const stride = width * 3;
+  const raw = new Uint8Array((stride + 1) * height);
+  for (let y = 0; y < height; y++) {
+    raw[y * (stride + 1)] = 0; // filter = None
+    for (let x = 0; x < width; x++) {
+      const si = (y * width + x) * 4;
+      const di = y * (stride + 1) + 1 + x * 3;
+      raw[di] = img.data[si]!;
+      raw[di + 1] = img.data[si + 1]!;
+      raw[di + 2] = img.data[si + 2]!;
+    }
+  }
+
+  const ihdr = new Uint8Array(13);
+  const dv = new DataView(ihdr.buffer);
+  dv.setUint32(0, width);
+  dv.setUint32(4, height);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 2; // color type: RGB
+
+  const parts = [
+    new Uint8Array(SIGNATURE),
+    writeChunk('IHDR', ihdr),
+    writeChunk('IDAT', deflateSync(raw, { level: 6 })),
+    writeChunk('IEND', new Uint8Array(0)),
+  ];
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let off = 0;
+  for (const p of parts) {
+    out.set(p, off);
+    off += p.length;
+  }
+  return out;
 }
 
 function readChunks(buf: Uint8Array): Chunk[] {
