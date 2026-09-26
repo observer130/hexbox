@@ -24,6 +24,7 @@ import { promisify } from 'node:util';
 
 import {
   LcuClient,
+  LcuHttpError,
   detectCredentialsDetailed,
   detectPortByListener,
   isBrawlSession,
@@ -399,19 +400,43 @@ async function pollOnce(): Promise<void> {
   }
 
   if (client) {
-    const s = await client
-      .get<{
-        phase?: string;
-        map?: { gameMode?: string };
-        gameData?: { queue?: { id?: number } };
-      }>('/lol-gameflow/v1/session')
-      .catch(() => null);
+    // 用 getOrNull：大厅里 `/lol-gameflow/v1/session` 返回 404 是**正常**的
+    // （当前没有对局），不能当成故障。
+    //
+    // ⚠️ 这里原先是 `.catch(() => null)` + `else { client = null }`，
+    // 于是大厅里每轮轮询都会把**有效凭证**丢掉，下一轮重新探测凭证；
+    // 一旦探测失败就显示「读不到 LCU 凭证」—— 表现为「没进对局时一直报读不到凭证，
+    // 进选人后又正常」（真实踩过）。
+    // 现在：只有**鉴权失败**才丢弃凭证，其它情况一律视为「当前无对局」。
+    let s: {
+      phase?: string;
+      map?: { gameMode?: string };
+      gameData?: { queue?: { id?: number } };
+    } | null = null;
+    try {
+      s = await client.getOrNull('/lol-gameflow/v1/session');
+    } catch (err) {
+      // getOrNull 只在 401/403（或网络异常）时抛出
+      if (err instanceof LcuHttpError && err.isAuthFailure) {
+        console.warn('[hexbox] LCU 鉴权失败，凭证可能已失效，将重新探测');
+        client = null;
+        warnedNoCreds = false; // 允许重新提示
+        credsDetail = '';
+      } else {
+        // 网络抖动/客户端正在关停：保留 client，下轮再试
+        console.warn('[hexbox] LCU 会话查询异常:', err instanceof Error ? err.message : err);
+      }
+    }
+
     if (s) {
       connected = true;
       session = s;
       phase = String(s.phase ?? 'None');
-    } else {
-      client = null;
+    } else if (client) {
+      // 有凭证但无对局会话 —— 客户端是活的，只是当前不在对局中。
+      // 这**不是**错误，UI 应显示「未在对局中」而不是诊断面板。
+      connected = true;
+      phase = 'None';
     }
 
     // 选人阶段：读取我方已选英雄（pregame-visible）

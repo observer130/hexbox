@@ -13,6 +13,37 @@ export interface LcuRequestOptions {
   readonly timeoutMs?: number;
 }
 
+/**
+ * LCU 请求错误，**带 HTTP 状态码**。
+ *
+ * 为什么需要状态码：调用方必须能区分两类失败，否则会把
+ * 「当前没有对局会话」误判成「凭证失效」：
+ *   - `404` / `400` —— 会话不存在（大厅里 `/lol-gameflow/v1/session` 常见），
+ *     **凭证是好的**，客户端仍在；
+ *   - `401` / `403` —— 鉴权失败，凭证才是坏的。
+ */
+export class LcuHttpError extends Error {
+  readonly status: number;
+  readonly path: string;
+
+  constructor(path: string, status: number) {
+    super(`LCU ${path} → HTTP ${status}`);
+    this.name = 'LcuHttpError';
+    this.status = status;
+    this.path = path;
+  }
+
+  /**
+   * 是否表示「凭证失效」。
+   *
+   * 只看 401/403。其余（含 404）都应按「会话/资源不存在」处理，
+   * 而不是把客户端判死。
+   */
+  get isAuthFailure(): boolean {
+    return this.status === 401 || this.status === 403;
+  }
+}
+
 /** 一个极薄的 LCU 请求封装。 */
 export class LcuClient {
   // 注意：不使用 TS 参数属性（strip-only 模式不支持）
@@ -33,6 +64,9 @@ export class LcuClient {
   /**
    * 发送 GET 请求。ignoreHTTPSErrors 由调用方通过 NODE_TLS_REJECT_UNAUTHORIZED
    * 或 undici Agent 处理；这里只负责拼装 URL 与认证头。
+   *
+   * 非 2xx 抛 `LcuHttpError`（带状态码），便于调用方区分
+   * 「无会话」与「鉴权失败」。
    */
   async get<T = unknown>(path: string, opts: LcuRequestOptions = {}): Promise<T> {
     const url = `https://127.0.0.1:${this.creds.port}${path.startsWith('/') ? path : `/${path}`}`;
@@ -51,11 +85,27 @@ export class LcuClient {
         signal: controller.signal,
       });
       if (!res.ok) {
-        throw new Error(`LCU ${path} → HTTP ${res.status}`);
+        throw new LcuHttpError(path, res.status);
       }
       return (await res.json()) as T;
     } finally {
       clearTimeout(timer);
+    }
+  }
+
+  /**
+   * 同 `get`，但**把「资源不存在」当作 null** 而不是抛错。
+   *
+   * 大厅里 `/lol-gameflow/v1/session` 返回 404 是**正常**的
+   * （当前没有对局），不应被当成故障。401/403 仍会抛出，
+   * 因为那才是真正的凭证问题。
+   */
+  async getOrNull<T = unknown>(path: string, opts: LcuRequestOptions = {}): Promise<T | null> {
+    try {
+      return await this.get<T>(path, opts);
+    } catch (err) {
+      if (err instanceof LcuHttpError && !err.isAuthFailure) return null;
+      throw err;
     }
   }
 }

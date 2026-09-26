@@ -277,6 +277,23 @@ function render(s: OverlayStateMsg): void {
   }
 
   /* ---------------- 其它阶段 ---------------- */
+  // 已连上客户端但不在对局中：这**不是**故障，给一句正常说明即可，
+  // 不要显示诊断面板（那会让人以为工具坏了）。
+  const idle = s.connected && (s.phase === 'None' || s.phase === '' || s.phase === 'Lobby');
+  if (idle) {
+    app.innerHTML = panel(
+      phaseLabel,
+      '待机',
+      `
+        <div class="li">已连接客户端，当前未在对局中。</div>
+        <div class="sep"></div>
+        <div class="li dim">进入选人阶段后本窗口会自动显示英雄胜率。</div>
+      `,
+      sourceFoot(s.meta),
+    );
+    return;
+  }
+
   app.innerHTML = panel(
     phaseLabel,
     phaseLabel,
