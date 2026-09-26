@@ -7,3 +7,4 @@ export * from './templates.ts';
 export * from './win-geometry.ts';
 export * from './ocr.ts';
 export * from './card-overlay.ts';
+export * from './confirmed.ts';

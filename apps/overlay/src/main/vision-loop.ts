@@ -16,15 +16,18 @@
 import { desktopCapturer, screen } from 'electron';
 
 import {
-  captureScale,
   cardLabelFor,
   detectCards,
   extractGrayRaw,
   extractNameStrip,
   findGameWindowRect,
+  identifyConfirmedChampion,
+  makeScreenGeometry,
   matchName,
+  CONFIRM_SLOTS,
   NAME_STRIP,
   type Bitmap,
+  type CardLabel,
   type NameFingerprint,
   type PreparedTemplate,
 } from '@hexbox/vision';
@@ -51,8 +54,8 @@ export interface VisionOverlayMsg {
 export interface VisionLoopDeps {
   /** 名字指纹库（pnpm templates 产物）。getter 允许异步加载后更新。 */
   readonly nameLibrary: readonly NameFingerprint[] | (() => readonly NameFingerprint[]);
-  /** 头像模板（阶段 2 预留,当前不参与认定）。 */
-  readonly portraits?: readonly PreparedTemplate[];
+  /** 头像模板（确认阶段识别用）。getter 允许异步加载后更新。 */
+  readonly portraits?: readonly PreparedTemplate[] | (() => readonly PreparedTemplate[] | undefined);
   /** 英雄榜（胜率 join 数据源）。 */
   readonly rankings: RankingSnapshot | null | (() => RankingSnapshot | null);
   /** 英雄名映射。 */
@@ -103,27 +106,46 @@ export async function runVisionRound(
   const { bmp } = grabbed;
 
   const display = screen.getPrimaryDisplay();
-  const scale = captureScale(
-    { width: bmp.width, height: bmp.height },
-    windowPhysical,
-  );
-  const geo = {
-    captureWidth: bmp.width,
-    captureHeight: bmp.height,
-    windowX: (windowPhysical?.x ?? display.workArea.x) / display.scaleFactor,
-    windowY: (windowPhysical?.y ?? display.workArea.y) / display.scaleFactor,
-    windowWidth:
-      (windowPhysical?.width ?? bmp.width / scale.scale) / display.scaleFactor,
-    windowHeight:
-      (windowPhysical?.height ?? bmp.height / scale.scale) / display.scaleFactor,
-  };
+  // 统一换算：自动区分「显示器快照」与「窗口快照」两种形态
+  // （S2 真机验收教训：二者混淆导致标签横向错位）
+  const { geo } = makeScreenGeometry(bmp, windowPhysical, {
+    bounds: display.bounds,
+    scaleFactor: display.scaleFactor,
+    workArea: display.workArea,
+  });
 
   const det = detectCards(bmp);
   if (!det.confident || det.cards.length === 0) {
+    // 选人**确认阶段**：卡片消失、显示大立绘 → 用顶部栏/玩家条方头像识别
+    const portraits = (resolveDeps(deps.portraits) ?? []) as readonly PreparedTemplate[];
+    const confirmed =
+      portraits.length > 0 ? identifyConfirmedChampion(bmp, CONFIRM_SLOTS, portraits) : null;
+    if (!confirmed) {
+      return {
+        active: false,
+        labels: [],
+        diag: `未检出卡片: ${det.reason ?? '?'}`,
+      };
+    }
+
+    const row = resolveDeps(deps.rankings)?.heroes.find(
+      (h) => h.championId === confirmed.championId,
+    );
+    // 悬停确认态:标签固定显示在左上(顶部栏下方),与头像同行易对照
+    const label: CardLabel = {
+      x: display.workArea.x + 24,
+      y: display.workArea.y + 90,
+      w: 190,
+      h: 34,
+      text: row ? `${(row.winRate * 100).toFixed(1)}%` : '暂无数据',
+      sub: deps.championName(confirmed.championId),
+      hasData: row !== undefined,
+      championId: confirmed.championId,
+    };
     return {
-      active: false,
-      labels: [],
-      diag: `未检出卡片: ${det.reason ?? '?'}`,
+      active: true,
+      labels: [label],
+      diag: `确认态: ${confirmed.slot} score=${confirmed.score.toFixed(3)}`,
     };
   }
 

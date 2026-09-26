@@ -25,6 +25,8 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
+import type { CaptureGeometry } from './types.ts';
+
 const execFileAsync = promisify(execFile);
 
 export interface PhysicalRect {
@@ -98,4 +100,133 @@ export function captureScale(
     return { scale: 1, estimated: true };
   }
   return { scale: capture.width / windowRect.width, estimated: false };
+}
+
+/**
+ * 判断截屏内容是「窗口快照」还是「显示器快照」。
+ *
+ * 真机教训（S2 验收发现）：desktopCapturer 的行为有两种实测形态：
+ *   - 窗口快照：截屏 = 窗口内容 × 内部缩放（如 3413/1600=2.13）
+ *   - 显示器快照：截屏 = 整屏内容 × 内部缩放（如 4587×1920 = 2293×960 逻辑屏×2）
+ * 二者混淆会让所有横向坐标错位（标签画到屏幕左侧）。
+ *
+ * 判据（纵横比 + 相对占比，不依赖固定倍数）：
+ *   截屏纵横比接近**显示器**纵横比而偏离**窗口**纵横比 → display；
+ *   反之 → window。窗口未知时保守归为 window（无偏移直通，误差较小）。
+ */
+export function snapshotKind(
+  capture: { readonly width: number; readonly height: number },
+  displayPhysical: { readonly width: number; readonly height: number },
+  windowPhysical?: { readonly width: number; readonly height: number } | null,
+): 'window' | 'display' {
+  const capRatio = capture.width / Math.max(1, capture.height);
+  const dispRatio = displayPhysical.width / Math.max(1, displayPhysical.height);
+  const dispOff = Math.abs(capRatio - dispRatio) / dispRatio;
+
+  if (!windowPhysical || windowPhysical.width <= 0) return 'window';
+  const winRatio = windowPhysical.width / Math.max(1, windowPhysical.height);
+  const winOff = Math.abs(capRatio - winRatio) / winRatio;
+
+  return dispOff < winOff ? 'display' : 'window';
+}
+
+/**
+ * 一步到位的换算参数构造（vision-loop 与 debug 工具共用）。
+ *
+ * 输入：截屏尺寸、窗口物理矩形（GetWindowRect）、显示器信息
+ * （Electron display：bounds 为逻辑 DIP、scaleFactor 为 DPI 倍率）。
+ * 输出：CaptureGeometry —— 归一化卡片矩形 → 屏幕逻辑坐标的唯一桥梁。
+ *
+ * 两种快照形态的处理：
+ *   - display 快照：截屏物理 = 显示器物理 × captureScale。
+ *     窗口在截屏内的偏移 = 窗口物理位置 × captureScale。
+ *     屏幕逻辑 = 窗口物理 ÷ scaleFactor。
+ *   - window 快照：截屏 = 窗口内容 × captureScale,无偏移。
+ *     截屏内归一化坐标直接 × 窗口逻辑尺寸 + 窗口逻辑位置。
+ *
+ * display.bounds 已是逻辑 DIP,显示器物理尺寸 = bounds × scaleFactor。
+ */
+export function makeScreenGeometry(
+  capture: { readonly width: number; readonly height: number },
+  windowPhysical: PhysicalRect | null,
+  display: {
+    readonly bounds: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+    readonly scaleFactor: number;
+    readonly workArea: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  },
+): {
+  readonly geo: CaptureGeometry;
+  readonly kind: 'window' | 'display';
+  readonly scale: number;
+  readonly estimated: boolean;
+} {
+  const displayPhysical = {
+    width: Math.round(display.bounds.width * display.scaleFactor),
+    height: Math.round(display.bounds.height * display.scaleFactor),
+  };
+  const kind = snapshotKind(capture, displayPhysical, windowPhysical);
+
+  if (kind === 'display' && windowPhysical) {
+    // 截屏 = 显示器快照。截屏物理尺寸 ÷ 显示器物理尺寸 = captureScale
+    const cs = capture.width / Math.max(1, displayPhysical.width);
+    // 窗口逻辑矩形（GetWindowRect 物理 ÷ DPI）
+    const winLogical = {
+      x: windowPhysical.x / display.scaleFactor,
+      y: windowPhysical.y / display.scaleFactor,
+      width: windowPhysical.width / display.scaleFactor,
+      height: windowPhysical.height / display.scaleFactor,
+    };
+    // 归一化坐标是相对**截屏**的;窗口在截屏内占的子矩形：
+    // 物理偏移 × cs ÷ 截屏尺寸 = 物理偏移 ÷ 显示器物理尺寸（= 逻辑偏移 ÷ 显示器逻辑尺寸）
+    const nx0 = (windowPhysical.x * cs) / capture.width;
+    const ny0 = (windowPhysical.y * cs) / capture.height;
+    const nw = (windowPhysical.width * cs) / capture.width;
+    const nh = (windowPhysical.height * cs) / capture.height;
+    // 换算几何:归一化(0..1 相对截屏) → 先映射进窗口子矩形 → 再到屏幕逻辑
+    return {
+      kind,
+      scale: cs,
+      estimated: false,
+      geo: {
+        captureWidth: capture.width,
+        captureHeight: capture.height,
+        // normalizedRectToScreen 的公式: screen = geo.windowX + n.x * geo.windowWidth
+        // 令 n.x 相对截屏 → screen.x = winX + (n.x - nx0)/nw * winW
+        //                 = (winX - nx0/nw*winW) + n.x * (winW/nw)
+        windowX: winLogical.x - (nx0 / nw) * winLogical.width,
+        windowY: winLogical.y - (ny0 / nh) * winLogical.height,
+        windowWidth: winLogical.width / nw,
+        windowHeight: winLogical.height / nh,
+      },
+    };
+  }
+
+  // window 快照（或无窗口矩形兜底）：截屏即窗口内容
+  const cs = captureScale(capture, windowPhysical);
+  const winLogical = windowPhysical
+    ? {
+        x: windowPhysical.x / display.scaleFactor,
+        y: windowPhysical.y / display.scaleFactor,
+        width: windowPhysical.width / display.scaleFactor,
+        height: windowPhysical.height / display.scaleFactor,
+      }
+    : {
+        x: display.workArea.x,
+        y: display.workArea.y,
+        width: capture.width / display.scaleFactor,
+        height: capture.height / display.scaleFactor,
+      };
+  return {
+    kind,
+    scale: cs.scale,
+    estimated: cs.estimated,
+    geo: {
+      captureWidth: capture.width,
+      captureHeight: capture.height,
+      windowX: winLogical.x,
+      windowY: winLogical.y,
+      windowWidth: winLogical.width,
+      windowHeight: winLogical.height,
+    },
+  };
 }

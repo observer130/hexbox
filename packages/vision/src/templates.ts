@@ -21,6 +21,29 @@ import { gunzipSync, gzipSync } from 'node:zlib';
 
 import { normalizeGray } from './match.ts';
 
+/**
+ * 把归一化灰度（TemplateEntry.norm）还原为 0..255 灰度。
+ *
+ * 逆变换 + 再标准化 ≈ 恒等（消除序列化舍入）,使比较两端
+ * 都走 normalizeGray 统一管线。
+ */
+export function denormalizeToGray(norm: readonly number[], size: number): Uint8Array {
+  const n = norm.length;
+  const out = new Uint8Array(size * size);
+  let mean = 0;
+  for (const v of norm) mean += v;
+  mean /= n;
+  let std = 0;
+  for (const v of norm) std += (v - mean) * (v - mean);
+  std = Math.sqrt(std / n);
+  if (std < 1e-6) return out; // 纯色模板：识别必然拒绝,返回全 0 即可
+  for (let i = 0; i < n; i++) {
+    const v = (norm[i]! - mean) / std;
+    out[i] = Math.max(0, Math.min(255, Math.round(128 + v * 64)));
+  }
+  return out;
+}
+
 /** 模板包内的一条模板。 */
 export interface TemplateEntry {
   readonly championId: number;

@@ -29,7 +29,14 @@ import {
   pickChampionIdFromGameflow,
 } from '@hexbox/lcu';
 import { readBuilds, readDataset, readRankings, readTemplates } from '@hexbox/data-store';
-import { base64ToBits, decodePack, type NameFingerprint } from '@hexbox/vision';
+import {
+  base64ToBits,
+  decodePack,
+  denormalizeToGray,
+  prepareTemplates,
+  type NameFingerprint,
+  type PreparedTemplate,
+} from '@hexbox/vision';
 import {
   augmentStrength,
   champSelectInfo,
@@ -64,6 +71,8 @@ let myChampionId = 0;
 let visionLoop: VisionLoop | null = null;
 /** 名字指纹库（视觉循环用）。 */
 let nameLibrary: NameFingerprint[] = [];
+/** 头像模板（确认阶段识别用）。 */
+let portraits: PreparedTemplate[] = [];
 
 /**
  * 「对局进行中」的阶段集合。
@@ -603,6 +612,7 @@ app.whenReady().then(() => {
   visionLoop = new VisionLoop({
     // getter 形式:指纹/榜单是异步加载的,每轮识别取最新值
     nameLibrary: () => nameLibrary,
+    portraits: () => portraits,
     rankings: () => rankings,
     championName: (id) => championName(id),
     onResult: pushOverlayVision,
@@ -638,7 +648,16 @@ async function loadNameLibrary(): Promise<void> {
       height: n.height,
       bits: base64ToBits(n.bits, n.width * n.height),
     }));
-    console.log(`[hexbox] 名字指纹 ${nameLibrary.length} 个已加载`);
+    portraits = prepareTemplates(
+      pack.templates.map((t) => ({
+        championId: t.championId,
+        size: t.size,
+        gray: denormalizeToGray(t.norm, t.size),
+      })),
+    );
+    console.log(
+      `[hexbox] 名字指纹 ${nameLibrary.length} 个 / 头像模板 ${portraits.length} 个已加载`,
+    );
   } catch (e) {
     console.warn('[hexbox] 名字指纹加载失败:', e instanceof Error ? e.message : e);
   }
