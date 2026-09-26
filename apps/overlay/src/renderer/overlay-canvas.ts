@@ -44,11 +44,18 @@ const api = {
 
 const canvas = document.getElementById('vision') as HTMLCanvasElement;
 
+/** 最近一次推送的消息;resize/画布重设后用它重绘,避免清空后空白。 */
+let lastMsg: VisionMsg | null = null;
+
 function resizeCanvas(): void {
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight;
+  // 画布尺寸变化会清空内容 —— 用最近消息重绘
+  if (lastMsg) draw(lastMsg);
 }
-window.addEventListener('resize', resizeCanvas);
+window.addEventListener('resize', () => {
+  resizeCanvas();
+});
 resizeCanvas();
 
 // 覆盖窗口换显示器时,主进程会推 overlay:resize（setBounds 后 resize 事件
@@ -73,6 +80,7 @@ function roundRect(
 }
 
 function draw(msg: VisionMsg): void {
+  lastMsg = msg; // 供 resize 重绘
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
