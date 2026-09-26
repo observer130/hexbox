@@ -25,7 +25,7 @@ function fp(id: number, name: string, rows: string[]): NameFingerprint {
   return { championId: id, name, width, height, bits };
 }
 
-test('extractNameStrip：白字提取为二值位图', () => {
+test('extractNameStrip：白字提取为二值位图（包围盒归一化）', () => {
   // 16x4 灰度：上两行暗(背景)，下两行亮(文字)
   const w = 16;
   const h = 4;
@@ -36,15 +36,17 @@ test('extractNameStrip：白字提取为二值位图', () => {
   }
   const strip = extractNameStrip(gray, w, h, { threshold: 150, outWidth: 16, outHeight: 4 });
   assert.equal(strip.width, 16);
-  // 前 2 行应全 0
-  for (let x = 0; x < 16; x++) {
-    assert.equal(strip.bits[x], 0);
-    assert.equal(strip.bits[16 + x], 0);
+  // 包围盒=文字本身 → 拉伸后每行都应有文字像素（无背景留白）
+  for (let y = 0; y < 4; y++) {
+    let on = 0;
+    for (let x = 0; x < 16; x++) if (strip.bits[y * 16 + x] === 1) on++;
+    assert.ok(on >= 6, `行 ${y} 应有文字像素,实际 ${on}`);
   }
-  // 第 3 行 x=2..9 应为 1
-  let on = 0;
-  for (let x = 0; x < 16; x++) if (strip.bits[2 * 16 + x] === 1) on++;
-  assert.ok(on >= 6, `亮行应检出文字像素,实际 ${on}`);
+});
+
+test('extractNameStrip：全暗图返回空位图', () => {
+  const strip = extractNameStrip(new Uint8Array(64), 16, 4);
+  assert.equal(strip.bits.every((b) => b === 0), true);
 });
 
 test('fingerprintSimilarity：相同=1, 不相交=0, 部分重叠介于其间', () => {

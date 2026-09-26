@@ -329,6 +329,8 @@ app.whenReady().then(async () => {
     let ocrScore = 0;
     if (stripRaw && nameLibrary.length > 0) {
       const strip = extractNameStrip(stripRaw.gray, stripRaw.width, stripRaw.height);
+      // 阈值依据：离线回放真机截图,正确答案得分 0.55~0.61,
+      // 而错误名字的最高分 < 0.45（真机+离线双重校准）
       const m = matchName(strip, nameLibrary, { minScore: 0.45 });
       if (m) {
         ocrId = m.championId;
