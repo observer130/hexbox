@@ -19,16 +19,18 @@ export interface PortraitSlot {
   readonly rect: Rect;
 }
 
-/** 顶部「可用」栏第 1 格（英雄锁定后亮起）。 */
+/** 顶部「可用」栏第 1 格（英雄锁定后亮起）。
+ *  校准: 验收截图2 量测 —— 头像顶 y≈25/1350=0.0185(上一版 0.0459 把
+ *  格子中心当顶缘,裁到格子下沿的空白 → 识别恒失败)。 */
 export const TOP_BAR_SLOT: PortraitSlot = {
   id: 'top-bar-1',
-  rect: { x: 0.2858, y: 0.0459, w: 0.0292, h: 0.0519 },
+  rect: { x: 0.2858, y: 0.0185, w: 0.03, h: 0.0533 },
 };
 
-/** 左侧玩家条头像（自己那一行）。 */
+/** 左侧玩家条头像（自己那一行,圆环含边框）。 */
 export const PLAYER_BAR_SLOT: PortraitSlot = {
   id: 'player-bar',
-  rect: { x: 0.0433, y: 0.37, w: 0.0442, h: 0.0815 },
+  rect: { x: 0.0442, y: 0.3741, w: 0.0433, h: 0.0778 },
 };
 
 /** 确认阶段按序尝试的槽位。 */

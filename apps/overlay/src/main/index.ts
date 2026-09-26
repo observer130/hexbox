@@ -612,6 +612,14 @@ function pushOverlayVision(msg: VisionOverlayMsg, display: Electron.Display): vo
   positionOverlayOn(display);
   overlayWin.showInactive();
   overlayWin.webContents.send('overlay:vision', msg);
+  // 诊断: 覆盖层空白时,从主进程日志判断是「没推送」还是「推送了没画」
+  console.log(
+    `[hexbox:vision] 推送 active=${msg.active} labels=${msg.labels.length}` +
+      (msg.labels[0]
+        ? ` 首标签@(${msg.labels[0].x.toFixed(0)},${msg.labels[0].y.toFixed(0)}) ${msg.labels[0].text}`
+        : '') +
+      (msg.diag ? ` [${msg.diag}]` : ''),
+  );
 }
 
 function applyClickThrough(on: boolean): void {
