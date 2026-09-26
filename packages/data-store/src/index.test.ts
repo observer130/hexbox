@@ -20,9 +20,11 @@ import {
   checkRankingsFreshness,
   readDataset,
   readRankings,
+  readTemplates,
   resolveStorePaths,
   writeDataset,
   writeRankings,
+  writeTemplates,
 } from './index.ts';
 
 /** 建一个用完即删的临时数据目录。 */
@@ -74,6 +76,35 @@ test('resolveStorePaths：两个文件独立落盘', () => {
   assert.ok(p.rankings.endsWith('rankings.json'));
   // 图鉴与排行榜必须分开，才能独立失效
   assert.notEqual(p.dataset, p.rankings);
+});
+
+test('resolveStorePaths：模板包独立于其余数据文件', () => {
+  const p = resolveStorePaths('C:\\data');
+  assert.ok(p.templates.endsWith('templates.json'));
+  const all = [p.dataset, p.rankings, p.builds, p.templates];
+  assert.equal(new Set(all).size, all.length, '四个数据文件路径必须互不相同');
+});
+
+/* ------------------------------------------------------------------ */
+/* 模板包：独立落盘（构建期产物）                                       */
+/* ------------------------------------------------------------------ */
+
+test('writeTemplates/readTemplates：往返一致且原子收尾', async () => {
+  await withTempDir(async (dir) => {
+    const payload = 'H4sIAAAAAAAA//Kt0lFRAAAA//8DALp+9ocKAAA=';
+    const path = await writeTemplates(dir, payload);
+    assert.equal(existsSync(path), true);
+    assert.equal(await readTemplates(dir), payload);
+
+    const entries = await readdir(dir);
+    assert.equal(entries.some((e) => e.endsWith('.tmp')), false);
+  });
+});
+
+test('readTemplates：文件不存在时返回 null', async () => {
+  await withTempDir(async (dir) => {
+    assert.equal(await readTemplates(dir), null);
+  });
 });
 
 /* ------------------------------------------------------------------ */

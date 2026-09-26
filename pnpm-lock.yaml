@@ -26,6 +26,9 @@ importers:
       '@hexbox/lcu':
         specifier: workspace:*
         version: link:../../packages/lcu
+      '@hexbox/vision':
+        specifier: workspace:*
+        version: link:../../packages/vision
     devDependencies:
       electron:
         specifier: ^33.2.0
@@ -79,6 +82,9 @@ importers:
       '@hexbox/provider-tencent':
         specifier: workspace:*
         version: link:../provider-tencent
+      '@hexbox/vision':
+        specifier: workspace:*
+        version: link:../vision
     devDependencies:
       typescript:
         specifier: ^5.7.2
@@ -89,6 +95,9 @@ importers:
       '@hexbox/core':
         specifier: workspace:*
         version: link:../core
+      '@hexbox/vision':
+        specifier: workspace:*
+        version: link:../vision
     devDependencies:
       typescript:
         specifier: ^5.7.2
@@ -138,6 +147,12 @@ importers:
       '@hexbox/core':
         specifier: workspace:*
         version: link:../core
+    devDependencies:
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
+  packages/vision:
     devDependencies:
       typescript:
         specifier: ^5.7.2

@@ -8,7 +8,8 @@
     "@hexbox/core": "workspace:*",
     "@hexbox/data-store": "workspace:*",
     "@hexbox/provider-registry": "workspace:*",
-    "@hexbox/provider-tencent": "workspace:*"
+    "@hexbox/provider-tencent": "workspace:*",
+    "@hexbox/vision": "workspace:*"
   },
   "bin": {
     "hexbox-sync": "./src/cli.ts"

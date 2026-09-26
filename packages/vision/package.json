@@ -1,17 +1,13 @@
 {
-  "name": "@hexbox/data-store",
+  "name": "@hexbox/vision",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "本地数据集缓存（文件系统，支持离线降级）",
+  "description": "截屏识别：坐标换算、UI 元素定位、英雄头像匹配（纯函数）",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts"
-  },
-  "dependencies": {
-    "@hexbox/core": "workspace:*",
-    "@hexbox/vision": "workspace:*"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",

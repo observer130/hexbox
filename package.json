@@ -14,6 +14,7 @@
     "test": "pnpm -r test",
     "build": "pnpm -r build",
     "sync": "node --experimental-strip-types packages/data-cli/src/cli.ts sync",
+    "templates": "node --experimental-strip-types packages/data-cli/src/cli.ts templates",
     "dev:web": "pnpm --filter @hexbox/web dev",
     "dev:overlay": "pnpm --filter @hexbox/overlay dev"
   },

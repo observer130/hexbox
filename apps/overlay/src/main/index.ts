@@ -17,11 +17,9 @@
  */
 
 import { app, BrowserWindow, ipcMain, screen, type Rectangle } from 'electron';
-import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
 
+import { findGameWindowRect } from '@hexbox/vision';
 import {
   LcuClient,
   LcuHttpError,
@@ -42,8 +40,6 @@ import {
   type Dataset,
   type RankingSnapshot,
 } from '@hexbox/core';
-
-const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // 悬浮窗状态
@@ -131,56 +127,9 @@ const EMPTY_BUILD = { start: [], shoes: [], core: [], full: [] };
 // 游戏窗口定位（只读窗口几何信息）
 // ---------------------------------------------------------------------------
 
-/**
- * 查询游戏客户端主窗口矩形。
- *
- * 只调用 user32!GetWindowRect 读取**几何信息**，
- * 不打开进程句柄、不读写内存。
- */
-async function findGameWindowRect(): Promise<Rectangle | null> {
-  const windir = process.env['windir'] ?? 'C:\\Windows';
-  const ps = join(windir, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-
-  // 注意：必须用 Add-Type -TypeDefinition 而不是 -MemberDefinition。
-  // -MemberDefinition 会把 RECT 放进嵌套类型（Hexbox.WinApi+RECT），
-  // `New-Object Hexbox.RECT` 找不到它 → GetWindowRect 静默失败 → 定位永远走兜底分支。
-  const script = `
-$src = @'
-using System;
-using System.Runtime.InteropServices;
-[StructLayout(LayoutKind.Sequential)]
-public struct HEXBOX_RECT { public int Left, Top, Right, Bottom; }
-public static class HexboxWinApi {
-  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out HEXBOX_RECT lpRect);
-}
-'@
-Add-Type -TypeDefinition $src -ErrorAction SilentlyContinue
-$proc = Get-Process -Name 'LeagueClientUx','League of Legends' -ErrorAction SilentlyContinue |
-  Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
-if (-not $proc) { exit 0 }
-$r = New-Object HEXBOX_RECT
-[HexboxWinApi]::GetWindowRect($proc.MainWindowHandle, [ref]$r) | Out-Null
-[PSCustomObject]@{ X=$r.Left; Y=$r.Top; W=($r.Right-$r.Left); H=($r.Bottom-$r.Top) } |
-  ConvertTo-Json -Compress
-`;
-
-  try {
-    const { stdout } = await execFileAsync(
-      existsSync(ps) ? ps : 'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-Command', script],
-      { windowsHide: true, timeout: 8000 },
-    );
-    const text = stdout.trim();
-    if (!text) return null;
-    const o = JSON.parse(text) as { X?: number; Y?: number; W?: number; H?: number };
-    if (typeof o.X === 'number' && typeof o.W === 'number' && o.W > 0 && (o.H ?? 0) > 0) {
-      return { x: o.X, y: o.Y ?? 0, width: o.W, height: o.H ?? 0 };
-    }
-  } catch {
-    /* 降级到默认位置 */
-  }
-  return null;
-}
+// findGameWindowRect 已抽取到 @hexbox/vision（win-geometry.ts），
+// 与 debug-capture 共用同一份实现 —— 两处各写一份必然漂移。
+// 它同样只调用 user32!GetWindowRect 读取几何信息，不触碰进程内存。
 
 function computeOverlayBounds(game: Rectangle | null, display: Rectangle): Rectangle {
   // 高度按内容量加大：局内要放强度榜 + 出装

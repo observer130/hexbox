@@ -2,8 +2,11 @@ node_modules/
 dist/
 *.tsbuildinfo
 
-# 同步下来的数据（763KB，可随时用 `pnpm sync` 重新生成）
+# 同步下来的数据（可随时用 `pnpm sync` / `pnpm templates` 重新生成）
 data/
+
+# debug-capture 调试产物（真机截屏，含个人信息，不入库）
+debug/
 
 # 本地环境
 .env

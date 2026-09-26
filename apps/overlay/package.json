@@ -8,12 +8,14 @@
   "scripts": {
     "dev": "node build.mjs && electron .",
     "build": "node build.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "debug:capture": "node build.mjs && electron dist/debug-capture.cjs"
   },
   "dependencies": {
     "@hexbox/core": "workspace:*",
     "@hexbox/data-store": "workspace:*",
-    "@hexbox/lcu": "workspace:*"
+    "@hexbox/lcu": "workspace:*",
+    "@hexbox/vision": "workspace:*"
   },
   "devDependencies": {
     "electron": "^33.2.0",

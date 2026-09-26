@@ -52,19 +52,37 @@
 | `geometry.ts` | 坐标换算（截屏↔屏幕）、矩形运算 | ✅ |
 | `grid.ts` | 从截屏推断卡片网格布局 | ✅（输入像素，输出矩形）|
 | `match.ts` | 头像模板匹配打分 | ✅ |
+| `png.ts` | 零依赖 PNG 解码（模板构建期用） | ✅ |
+| `templates.ts` | 模板包编解码（构建期生成 / 运行时只读） | ✅ |
+| `win-geometry.ts` | 游戏窗口物理矩形（PowerShell，Electron 之外也可用） | ⚠️ 需真实 Windows |
 | `types.ts` | `Rect` / `CardSlot` / `MatchResult` | — |
 
 `apps/overlay` 增加：
 
 | 文件 | 职责 |
 |---|---|
-| `src/main/capture.ts` | 截屏（Electron API，非纯函数）|
-| `src/main/vision-loop.ts` | 定时截屏 → 调 vision → 推送结果 |
-| `src/renderer/overlay-canvas.ts` | 按坐标把文本画到对应位置 |
+| `src/debug-capture.ts` | 调试 CLI：截屏 → 定位 → 识别 → 标注图（S1.4）|
+| `src/main/vision-loop.ts` | 定时截屏 → 调 vision → 推送结果（S2，未开始）|
+| `src/renderer/overlay-canvas.ts` | 按坐标把文本画到对应位置（S2，未开始）|
 
 > **为什么放 core/vision 而不是主进程**：主进程需要 Electron + 真实桌面，
 > CI 跑不起来。只有纯函数才能被测试覆盖 —— 这是本项目一贯的做法
 > （见 `core/src/overlay-view.ts` 的先例）。
+
+## 二点五、模板包管线（已实现）
+
+头像模板**不在运行时生成**，由构建期命令一次性产出：
+
+```bash
+pnpm templates   # = data-cli「templates」命令
+```
+
+- 数据源：CDragon `rcp-be-lol-game-data/global/default/v1/champion-icons/<id>.png`
+  （⚠️ `dataset.json` 里的 `iconPath` 是 LCU 内部路径 `/lol-game-data/assets/...`，
+  该前缀在 CDragon 上**不存在**——不能直接拼接，按英雄 ID 构造 URL）
+- 解码：`vision/png.ts`（零依赖，node:zlib inflate），245/245 全部成功
+- 产物：`data/templates.json`（gzip+base64 单字符串，409 KB），运行时只读、离线可用
+- 落盘：`data-store` 的 `writeTemplates/readTemplates`（原子写，与数据文件同目录）
 
 ## 三、关键技术点
 
@@ -77,13 +95,21 @@
 
 ```
 截屏像素坐标
-   │  ÷ captureScale（截屏尺寸 ÷ 窗口物理尺寸）
+   │  ÷ captureScale（截屏尺寸 ÷ 窗口物理尺寸，运行时自校准）
    ▼
-窗口内逻辑坐标（0..1 归一化更稳）
-   │  × 窗口屏幕尺寸 + 窗口屏幕位置
+窗口物理像素坐标
+   │  × 窗口屏幕位置；÷ display.scaleFactor（物理 → 逻辑 DIP）
    ▼
-屏幕绝对坐标 → 覆盖层窗口坐标
+屏幕逻辑坐标 → 覆盖层窗口坐标
 ```
+
+**已确认的坐标系事实**（2026-09-27 实测）：
+- GetWindowRect 返回**物理像素**（Electron 主进程是 Per-Monitor-V2 感知）；
+- Electron `screen`/`display` 用**逻辑 DIP**；
+- desktopCapturer 缩略图尺寸 = 物理像素 × 内部缩放（不可假设）。
+
+因此**不要假设固定倍率**：`captureScale` 用「窗口物理矩形 ÷ 截屏尺寸」
+运行时求出（`vision/win-geometry.ts`），拿不到窗口矩形时才按 1.0 兜底。
 
 **建议统一用 0..1 归一化坐标做中间表示**，与分辨率解耦。
 
@@ -126,20 +152,37 @@ win.setIgnoreMouseEvents(true, { forward: true })  // 鼠标穿透
 
 ## 四、分步实施
 
-### S1 — 基础设施（可独立验证）
+### S1 — 基础设施（✅ 已完成，待真机选人阶段验证）
 
 | 步骤 | 产出 | 验证 |
 |---|---|---|
-| S1.1 | `vision/geometry.ts` 坐标换算 | 单测（含边界、缩放、偏移）|
-| S1.2 | `vision/grid.ts` 卡片定位 | 单测 + **标注图** |
-| S1.3 | `vision/match.ts` 头像匹配 | 单测 + 真实截屏命中率 |
-| S1.4 | `capture.ts` + 调试 CLI | 输出标注图供人工核对 |
+| S1.1 | `vision/geometry.ts` 坐标换算 | ✅ 单测 |
+| S1.2 | `vision/grid.ts` 卡片定位 | ✅ 单测（含结算界面真实噪声回归用例）|
+| S1.3 | `vision/match.ts` 头像匹配 | ✅ 单测；真实截屏命中率**待验证** |
+| S1.4 | `src/debug-capture.ts` 调试 CLI | ✅ 构建通过；标注图待真机产出 |
 
-**S1.4 是关键**：提供一个命令，跑一次就输出
-「原图 + 检测到的卡片框 + 识别出的英雄名」的标注图。
-这样即使开发环境跑不了游戏，也能通过你反馈的标注图迭代算法。
+S1 期间的实现要点（都来自真实教训）：
 
-### S2 — 选人阶段覆盖层
+- **grid 抗噪**：朴素「相邻竖线两两配对」在结算界面的金色元素上产出假卡片。
+  现在是「宽度精确聚桶（±2%）→ 互不相交链 → 小间隙校验（≤0.3 卡宽）→
+  中心等距校验」，并按候选桶依次尝试 —— 均匀网格的「间距桶」假链会被小间隙约束拒绝。
+- **debug-capture 防呆**：先查 LCU gameflow phase，非 ChampSelect 拒绝运行
+  （`HEXBOX_DEBUG_FORCE=1` 可跳过）；上次在结算界面跑出的误检图即缺此检查。
+- **模板离线**：`pnpm templates` 构建期生成 `data/templates.json`，
+  调试工具运行时只读本地（此前用隐藏窗口 + Chromium 解码 + 现场联网，又慢又脆）。
+- **窗口矩形统一**：`findGameWindowRect` 抽到 `vision/win-geometry.ts`，
+  悬浮窗主进程与调试工具共用，避免两份实现漂移。
+
+**下一步（需要你）**：在选人阶段运行
+
+```bash
+pnpm --filter @hexbox/overlay debug:capture
+```
+
+把 `debug/annotated.png` 发回，根据标注图迭代 `grid.ts` / `match.ts` 的阈值，
+稳定后再做 S2 覆盖层绘制。
+
+### S2 — 选人阶段覆盖层（未开始）
 
 | 步骤 | 说明 |
 |---|---|

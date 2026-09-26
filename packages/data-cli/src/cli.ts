@@ -28,9 +28,11 @@ import {
   writeBuilds,
   writeDataset,
   writeRankings,
+  writeTemplates,
 } from '@hexbox/data-store';
 import { createRankingProviders, createStaticProviders } from '@hexbox/provider-registry';
 import { fetchHeroDetails } from '@hexbox/provider-tencent';
+import { buildEntry, encodePack, type TemplateEntry, type TemplatePack } from '@hexbox/vision';
 import type { ChampionDetailSet, Dataset, RankingSnapshot } from '@hexbox/core';
 
 const DEFAULT_STORE = resolve(process.cwd(), 'data');
@@ -190,8 +192,117 @@ async function cmdSyncBuilds(storeRoot: string, championIds: readonly number[]):
   console.log(`✓ 已写入 ${path}  (${formatBytes(size)})`);
 }
 
-async function cmdStatus(storeRoot: string): Promise<number> {
+/**
+ * 构建英雄头像模板包（截屏识别的构建期产物）。
+ *
+ * 为什么构建期做：运行时（悬浮窗）必须离线、且不应为识别
+ * 单独引图像解码依赖 —— 见 packages/vision/src/templates.ts 头注。
+ *
+ * 图标 URL 映射（实测确认，勿改回）：
+ *   dataset.json 的 iconPath 是 **LCU 内部资产路径**
+ *   （`/lol-game-data/assets/v1/champion-icons/<id>.png`），
+ *   该前缀在 CDragon 上**不存在**（404）。CDragon 的真实布局是
+ *   `<plugins>/rcp-be-lol-game-data/global/default/v1/champion-icons/<id>.png`，
+ *   因此这里按英雄 ID 直接构造，而不是拼接 iconPath。
+ *
+ * 单个头像失败只跳过该英雄（缺失模板 = 该英雄可能识别不出，可接受），
+ * 全部失败才整体报错。
+ */
+export function championIconUrl(
+  championId: number,
+  baseUrl = 'https://raw.communitydragon.org/latest/plugins',
+): string {
+  return `${baseUrl}/rcp-be-lol-game-data/global/default/v1/champion-icons/${championId}.png`;
+}
+
+export async function fetchTemplates(
+  champions: readonly { readonly id: number; readonly name: string; readonly alias: string; readonly iconPath?: string }[],
+  options: {
+    readonly size?: number;
+    readonly baseUrl?: string;
+    readonly concurrency?: number;
+    readonly timeoutMs?: number;
+  } = {},
+): Promise<TemplatePack> {
+  const { decodePng, extractGray } = await import('@hexbox/vision');
+  const size = options.size ?? 24;
+  const baseUrl = options.baseUrl ?? 'https://raw.communitydragon.org/latest/plugins';
+  const concurrency = options.concurrency ?? 8;
+  const timeoutMs = options.timeoutMs ?? 10_000;
+
+  const entries: TemplateEntry[] = [];
+  let failed = 0;
+  let cursor = 0;
+
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const idx = cursor++;
+      if (idx >= champions.length) return;
+      const c = champions[idx]!;
+      const url = championIconUrl(c.id, baseUrl);
+      try {
+        const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const png = decodePng(new Uint8Array(await res.arrayBuffer()));
+        // 头像整图缩放为模板（PNG 自带方形画布，无需再抠内框）
+        const gray = extractGray(
+          { width: png.width, height: png.height, data: png.data },
+          { x: 0, y: 0, w: 1, h: 1 },
+          size,
+        );
+        if (!gray) throw new Error('extractGray 返回空');
+        entries.push(buildEntry({ id: c.id, name: c.name, alias: c.alias }, gray, size));
+      } catch {
+        failed++;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+
+  entries.sort((a, b) => a.championId - b.championId);
+  if (entries.length === 0) {
+    throw new Error(`全部 ${champions.length} 个头像拉取失败（网络异常？）`);
+  }
+
+  return {
+    version: 1,
+    size,
+    createdAt: new Date().toISOString(),
+    sourceUrl: baseUrl,
+    count: entries.length,
+    templates: entries,
+    // failed 不入包：包内容只与「成功模板」有关，失败数仅打日志
+  } as TemplatePack & { __failed?: number };
+}
+
+async function cmdTemplates(storeRoot: string): Promise<number> {
   const ds = await readDataset(storeRoot);
+  if (!ds || ds.champions.length === 0) {
+    console.error('✗ 读不到图鉴英雄列表 —— 请先运行 pnpm sync');
+    return 1;
+  }
+
+  process.stdout.write(`  · 英雄头像模板包 (${ds.champions.length} 个英雄) … `);
+  const t0 = Date.now();
+  let pack: TemplatePack;
+  try {
+    pack = await fetchTemplates(ds.champions);
+  } catch (err) {
+    console.log('✗');
+    console.error(`      ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
+  const encoded = encodePack(pack);
+  const path = await writeTemplates(storeRoot, encoded);
+  const { size } = await stat(path);
+  console.log(
+    `✓ ${Date.now() - t0}ms  [${pack.count}/${ds.champions.length} 个模板，` +
+      `${pack.size}×${pack.size} 灰度] → ${path} (${formatBytes(size)})`,
+  );
+  return 0;
+}
+
+async function cmdStatus(storeRoot: string): Promise<number> {  const ds = await readDataset(storeRoot);
   const f = checkFreshness(ds);
 
   console.log('静态图鉴');
@@ -238,6 +349,9 @@ async function main(): Promise<void> {
     case 'sync':
       process.exitCode = await cmdSync(storeRoot);
       break;
+    case 'templates':
+      process.exitCode = await cmdTemplates(storeRoot);
+      break;
     case 'status':
       process.exitCode = await cmdStatus(storeRoot);
       break;
@@ -247,8 +361,9 @@ async function main(): Promise<void> {
           'hexbox 数据同步 CLI',
           '',
           '用法:',
-          '  sync     拉取所有启用的数据源并落盘',
-          '  status   查看本地数据集状态',
+          '  sync        拉取所有启用的数据源并落盘',
+          '  templates   构建英雄头像模板包（截屏识别用，需联网）',
+          '  status      查看本地数据集状态',
           '',
           '选项:',
           '  --store <dir>   数据目录（默认 ./data）',

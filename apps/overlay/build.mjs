@@ -31,6 +31,8 @@ await build({
   entryPoints: [
     join(here, 'src', 'main', 'index.ts'),
     join(here, 'src', 'preload', 'index.ts'),
+    // 截屏识别调试工具（独立入口，不参与常规运行）
+    join(here, 'src', 'debug-capture.ts'),
   ],
   outdir: out,
   outExtension: { '.js': '.cjs' },

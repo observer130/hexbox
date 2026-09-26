@@ -17,12 +17,14 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import type { ChampionDetailSet, Dataset, RankingSnapshot } from '@hexbox/core';
+import type { TemplatePack } from '@hexbox/vision';
 
 export interface StorePaths {
   readonly root: string;
   readonly dataset: string;
   readonly rankings: string;
   readonly builds: string;
+  readonly templates: string;
 }
 
 export function resolveStorePaths(root: string): StorePaths {
@@ -31,6 +33,7 @@ export function resolveStorePaths(root: string): StorePaths {
     dataset: join(root, 'dataset.json'),
     rankings: join(root, 'rankings.json'),
     builds: join(root, 'builds.json'),
+    templates: join(root, 'templates.json'),
   };
 }
 
@@ -92,6 +95,30 @@ export async function writeBuilds(root: string, set: ChampionDetailSet): Promise
 /** 读取单英雄详情集合；不存在时返回 null（悬浮窗据此降级）。 */
 export async function readBuilds(root: string): Promise<ChampionDetailSet | null> {
   return await readJson<ChampionDetailSet>(resolveStorePaths(root).builds, '英雄详情');
+}
+
+/**
+ * 写入头像模板包（原子写）。
+ *
+ * 模板包是**构建期产物**（`pnpm templates` 生成，gzip+base64 的单字符串），
+ * 供悬浮窗截屏识别离线使用 —— 与数据同放 data/ 但更新节奏独立：
+ * 头像资源只在补丁改动英雄时变化。
+ */
+export async function writeTemplates(root: string, packJson: string): Promise<string> {
+  await mkdir(root, { recursive: true });
+  const path = resolveStorePaths(root).templates;
+  const tmp = `${path}.tmp`;
+  await writeFile(tmp, packJson, 'utf8');
+  const { rename } = await import('node:fs/promises');
+  await rename(tmp, path);
+  return path;
+}
+
+/** 读取头像模板包（gzip+base64 字符串）；不存在返回 null。 */
+export async function readTemplates(root: string): Promise<string | null> {
+  const path = resolveStorePaths(root).templates;
+  if (!existsSync(path)) return null;
+  return await readFile(path, 'utf8');
 }
 
 export interface FreshnessInfo {
