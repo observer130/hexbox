@@ -6,7 +6,7 @@
  *  or it ignores that error"）。
  */
 
-import { basicAuthHeader, type LcuCredentials } from './detect.ts';
+import { basicAuthHeader, withInsecureTls, type LcuCredentials } from './detect.ts';
 
 export interface LcuRequestOptions {
   readonly signal?: AbortSignal;
@@ -77,13 +77,18 @@ export class LcuClient {
     }
 
     try {
-      const res = await fetch(url, {
-        headers: {
-          Authorization: basicAuthHeader(this.creds.password),
-          Accept: 'application/json',
-        },
-        signal: controller.signal,
-      });
+      // 用 withInsecureTls 包裹：LCU 是自签证书，不豁免会直接
+      // 抛 SELF_SIGNED_CERT_IN_CHAIN（表现为 fetch failed）。
+      // 放在客户端内部而不是让调用方设置环境变量 —— 后者已经漏过三次。
+      const res = await withInsecureTls(() =>
+        fetch(url, {
+          headers: {
+            Authorization: basicAuthHeader(this.creds.password),
+            Accept: 'application/json',
+          },
+          signal: controller.signal,
+        }),
+      );
       if (!res.ok) {
         throw new LcuHttpError(path, res.status);
       }
@@ -129,16 +134,19 @@ export class LcuClient {
     }
 
     try {
-      const res = await fetch(url, {
-        method,
-        headers: {
-          Authorization: basicAuthHeader(this.creds.password),
-          Accept: 'application/json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
+      // 同 get：写请求也必须在关闭 TLS 校验的前提下发出
+      const res = await withInsecureTls(() =>
+        fetch(url, {
+          method,
+          headers: {
+            Authorization: basicAuthHeader(this.creds.password),
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        }),
+      );
       if (!res.ok) {
         throw new LcuHttpError(path, res.status);
       }

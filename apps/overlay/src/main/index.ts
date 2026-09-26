@@ -584,7 +584,9 @@ function registerIpc(): void {
 }
 
 app.whenReady().then(() => {
-  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'; // LCU 自签名证书（官方要求）
+  // 注意：**不要**在这里全局设置 NODE_TLS_REJECT_UNAUTHORIZED。
+  // LcuClient 内部已用 withInsecureTls() 按请求豁免自签证书，
+  // 全局关闭会顺带让所有其它 HTTPS 请求（含外部数据源）失去校验。
 
   registerIpc();
   createWindow();

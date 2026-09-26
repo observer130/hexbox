@@ -179,8 +179,12 @@ export async function findLcuPort(
  *
  * 已知取舍：这是进程级开关，回调期间并发的 HTTPS 请求也会被一并豁免。
  * 本函数只用于探测本机 LCU 端口，调用点集中，风险可接受。
+ *
+ * ⚠️ `LcuClient` 内部也用它包裹每个请求 —— 因为「忘记关闭校验」
+ * 这个坑在本项目已经踩过三次（findLcuPort、overlay、itemset-cli）。
+ * 与其在每个入口重复设置，不如让客户端自己保证。
  */
-async function withInsecureTls<T>(fn: () => Promise<T>): Promise<T> {
+export async function withInsecureTls<T>(fn: () => Promise<T>): Promise<T> {
   const prev = process.env['NODE_TLS_REJECT_UNAUTHORIZED'];
   process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
   try {

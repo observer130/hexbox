@@ -99,7 +99,7 @@ pnpm --filter @hexbox/web typecheck
 Tests use Node's built-in runner: `node --experimental-strip-types --test ...`.
 **Make the suite green before committing.** New behavior should include tests.
 
-Current coverage: 105 tests — `core` 20 / `lcu` 13 / `provider-communitydragon` 12 /
+Current coverage: 140 tests — `core` 40 / `lcu` 28 / `provider-communitydragon` 12 /
 `provider-tencent` 39 / `data-store` 14 / `data-cli` 7. CI
 (`.github/workflows/ci.yml`) runs `typecheck` → `test` → `build` on every push/PR.
 
@@ -111,6 +111,19 @@ Current coverage: 105 tests — `core` 20 / `lcu` 13 / `provider-communitydragon
 > **Read `docs/OVERLAY-STAGES.md` before changing overlay features.** It records what
 > comparable tools show at each game stage. Showing augment data during champ select
 > was a real mistake — players pick champions there, not augments.
+
+> **Always talk to the LCU through `LcuClient`.** It wraps every request in
+> `withInsecureTls()` because the LCU uses a self-signed certificate; a bare `fetch`
+> fails with `SELF_SIGNED_CERT_IN_CHAIN` (surfacing only as `fetch failed`).
+> This trap has been hit **three times** (`findLcuPort`, the overlay, the item-set
+> CLI), so do not set `NODE_TLS_REJECT_UNAUTHORIZED` globally at each entry point —
+> let the client handle it. Use `getOrNull()` when "no session" (404) is normal,
+> and check `LcuHttpError.isAuthFailure` before discarding credentials.
+
+> **`data/` writes: item sets touch real player data.** `core/src/itemset.ts` only
+> ever replaces sets whose title starts with `hexbox`; never overwrite or delete
+> hand-written sets. Brawl uses map ID **12** (`maps.json` name = "Random Map");
+> a wrong map ID makes the set silently not appear.
 
 > **Do not write date-dependent tests.** Candidate stat dates are generated from the
 > real current date, so hardcoding one (e.g. `20260924` as "T-1") makes the test go
