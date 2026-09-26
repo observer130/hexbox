@@ -292,12 +292,39 @@ async function cmdTemplates(storeRoot: string): Promise<number> {
     console.error(`      ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
+
+  // 名字指纹（OCR 阶段 1）：读 scripts/render-name-fingerprints.ps1 的产物。
+  // 缺失不阻断（识别降级为仅头像模板,已有真机数据表明其不可靠,但保留结构）。
+  const { readFileSync } = await import('node:fs');
+  const fpPath = resolve(storeRoot, '..', 'data', 'name-fingerprints.json');
+  const fpAlt = resolve(process.cwd(), 'data', 'name-fingerprints.json');
+  for (const p of [fpAlt, fpPath]) {
+    try {
+      const raw = JSON.parse(readFileSync(p, 'utf8')) as Array<{
+        championId: number;
+        name: string;
+        width: number;
+        height: number;
+        bits: string;
+      }>;
+      (pack as TemplatePack & { names?: TemplatePack['names'] }).names = raw;
+      console.log(`\n  · 名字指纹 ${raw.length} 个 ← ${p}`);
+      break;
+    } catch {
+      /* 尝试下一个路径 */
+    }
+  }
+  if (!pack.names) {
+    console.log('\n  · 名字指纹缺失（运行 scripts/render-name-fingerprints.ps1 生成）');
+  }
+
   const encoded = encodePack(pack);
   const path = await writeTemplates(storeRoot, encoded);
   const { size } = await stat(path);
   console.log(
     `✓ ${Date.now() - t0}ms  [${pack.count}/${ds.champions.length} 个模板，` +
-      `${pack.size}×${pack.size} 灰度] → ${path} (${formatBytes(size)})`,
+      `${pack.size}×${pack.size} 灰度${pack.names ? ` + ${pack.names.length} 名字指纹` : ''}]` +
+      ` → ${path} (${formatBytes(size)})`,
   );
   return 0;
 }

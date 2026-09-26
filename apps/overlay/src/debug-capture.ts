@@ -29,17 +29,24 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import {
+  base64ToBits,
   captureScale,
   decodePack,
   detectCards,
+  encodePng,
   extractGray,
+  extractGrayRaw,
+  extractNameStrip,
   makeGeometry,
   matchChampionCareful,
+  matchName,
+  NAME_STRIP,
   normalizedRectToScreen,
   normalizeGray,
   prepareTemplates,
   similarity,
   type Bitmap,
+  type NameFingerprint,
   type PortraitTemplate,
   type PreparedTemplate,
   type Rect,
@@ -175,6 +182,29 @@ async function loadTemplates(): Promise<PreparedTemplate[]> {
   return [];
 }
 
+/** 名字指纹库（OCR 阶段 1 的比对库）。 */
+async function loadNameLibrary(): Promise<NameFingerprint[]> {
+  const path = join(dirname(OUT_DIR), 'data', 'templates.json');
+  try {
+    const pack = decodePack(await readFile(path, 'utf8'));
+    if (!pack.names || pack.names.length === 0) {
+      console.warn('[debug] 模板包无名字指纹 —— 运行 pnpm templates 重建（含 scripts/render-name-fingerprints.ps1 产物）');
+      return [];
+    }
+    const lib = pack.names.map((n) => ({
+      championId: n.championId,
+      name: n.name,
+      width: n.width,
+      height: n.height,
+      bits: base64ToBits(n.bits, n.width * n.height),
+    }));
+    console.log(`[debug] 名字指纹 ${lib.length} 个（OCR 主识别通道）`);
+    return lib;
+  } catch {
+    return [];
+  }
+}
+
 /** 把归一化灰度还原为 0..255 灰度（逆变换，使比较走统一管线）。 */
 function denormalize(norm: readonly number[], size: number): Uint8Array {
   const n = norm.length;
@@ -200,12 +230,20 @@ function denormalize(norm: readonly number[], size: number): Uint8Array {
 app.whenReady().then(async () => {
   mkdirSync(OUT_DIR, { recursive: true });
 
-  // 0) 阶段检查：上次在结算界面跑出一堆误检图，就是缺了这一步
+  // 0) 阶段检查：上次在结算界面跑出一堆误检图，就是缺了这一步。
+  //
+  // ⚠️ 无凭证（phase = null）也必须拒绝：真机教训 —— 调试工具以
+  // 非管理员运行时读不到 LCU 凭证，phase 为 null,若放行就会在
+  // **游戏对局内**误检出"卡片"（对局画面结构复杂,等宽校验拦不住）。
   const phase = await currentPhase();
-  console.log(`[debug] LCU phase = ${phase ?? '未知（无凭证，跳过检查）'}`);
-  if (phase && phase !== 'ChampSelect') {
+  console.log(`[debug] LCU phase = ${phase ?? '未知（读不到凭证）'}`);
+  if (phase !== 'ChampSelect') {
+    const why =
+      phase === null
+        ? '读不到 LCU 凭证（请以管理员身份运行，或让 LCU 客户端处于登录状态）'
+        : `当前阶段是 ${phase}`;
     console.error(
-      `✗ 当前阶段是 ${phase}，不是 ChampSelect。\n` +
+      `✗ 无法确认处于选人阶段：${why}。\n` +
         `  卡片定位只对选人界面有效 —— 请进入选人阶段后再运行。\n` +
         `  （仍要强制调试其它界面：设 HEXBOX_DEBUG_FORCE=1）`,
     );
@@ -273,18 +311,41 @@ app.whenReady().then(async () => {
     height: (windowPhysical?.height ?? bmp.height / scale.scale) / display.scaleFactor,
   });
 
+  const nameLibrary = await loadNameLibrary();
+
   const cards: DebugResult['cards'] = [];
   for (const rect of det.cards) {
+    // 识别主通道（阶段 1）：卡片下部**名字区 OCR**
+    // 名字带中心 ≈ 0.885 卡高（见 vision/ocr.ts NAME_STRIP）
+    const stripRect: Rect = {
+      x: rect.x + rect.w * (1 - NAME_STRIP.width) / 2,
+      y: rect.y + rect.h * (NAME_STRIP.yCenter - NAME_STRIP.height / 2),
+      w: rect.w * NAME_STRIP.width,
+      h: rect.h * NAME_STRIP.height,
+    };
+    const stripRaw = extractGrayRaw(bmp, stripRect);
+    let ocrId: number | null = null;
+    let ocrName: string | null = null;
+    let ocrScore = 0;
+    if (stripRaw && nameLibrary.length > 0) {
+      const strip = extractNameStrip(stripRaw.gray, stripRaw.width, stripRaw.height);
+      const m = matchName(strip, nameLibrary, { minScore: 0.45 });
+      if (m) {
+        ocrId = m.championId;
+        ocrName = m.name;
+        ocrScore = m.score;
+      }
+    }
+
+    // 识别副通道（阶段 2 预留）：头像模板（真机数据表明对渲染立绘不可靠,
+    // 仅在 OCR 未命中时输出最近候选供诊断）
     const inner: Rect = {
       x: rect.x + rect.w * PORTRAIT_INSET.x,
       y: rect.y + rect.h * PORTRAIT_INSET.y,
       w: rect.w * PORTRAIT_INSET.w,
       h: rect.h * PORTRAIT_INSET.h,
     };
-    const gray = extractGray(bmp, inner, templates[0]?.norm.length ? Math.sqrt(templates[0]!.norm.length) : 24);
-    const m = gray && templates.length > 0 ? matchChampionCareful(gray, templates) : null;
-    // top3 候选仅供诊断（识别阈值极严,正式认定需要更高分）,
-    // 便于从标注图判断「模板库与游戏内渲染的差距」
+    const gray = extractGray(bmp, inner, 24);
     let top3: Array<{ id: number; score: number }> = [];
     if (gray && templates.length > 0) {
       const q = normalizeGray(gray);
@@ -293,12 +354,13 @@ app.whenReady().then(async () => {
         .sort((a, b) => b.score - a.score)
         .slice(0, 3);
     }
+
     cards.push({
       rect,
       screenRect: normalizedRectToScreen(rect, geo),
-      championId: m?.championId ?? null,
-      championName: m ? (nameById.get(m.championId) ?? null) : null,
-      score: m?.score ?? 0,
+      championId: ocrId,
+      championName: ocrName ?? (ocrId ? (nameById.get(ocrId) ?? null) : null),
+      score: ocrScore,
       top3: top3.map((t) => ({ id: t.id, name: nameById.get(t.id) ?? `#${t.id}`, score: t.score })),
     });
   }
@@ -318,93 +380,88 @@ app.whenReady().then(async () => {
   writeFileSync(join(OUT_DIR, 'raw.png'), grabbed.img.toPNG());
   writeFileSync(join(OUT_DIR, 'result.json'), JSON.stringify(result, null, 2));
 
-  // 4) 标注图（PNG，便于直接查看）
+  // 4) 标注图（PNG）—— 纯 Node 位图合成 + encodePng
   //
-  // 用隐藏窗口渲染 HTML(canvas 绘制原图+检测框)，再 capturePage。
-  // ⚠️ 三个已踩的坑：
-  //   a. 不能用 nativeImage.createFromDataURL(SVG dataURL)：不支持 SVG，
-  //      产出 1x1 空图。
-  //   b. 不能把截图 base64 嵌进 data: URL 的 HTML：4MB 图 → URL 超长，
-  //      ERR_INVALID_URL。改为写 HTML 文件、用 file:// 引用 raw.png。
-  //   c. capturePage 只截**视口**：画布 3413×1920 配 1600×1000 窗口
-  //      只能得到左上角裁切。必须把整图**缩放进窗口**（annotateScale）。
-  const MAX_W = 1600;
-  const MAX_H = 1000;
-  const annotateScale = Math.min(MAX_W / bmp.width, MAX_H / bmp.height);
-  const cssW = Math.round(bmp.width * annotateScale);
-  const cssH = Math.round(bmp.height * annotateScale);
-  const note = `phase=${phase ?? '?'}  lines=${det.lines.length}  cards=${det.cards.length}  scale=${scale.scale.toFixed(2)}`;
-  const boxesHtml = cards
-    .map((c, i) => {
-      const x = c.rect.x * cssW;
-      const y = c.rect.y * cssH;
-      const w = c.rect.w * cssW;
-      const h = c.rect.h * cssH;
-      // 未认定时展示 top1 候选（诊断价值：看模板库与游戏内渲染的差距）
-      const top1 = c.top3[0];
-      const label =
-        c.championName ?? (top1 ? `未认定(最近:${top1.name} ${top1.score.toFixed(3)})` : '未识别');
-      const color = c.championId ? '#4ade80' : '#e0b64a';
-      const score = c.score > 0 ? ` ${c.score.toFixed(3)}` : '';
-      return { x, y, w, h, label: `${i + 1}. ${label}${score}`, color };
-    })
-    .map(
-      (b) => `
-        ctx.strokeStyle = '${b.color}'; ctx.lineWidth = 2;
-        ctx.strokeRect(${b.x}, ${b.y}, ${b.w}, ${b.h});
-        ctx.font = '14px "Microsoft YaHei", sans-serif';
-        const tw = ctx.measureText(${JSON.stringify(b.label)}).width + 12;
-        ctx.fillStyle = 'rgba(0,0,0,0.75)';
-        ctx.fillRect(${b.x}, ${b.y + b.h}, ${'Math.min(tw, ' + cssW + ' - ' + b.x + ')'}, 24);
-        ctx.fillStyle = '${b.color}';
-        ctx.fillText(${JSON.stringify(b.label)}, ${b.x + 6}, ${b.y + b.h + 17});`,
-    )
-    .join('');
-
-  const htmlPath = join(OUT_DIR, 'annotated.html');
-  const html =
-    `<canvas id="c" width="${cssW}" height="${cssH}"></canvas>` +
-    `<script>
-      const img = new Image();
-      img.onload = () => {
-        const ctx = document.getElementById('c').getContext('2d');
-        ctx.drawImage(img, 0, 0, ${cssW}, ${cssH});
-        ${boxesHtml}
-        ctx.fillStyle = 'rgba(0,0,0,0.8)';
-        ctx.fillRect(0, ${cssH - 34}, ${cssW}, 34);
-        ctx.fillStyle = '#ffd';
-        ctx.font = '16px monospace';
-        ctx.fillText(${JSON.stringify(note)}, 10, ${cssH - 12});
-        window.__done = true;
+  // ⚠️ 已废弃的两条路（都真实踩过，勿回退）：
+  //   a. nativeImage.createFromDataURL(SVG)：不支持 SVG → 1x1 空图；
+  //   b. 隐藏窗口 canvas + capturePage：时序不确定（三次运行一次空图），
+  //      且视口裁切需要额外缩放处理。
+  // 位图合成完全确定：在 raw 的 RGBA 副本上直接写像素。
+  {
+    const ann = new Uint8ClampedArray(bmp.data); // 副本
+    const W = bmp.width;
+    const H = bmp.height;
+    const drawRect = (nx: number, ny: number, nw: number, nh: number, r: number, g: number, b: number, thickness = 3): void => {
+      const x0 = Math.max(0, Math.round(nx * W));
+      const y0 = Math.max(0, Math.round(ny * H));
+      const x1 = Math.min(W - 1, Math.round((nx + nw) * W));
+      const y1 = Math.min(H - 1, Math.round((ny + nh) * H));
+      const set = (x: number, y: number): void => {
+        const i = (y * W + x) * 4;
+        ann[i] = r;
+        ann[i + 1] = g;
+        ann[i + 2] = b;
+        ann[i + 3] = 255;
       };
-      img.onerror = () => { window.__error = 'image load failed'; };
-      img.src = 'file:///' + ${JSON.stringify(join(OUT_DIR, 'raw.png').replace(/\\/g, '/'))};
-    </script>`;
-  writeFileSync(htmlPath, `<html><body style="margin:0">${html}</body></html>`, 'utf8');
-
-  const render = new BrowserWindow({ show: false, width: 1600, height: 1000 });
-  try {
-    await render.loadFile(htmlPath);
-    // 轮询等待画完（executeJavaScript 等待 __done）
-    await render.webContents.executeJavaScript(
-      'new Promise((res, rej) => { const t = setInterval(() => { if (window.__done) { clearInterval(t); res(true); } if (window.__error) { clearInterval(t); rej(window.__error); } }, 50); })',
-    );
-    const image = await render.webContents.capturePage();
-    if (!image.isEmpty()) {
-      writeFileSync(join(OUT_DIR, 'annotated.png'), image.toPNG());
-    } else {
-      console.warn('[debug] 标注图渲染为空（result.json / raw.png 仍可用）');
+      for (let t = 0; t < thickness; t++) {
+        for (let x = x0; x <= x1; x++) {
+          set(x, Math.min(H - 1, y0 + t));
+          set(x, Math.max(0, y1 - t));
+        }
+        for (let y = y0; y <= y1; y++) {
+          set(Math.min(W - 1, x0 + t), y);
+          set(Math.max(0, x1 - t), y);
+        }
+      }
+    };
+    for (const c of cards) {
+      // 认定=绿；未认定=黄（同时画出名字带,便于核对 OCR 提取区域）
+      const [r, g, b] = c.championId ? [0x4a, 0xde, 0x80] : [0xe0, 0xb6, 0x4a];
+      drawRect(c.rect.x, c.rect.y, c.rect.w, c.rect.h, r, g, b);
+      drawRect(
+        c.rect.x + c.rect.w * (1 - NAME_STRIP.width) / 2,
+        c.rect.y + c.rect.h * (NAME_STRIP.yCenter - NAME_STRIP.height / 2),
+        c.rect.w * NAME_STRIP.width,
+        c.rect.h * NAME_STRIP.height,
+        0x6f, 0xb3, 0xd2, 2,
+      );
     }
-  } catch (e) {
-    console.warn('[debug] 标注图渲染失败（result.json / raw.png 仍可用）:', e instanceof Error ? e.message : e);
-  } finally {
-    render.destroy();
+    writeFileSync(join(OUT_DIR, 'annotated.png'), encodePng({ width: W, height: H, data: ann }));
+  }
+
+  // 5) 名字带裁剪图（OCR 输入,人工核对提取区域是否精准）
+  for (const [i, c] of cards.entries()) {
+    const stripRect: Rect = {
+      x: c.rect.x + c.rect.w * (1 - NAME_STRIP.width) / 2,
+      y: c.rect.y + c.rect.h * (NAME_STRIP.yCenter - NAME_STRIP.height / 2),
+      w: c.rect.w * NAME_STRIP.width,
+      h: c.rect.h * NAME_STRIP.height,
+    };
+    const raw = extractGrayRaw(bmp, stripRect);
+    if (!raw) continue;
+    // 灰度 → RGBA（放大 2 倍便于查看）
+    const scale2 = 2;
+    const w = raw.width * scale2;
+    const h = raw.height * scale2;
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const g = raw.gray[Math.floor(y / scale2) * raw.width + Math.floor(x / scale2)]!;
+        const d = (y * w + x) * 4;
+        rgba[d] = g;
+        rgba[d + 1] = g;
+        rgba[d + 2] = g;
+        rgba[d + 3] = 255;
+      }
+    }
+    writeFileSync(join(OUT_DIR, `name-strip-${i + 1}.png`), encodePng({ width: w, height: h, data: rgba }));
   }
 
   console.log('\n已输出到 debug/：');
-  console.log('  annotated.png  原图 + 检测框（请人工核对）');
-  console.log('  raw.png        原始截屏');
-  console.log('  result.json    检测结果');
+  console.log('  annotated.png      原图 + 检测框 + 名字带（人工核对）');
+  console.log('  name-strip-N.png   每张卡的名字区裁剪（OCR 输入）');
+  console.log('  raw.png            原始截屏');
+  console.log('  result.json        检测结果');
   for (const [i, c] of cards.entries()) {
     const decided = c.championName ?? '未认定';
     const top = c.top3.map((t) => `${t.name}=${t.score.toFixed(3)}`).join(' > ');

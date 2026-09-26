@@ -30,6 +30,35 @@ export interface MatchCandidate {
   readonly score: number;
 }
 
+/**
+ * 从位图取子矩形 → **原始分辨率**灰度矩阵（不做缩放）。
+ *
+ * 与 `extractGray(outSize)` 的区别：OCR 名字带需要原始长宽比
+ * （名字宽度随字数变化，强行正方形会破坏字形），由调用方自行降采样。
+ */
+export function extractGrayRaw(
+  bmp: Bitmap,
+  rect: Rect,
+): { gray: Uint8Array; width: number; height: number } | null {
+  const x0 = Math.round(rect.x * bmp.width);
+  const y0 = Math.round(rect.y * bmp.height);
+  const w = Math.round(rect.w * bmp.width);
+  const h = Math.round(rect.h * bmp.height);
+  if (w <= 0 || h <= 0 || x0 < 0 || y0 < 0) return null;
+  if (x0 + w > bmp.width || y0 + h > bmp.height) return null;
+
+  const gray = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = ((y0 + y) * bmp.width + (x0 + x)) * 4;
+      gray[y * w + x] = Math.round(
+        0.299 * bmp.data[i]! + 0.587 * bmp.data[i + 1]! + 0.114 * bmp.data[i + 2]!,
+      );
+    }
+  }
+  return { gray, width: w, height: h };
+}
+
 /** 从位图取子矩形 → 灰度数组（含面积平均降采样）。 */
 export function extractGray(
   bmp: Bitmap,

@@ -31,6 +31,22 @@ export interface TemplateEntry {
   readonly norm: readonly number[];
 }
 
+/**
+ * 英雄名字指纹（OCR 用）。
+ *
+ * `bits` 是行优先二值位串（1 = 文字像素），由系统字体
+ * （Microsoft YaHei，与游戏内名字字体同款）渲染后二值化得到。
+ * 序列化时按位打包成字节再 base64（`packBits`/`unpackBits`）。
+ */
+export interface NameEntry {
+  readonly championId: number;
+  readonly name: string;
+  readonly width: number;
+  readonly height: number;
+  /** base64（打包位串）。 */
+  readonly bits: string;
+}
+
 export interface TemplatePack {
   readonly version: 1;
   readonly size: number;
@@ -38,6 +54,36 @@ export interface TemplatePack {
   readonly sourceUrl: string;
   readonly count: number;
   readonly templates: readonly TemplateEntry[];
+  /** 名字指纹库（OCR 阶段 1 用）。构建环境无 GDI 时缺省。 */
+  readonly names?: readonly NameEntry[];
+}
+
+/** 把 0/1 位串打包成字节（末位补零）。 */
+export function packBits(bits: readonly number[]): Uint8Array {
+  const bytes = new Uint8Array(Math.ceil(bits.length / 8));
+  for (let i = 0; i < bits.length; i++) {
+    if (bits[i]) bytes[i >> 3]! |= 1 << (i & 7);
+  }
+  return bytes;
+}
+
+/** `packBits` 的逆变换。 */
+export function unpackBits(packed: Uint8Array, bitLength: number): Uint8Array {
+  const bits = new Uint8Array(bitLength);
+  for (let i = 0; i < bitLength; i++) {
+    bits[i] = (packed[i >> 3]! >> (i & 7)) & 1;
+  }
+  return bits;
+}
+
+/** 位串 → base64（NameEntry 序列化用）。 */
+export function bitsToBase64(bits: readonly number[]): string {
+  return Buffer.from(packBits(bits)).toString('base64');
+}
+
+/** base64 → 位串（NameEntry 反序列化用）。 */
+export function base64ToBits(b64: string, bitLength: number): Uint8Array {
+  return unpackBits(new Uint8Array(Buffer.from(b64, 'base64')), bitLength);
 }
 
 /** 从模板灰度构建条目（归一化在此完成，落盘即终态）。 */
@@ -68,6 +114,7 @@ export function encodePack(pack: TemplatePack): string {
     sourceUrl: pack.sourceUrl,
     count: pack.count,
     templates: pack.templates,
+    names: pack.names ?? [],
   });
   return gzipSync(Buffer.from(json, 'utf8')).toString('base64');
 }
@@ -93,6 +140,13 @@ export function decodePack(encoded: string): TemplatePack {
       size: number;
       norm: number[];
     }>;
+    names?: Array<{
+      championId: number;
+      name: string;
+      width: number;
+      height: number;
+      bits: string;
+    }>;
   };
   if (raw.version !== 1) throw new Error(`不支持的模板包版本 ${raw.version}`);
   if (!Array.isArray(raw.templates)) throw new Error('模板包缺少 templates 数组');
@@ -103,7 +157,7 @@ export function decodePack(encoded: string): TemplatePack {
       throw new Error(`模板 ${t.championId} 灰度长度 ${t.norm.length} ≠ ${expected}`);
     }
   }
-  return {
+  const out: TemplatePack & { names?: readonly NameEntry[] } = {
     version: 1,
     size: raw.size,
     createdAt: raw.createdAt,
@@ -111,4 +165,8 @@ export function decodePack(encoded: string): TemplatePack {
     count: raw.count,
     templates: raw.templates,
   };
+  if (Array.isArray(raw.names)) {
+    out.names = raw.names;
+  }
+  return out;
 }
