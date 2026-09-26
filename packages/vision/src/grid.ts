@@ -1,14 +1,21 @@
 /**
  * 英雄卡片定位
  *
- * 目标：从截屏中找出选人阶段英雄卡片的矩形。
+ * 检测原理（2026-09-27 用真实选人截图校准，勿凭印象改回）：
  *
- * 为什么不能硬编码坐标：分辨率、UI 缩放、窗口大小任一变化都会失效。
+ *   ⚠️ 边框颜色：海克斯乱斗选人卡片的边框是**象牙白双描边**
+ *   （实测 RGB ≈ 150,143,138，R-B 差仅 ~15）—— 不是饱和金色！
+ *   「金色检测」在真实界面上检不出任何卡片（此教训已写进测试）。
+ *   边框的可靠结构特征是：**暗背景上的亮竖线**（边框两侧都是暗像素），
+ *   因此用**亮度垂直梯度**做列投影，不依赖色相。
  *
- * 采用的策略（利用选人 UI 的**结构约束**）：
- *   1. 卡片有醒目的**金色边框** → 先在水平方向做「金色像素投影」
- *   2. 卡片的**列位置等距**且宽度相近 → 用等距性筛选候选
- *   3. 卡片高度占屏幕固定比例 → 用高度比校验
+ *   实测结构（3413×1920 截图）：
+ *     - 每张卡片左右边框各由 2~3 条相邻亮线组成（跨 ~25px），
+ *       需先合并成一条「带」再配对，否则子线组合会拆散等宽校验；
+ *     - 卡片左右两侧还有对称的装饰弧线（各 2 条亮线），
+ *       它们与卡片能拼出「等宽对」（弧→卡宽 842），必须靠
+ *       **纵横比校验**（卡高/卡宽 ≈ 1.59）淘汰；
+ *     - 卡片纵向范围由行方向梯度投影取「最厚的上下边框带」。
  *
  * 任何一步不满足就返回「不可信」，调用方**不应绘制** ——
  * 宁可漏，不可错（错标胜率比不显示更糟）。
@@ -16,351 +23,355 @@
 
 import type { Bitmap, CardSlot, Rect } from './types.ts';
 
-/** 金色边框的判定阈值（RGB）。英雄卡片边框是暖金色。 */
-export interface GoldThreshold {
-  readonly minR: number;
-  readonly minG: number;
-  readonly maxB: number;
-  /** R 与 B 的最小差值，用于排除白色/灰色。 */
-  readonly minRBGap: number;
+/** 亮度（Rec.601）。 */
+function lumaAt(data: Uint8ClampedArray, width: number, x: number, y: number): number {
+  const i = (y * width + x) * 4;
+  return 0.299 * data[i]! + 0.587 * data[i + 1]! + 0.114 * data[i + 2]!;
+}
+
+export interface EdgeProjectOptions {
+  /** 判定为「亮于邻域」的最小亮度差（0-255 亮度空间，与分辨率无关）。 */
+  readonly minLumaDelta?: number;
+  /** 邻域采样距离（像素）。默认 max(3, round(H*0.003))，随分辨率缩放。 */
+  readonly offset?: number;
+  /** 参与投影的纵向范围（归一化），避开顶部任务栏/底部聊天。 */
+  readonly yTop?: number;
+  readonly yBottom?: number;
+}
+
+function projectOptions(bmp: Bitmap, o: EdgeProjectOptions = {}): {
+  delta: number;
+  offset: number;
+  y0: number;
+  y1: number;
+} {
+  return {
+    delta: o.minLumaDelta ?? 22,
+    offset: o.offset ?? Math.max(3, Math.round(bmp.height * 0.003)),
+    y0: Math.round(bmp.height * (o.yTop ?? 0.1)),
+    y1: Math.round(bmp.height * (o.yBottom ?? 0.9)),
+  };
 }
 
 /**
- * 默认金色阈值。
+ * 垂直边缘列投影：每列统计「比左右邻域亮得多」的行数。
  *
- * 取值偏宽松：不同皮肤/不同 UI 主题下边框亮度有差异，
- * 但「R 高、G 中、B 低」这一暖色特征是一致的。
+ * 卡片边框是暗底上的亮竖线 → 在投影上形成尖峰带。
  */
-export const DEFAULT_GOLD: GoldThreshold = {
-  minR: 140,
-  minG: 100,
-  maxB: 110,
-  minRBGap: 40,
-};
-
-/** 判断某像素是否「金色」。 */
-export function isGoldPixel(
-  r: number,
-  g: number,
-  b: number,
-  th: GoldThreshold = DEFAULT_GOLD,
-): boolean {
-  return r >= th.minR && g >= th.minG && b <= th.maxB && r - b >= th.minRBGap;
-}
-
-/**
- * 计算每列的金色像素数（列投影）。
- *
- * 卡片左右边框会在投影上形成两个尖峰，峰之间即卡片。
- */
-export function goldColumnProjection(
+export function edgeColumnProjection(
   bmp: Bitmap,
-  th: GoldThreshold = DEFAULT_GOLD,
+  options: EdgeProjectOptions = {},
 ): Uint32Array {
+  const { delta, offset, y0, y1 } = projectOptions(bmp, options);
   const proj = new Uint32Array(bmp.width);
-  const { data, width, height } = bmp;
-  for (let y = 0; y < height; y++) {
-    const rowOff = y * width * 4;
-    for (let x = 0; x < width; x++) {
-      const i = rowOff + x * 4;
-      // 只统计明显偏亮的金色，避免暗部噪声
-      if (data[i + 3]! > 128 && isGoldPixel(data[i]!, data[i + 1]!, data[i + 2]!, th)) {
-        proj[x]!++;
-      }
+  for (let y = y0; y < y1; y++) {
+    for (let x = offset; x < bmp.width - offset; x++) {
+      const c = lumaAt(bmp.data, bmp.width, x, y);
+      const d = Math.max(
+        c - lumaAt(bmp.data, bmp.width, x - offset, y),
+        c - lumaAt(bmp.data, bmp.width, x + offset, y),
+      );
+      if (d > delta) proj[x]!++;
     }
   }
   return proj;
 }
 
 /**
- * 从投影中找出「竖线」（卡片边框）的 x 位置。
+ * 水平边缘行投影：每行统计「比上下邻域亮得多」的像素数。
  *
- * 做法：取自适应阈值（最大值的比例）+ **绝对下限**，再找连续超阈区段的中心。
- *
- * ⚠️ 绝对下限必不可少：若只有零散噪点，投影最大值可能只有 1~2，
- * 此时 `max * ratio` 也极小，于是**每一列都会「超过阈值」**，
- * 检出几十条假竖线并拼出十几张假卡片。
- * 真实卡片边框会占据数百个垂直像素，故设一个绝对下限即可滤掉噪点。
+ * 用于确定卡片的纵向范围（上下边框是亮横线）。
+ * 只统计 `[x0, x1]` 列范围（通常是一张卡片的横向范围）。
  */
-export function findVerticalLines(
+export function edgeRowProjection(
+  bmp: Bitmap,
+  x0: number,
+  x1: number,
+  options: EdgeProjectOptions = {},
+): Uint32Array {
+  const { delta, offset, y0, y1 } = projectOptions(bmp, options);
+  const proj = new Uint32Array(bmp.height);
+  for (let y = offset; y < bmp.height - offset; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const c = lumaAt(bmp.data, bmp.width, x, y);
+      const d = Math.max(
+        c - lumaAt(bmp.data, bmp.width, x, y - offset),
+        c - lumaAt(bmp.data, bmp.width, x, y + offset),
+      );
+      if (d > delta) proj[y]!++;
+    }
+  }
+  return proj;
+}
+
+/** 投影上的一段连续超阈区（一条边框带，可能含多条相邻子线）。 */
+export interface Band {
+  readonly start: number;
+  readonly end: number;
+  /** 带中心（配对用）。 */
+  readonly center: number;
+  /** 带内投影峰值（强度）。 */
+  readonly strength: number;
+}
+
+/**
+ * 从投影中提取边框带。
+ *
+ * ⚠️ 合并相邻子线必不可少：实测每条边框由 2~3 条相邻亮线组成
+ * （跨 ~25px）。若不合并，同一边框的子线会互相组合出大量假宽度，
+ * 拆散等宽校验。`mergeGap` 应 ≈ 边框总厚（0.010×图像宽）。
+ *
+ * `minPixels` 绝对下限依旧必要：噪点场景下投影最大值可能只有个位数，
+ * 自适应阈值会失效（详见 git 历史 —— 该坑真实发生过）。
+ */
+export function findBands(
   proj: Uint32Array,
   options: {
     readonly ratio?: number;
-    readonly minGap?: number;
-    /**
-     * 一条竖线至少需要多少个金色像素。
-     * 默认 20：足以排除噪点，又允许低分辨率截图。
-     */
     readonly minPixels?: number;
+    readonly mergeGap?: number;
   } = {},
-): number[] {
+): Band[] {
   const ratio = options.ratio ?? 0.35;
-  const minGap = options.minGap ?? 4;
   const minPixels = options.minPixels ?? 20;
+  const mergeGap = options.mergeGap ?? 0;
 
   let max = 0;
   for (const v of proj) if (v > max) max = v;
-  if (max < minPixels) return []; // 整体太弱 —— 根本没有边框
+  if (max < minPixels) return [];
 
   const cut = Math.max(max * ratio, minPixels);
-  const lines: number[] = [];
+  const raw: Band[] = [];
   let runStart = -1;
-
   for (let x = 0; x < proj.length; x++) {
     const on = proj[x]! >= cut;
     if (on && runStart < 0) runStart = x;
     if (!on && runStart >= 0) {
-      // 取区段中心作为线的位置
-      lines.push(Math.round((runStart + x - 1) / 2));
+      raw.push({ start: runStart, end: x - 1, center: 0, strength: 0 });
       runStart = -1;
     }
   }
-  if (runStart >= 0) lines.push(Math.round((runStart + proj.length - 1) / 2));
-
-  // 合并过近的线（同一根边框的多次检测）
-  const merged: number[] = [];
-  for (const x of lines) {
-    const last = merged[merged.length - 1];
-    if (last === undefined || x - last >= minGap) merged.push(x);
+  if (runStart >= 0) {
+    raw.push({ start: runStart, end: proj.length - 1, center: 0, strength: 0 });
   }
-  return merged;
+
+  // 合并过近的带（同一根边框的多次检测 / 描边子线）
+  const merged: Band[] = [];
+  for (const b of raw) {
+    const last = merged[merged.length - 1];
+    if (last && b.start - last.end <= mergeGap) {
+      // 就地扩展（对象创建后只在这里变更）
+      (last as { end: number }).end = b.end;
+    } else {
+      merged.push(b);
+    }
+  }
+  return merged.map((b) => {
+    let peak = 0;
+    for (let x = b.start; x <= b.end; x++) peak = Math.max(peak, proj[x]!);
+    return {
+      start: b.start,
+      end: b.end,
+      center: Math.round((b.start + b.end) / 2),
+      strength: peak,
+    };
+  });
+}
+
+/** 卡片纵向范围（像素）。 */
+export interface VerticalExtent {
+  readonly top: number;
+  readonly bottom: number;
+}
+
+export interface CardsFromBandsOptions {
+  /** 相邻卡片最大间隙（占卡宽比例）。选人卡片几乎相触，默认 0.3。 */
+  readonly maxGapRatio?: number;
+  /** 卡片高宽比（实测 791/497 ≈ 1.59，纵向人形卡）。 */
+  readonly aspectRatio?: number;
+  /** 纵横比允许偏差。 */
+  readonly aspectTolerance?: number;
 }
 
 /**
- * 由竖线位置推断卡片矩形。
+ * 在边框带中搜索「等宽等距」的左右配对，重构卡片矩形。
  *
- * 两步：
- *   1. `groupAndPair` 在**全部**竖线里搜索「等宽等距」的配对组合，
- *      而不是朴素地按顺序两两配对 —— 后者会被无关金色元素破坏；
- *   2. 校验组合的整体结构（张数、位置区间）。
+ * 算法（穷举 + 结构校验，边框带通常 < 20 条，代价可忽略）：
+ *   1. 用**带中心**枚举全部 (左,右) 配对；
+ *   2. 按宽度精确聚桶（±2%）：真卡片的每对边界都复现同一宽度；
+ *   3. 桶内配对做**互不相交链**校验（端点不重叠）；
+ *   4. **小间隙校验**：相邻卡片间隙 ≤ 卡宽 × maxGapRatio
+ *      （淘汰「弧线+卡片」拼成的超宽假链与均匀周期线）；
+ *   5. **纵横比校验**：卡高/卡宽应 ≈ aspectRatio
+ *      （淘汰与卡片等宽重复出现的装饰结构）；
+ *      纵向范围由 `extent` 回调实测（无实测则该链不可信）。
  *
- * 相邻两条竖线构成一张卡片的左右边界；再按给定高度比推上下边界。
- * 无法组成可信结构时返回「不可信」，调用方**不应绘制**。
+ * 桶按出现次数降序、宽度降序**依次尝试**（详见测试里的真实案例）。
+ * 最终矩形用**带外缘**（比带中心更贴近视觉边界）。
  */
-export function cardsFromLines(
-  lines: readonly number[],
+export function cardsFromBands(
+  bands: readonly Band[],
   imageWidth: number,
   imageHeight: number,
-  options: {
-    readonly topRatio?: number;
-    readonly heightRatio?: number;
-    /** 允许的宽度偏差比例。 */
-    readonly widthTolerance?: number;
-    /** 相邻卡片最大间隙（占卡宽比例，默认 0.3）。 */
-    readonly maxGapRatio?: number;
-  } = {},
-): { cards: Rect[]; confident: boolean; reason?: string } {
-  const topRatio = options.topRatio ?? 0.05;
-  const heightRatio = options.heightRatio ?? 0.42;
-  const tol = options.widthTolerance ?? 0.35;
+  options: CardsFromBandsOptions = {},
+  extent?: (x0: number, x1: number) => VerticalExtent | null,
+): { cards: Rect[]; confident: boolean; reason?: string; pairs?: number } {
+  const maxGapRatio = options.maxGapRatio ?? 0.3;
+  const aspectRatio = options.aspectRatio ?? 1.59;
+  const aspectTolerance = options.aspectTolerance ?? 0.3;
 
-  if (lines.length < 4) {
-    return { cards: [], confident: false, reason: `竖线太少(${lines.length})，不足以构成卡片` };
+  if (bands.length < 4) {
+    return { cards: [], confident: false, reason: `边框带太少(${bands.length})，不足以构成卡片` };
   }
   if (imageWidth <= 0 || imageHeight <= 0) {
     return { cards: [], confident: false, reason: '图像尺寸非法' };
   }
 
-  const grouped = groupAndPair(lines, tol, options.maxGapRatio ?? 0.3);
-
-  if (grouped.cards.length === 0) {
-    return {
-      cards: [],
-      confident: false,
-      reason: grouped.reason ?? `竖线无法组成等宽卡片(${lines.length} 条)`,
-    };
+  // 1)-2) 枚举配对 + 宽度精确聚桶（±2%）
+  interface Pair {
+    left: Band;
+    right: Band;
+    w: number;
   }
-
-  // 校验：选人界面至少 2 张卡片。
-  // 只检出 1 张通常意味着把别处的金色元素误检了，宁可不出结果。
-  if (grouped.cards.length < 2) {
-    return {
-      cards: [],
-      confident: false,
-      reason: `只检出 ${grouped.cards.length} 张卡片，不足以确认是选人界面`,
-    };
-  }
-
-  // 组内残余宽度差校验（groupAndPair 已保证组内等宽，这里防御性复查）
-  const widths = grouped.cards.map((r) => r.right - r.left);
-  const avg = widths.reduce((a, b) => a + b, 0) / widths.length;
-  const bad = widths.filter((w) => Math.abs(w - avg) / avg > tol);
-  if (bad.length > 0) {
-    return {
-      cards: [],
-      confident: false,
-      reason: `卡片宽度不一致(${widths.map((w) => w.toFixed(3)).join(',')})，可能是误检`,
-    };
-  }
-
-  // 按从左到右排序
-  const rects: Rect[] = [...grouped.cards]
-    .sort((a, b) => a.left - b.left)
-    .map((c) => ({
-      x: c.left / imageWidth,
-      y: topRatio,
-      w: (c.right - c.left) / imageWidth,
-      h: heightRatio,
-    }));
-  return { cards: rects, confident: true, reason: grouped.reason };
-}
-
-/** 等宽等距配对选出的一张卡片（像素坐标，尚未归一化）。 */
-interface PairedCard {
-  readonly left: number;
-  readonly right: number;
-}
-
-/**
- * 等宽等距配对结果。
- *
- * `reason` 携带筛选过程的诊断信息（"从 N 条竖线筛出 M 张"），
- * 供调试日志与标注图使用 —— 定位失败时能看出是「没有候选」还是
- * 「候选被等宽约束滤掉」。
- */
-interface GroupedCards {
-  readonly cards: PairedCard[];
-  readonly reason?: string;
-}
-
-/**
- * 在竖线集合中搜索「等宽等距」的左右边界配对。
- *
- * 算法（穷举 + 结构校验，竖线数量通常 < 30，代价可忽略）：
- *   1. 枚举全部 (i, j) 组合作为候选卡片的左右边界；
- *   2. **按宽度精确聚桶**（±2%）：真卡片的每对边界都严格复现同一宽度，
- *      噪声线对的宽度互不相同；
- *   3. 桶内配对做**互不相交链校验**（端点不共享、左右递增）；
- *   4. **小间隙校验**：相邻卡片间隙 ≤ 卡宽 × maxGapRatio
- *      （选人卡片几乎相触；纯周期线对会形成大间隙假链）；
- *   5. 相邻卡片**中心等距**校验。
- *
- * 桶按出现次数降序**依次尝试**（而非只试第一个）：
- * 均匀网格里「左边缘序列」与「右边缘序列」会产生与真卡宽同频的
- * 「间距桶」（宽度 = 卡宽 + 间隙），它的假链会被第 4 步拒绝，
- * 随后真卡宽桶胜出。
- *
- * 历史教训：宽松贪心（从左到右找第一条宽度匹配的线）会在真实噪声上
- * 产生假阳性 —— 结算界面 10 条杂线能配出 2 张"等宽卡片"。
- */
-function groupAndPair(
-  lines: readonly number[],
-  tol: number,
-  maxGapRatio: number,
-): GroupedCards {
-  // 1) 枚举全部配对
-  const pairs: Array<{ left: number; right: number; w: number }> = [];
-  for (let i = 0; i < lines.length; i++) {
-    for (let j = i + 1; j < lines.length; j++) {
-      const w = lines[j]! - lines[i]!;
-      if (w > 0) pairs.push({ left: lines[i]!, right: lines[j]!, w });
+  const pairs: Pair[] = [];
+  for (let i = 0; i < bands.length; i++) {
+    for (let j = i + 1; j < bands.length; j++) {
+      const w = bands[j]!.center - bands[i]!.center;
+      if (w > 0) pairs.push({ left: bands[i]!, right: bands[j]!, w });
     }
   }
-  if (pairs.length === 0) return { cards: [], reason: '无可配对竖线' };
+  if (pairs.length === 0) return { cards: [], confident: false, reason: '无可配对边框带' };
 
-  // 2) 按宽度精确聚桶（±2% 相对带宽；tol 只用于链内复查）
-  const buckets: Array<{ w: number; pairs: typeof pairs }> = [];
+  const buckets: Array<{ w: number; pairs: Pair[] }> = [];
   for (const p of pairs) {
     const hit = buckets.find((b) => Math.abs(b.w - p.w) / p.w <= 0.02);
-    if (hit) {
-      hit.pairs.push(p);
-    } else {
-      buckets.push({ w: p.w, pairs: [p] });
-    }
+    if (hit) hit.pairs.push(p);
+    else buckets.push({ w: p.w, pairs: [p] });
   }
   const candidates = buckets
     .filter((b) => b.pairs.length >= 2)
     .sort((a, b) => b.pairs.length - a.pairs.length || b.w - a.w);
   if (candidates.length === 0) {
-    return { cards: [], reason: '无重复出现的卡片宽度（全是孤立噪声）' };
+    return { cards: [], confident: false, reason: '无重复出现的卡片宽度（全是孤立噪声）' };
   }
 
   // 3)-5) 依次尝试候选桶
-  let maxChain = 0;
   for (const cand of candidates) {
     const chain = cand.pairs
       .slice()
-      .sort((a, b) => a.left - b.left || a.right - b.right);
-    const chosen: Array<{ left: number; right: number }> = [];
-    let lastRight = -Infinity;
+      .sort((a, b) => a.left.center - b.left.center || a.right.center - b.right.center);
+    const chosen: Pair[] = [];
     for (const p of chain) {
-      const wRef = chosen.length > 0 ? chosen[0]!.right - chosen[0]!.left : p.w;
-      if (Math.abs(p.w - wRef) / wRef > tol) continue;
-      if (p.left <= lastRight) continue; // 与上一张卡片重叠/共享端点
-      chosen.push({ left: p.left, right: p.right });
-      lastRight = p.right;
+      const last = chosen[chosen.length - 1];
+      // 互不相交：下一条的左带必须在本条右带之后（留 1px 余量）
+      if (last && p.left.start <= last.right.end) continue;
+      chosen.push(p);
     }
-    if (chosen.length < 2) {
-      maxChain = Math.max(maxChain, chosen.length);
-      continue;
-    }
+    if (chosen.length < 2) continue;
 
-    // 4) 小间隙校验：真卡片几乎相触；周期假链的间隙 ≈ 卡宽
-    const wRef = chosen[0]!.right - chosen[0]!.left;
-    const tooWideGap = chosen.some(
-      (c, k) =>
-        k > 0 && c.left - chosen[k - 1]!.right > wRef * maxGapRatio,
-    );
-    if (tooWideGap) {
-      continue;
+    // 4) 小间隙校验（用带外缘：真卡片几乎相触；周期假链间隙 ≈ 卡宽）
+    let gapOk = true;
+    for (let k = 1; k < chosen.length; k++) {
+      const gap = chosen[k]!.left.start - chosen[k - 1]!.right.end;
+      const w = chosen[k - 1]!.right.end - chosen[k - 1]!.left.start + 1;
+      if (gap > w * maxGapRatio) {
+        gapOk = false;
+        break;
+      }
     }
+    if (!gapOk) continue;
 
-    // 5) 中心等距校验：相邻卡片中心距应相近（偏差 >25% 视为混入噪声）
-    const centers = chosen.map((c) => (c.left + c.right) / 2);
-    const gaps: number[] = [];
-    for (let k = 1; k < centers.length; k++) gaps.push(centers[k]! - centers[k - 1]!);
-    const gapAvg = gaps.reduce((a, b) => a + b, 0) / gaps.length;
-    if (gaps.some((g) => Math.abs(g - gapAvg) / gapAvg > 0.25)) {
-      continue;
-    }
+    // 5) 纵横比校验：纵向范围必须实测。
+    //    ⚠️ 宽度取**单张卡片**的外缘宽（第一条配对），不是整条链的
+    //    外宽 —— 多卡链的外宽含间隙，纵横比会被稀释（真实踩过）。
+    const first = chosen[0]!;
+    const singleW = first.right.end - first.left.start + 1;
+    const ex = extent?.(first.left.start, first.right.end) ?? null;
+    if (!ex) continue; // 无实测纵向范围 → 不可信
+    const h = ex.bottom - ex.top + 1;
+    const aspect = h / singleW;
+    if (Math.abs(aspect - aspectRatio) > aspectTolerance) continue;
 
+    const rects: Rect[] = chosen.map((p) => ({
+      x: p.left.start / imageWidth,
+      y: ex.top / imageHeight,
+      w: (p.right.end - p.left.start + 1) / imageWidth,
+      h: (ex.bottom - ex.top + 1) / imageHeight,
+    }));
     return {
-      cards: chosen.map((c) => ({ left: c.left, right: c.right })),
-      reason: `从 ${lines.length} 条竖线按宽度 ${cand.w.toFixed(0)}px 筛出 ${chosen.length} 张`,
+      cards: rects,
+      confident: true,
+      reason: `从 ${bands.length} 条边框带按宽度 ${cand.w.toFixed(0)}px 筛出 ${chosen.length} 张`,
+      pairs: chosen.length,
     };
   }
 
   return {
     cards: [],
-    reason: `等宽候选桶均未通过间距校验（最多串成 ${maxChain} 张）`,
+    confident: false,
+    reason: `等宽候选桶均未通过间隙/纵横比校验（共 ${candidates.length} 个候选桶）`,
   };
 }
 
 /**
  * 一站式：从位图检测卡片。
  *
- * 流程：金色列投影 → 竖线检测 → **等宽等距分组配对**（抗噪关键）→ 校验。
- *
- * 抗噪背景（真实教训）：在结算界面运行时，金色数字/图标/按钮会产生
- * 十几条假竖线，朴素「两两相邻配对」会把它们拼成宽度悬殊的假卡片。
- * `groupAndPair` 用「等宽 + 等距」两个结构约束把它们滤掉。
- *
- * @param goldRatio 金色投影的自适应阈值比例
+ * 抗噪背景（真实教训，勿回退）：
+ *   - 结算界面的金色元素会产生大量假竖线 → 等宽聚桶 + 间隙/纵横比校验拦截；
+ *   - 选人界面的装饰弧线与卡片能拼出「等宽对」→ 纵横比校验拦截；
+ *   - 顶部任务栏/底部聊天会污染投影 → 投影限制在 [0.10H, 0.90H]。
  */
 export function detectCards(
   bmp: Bitmap,
-  options: {
-    readonly gold?: GoldThreshold;
-    readonly goldRatio?: number;
+  options: CardsFromBandsOptions & EdgeProjectOptions & {
+    readonly ratio?: number;
     readonly minPixels?: number;
-    readonly topRatio?: number;
-    readonly heightRatio?: number;
   } = {},
 ): { cards: Rect[]; confident: boolean; reason?: string; lines: number[] } {
   if (bmp.width === 0 || bmp.height === 0) {
     return { cards: [], confident: false, reason: '位图为空', lines: [] };
   }
 
-  const proj = goldColumnProjection(bmp, options.gold ?? DEFAULT_GOLD);
-  const lines = findVerticalLines(proj, {
-    ratio: options.goldRatio ?? 0.35,
+  const proj = edgeColumnProjection(bmp, options);
+  const bands = findBands(proj, {
+    ratio: options.ratio,
     minPixels: options.minPixels,
+    mergeGap: Math.max(6, Math.round(bmp.width * 0.01)),
   });
-  const res = cardsFromLines(lines, bmp.width, bmp.height, {
-    topRatio: options.topRatio,
-    heightRatio: options.heightRatio,
-  });
-  return { ...res, lines };
+
+  const extentFn = (x0: number, x1: number): VerticalExtent | null => {
+    const rowProj = edgeRowProjection(bmp, x0, x1, options);
+    const rowBands = findBands(rowProj, {
+      ratio: options.ratio,
+      minPixels: options.minPixels,
+      // 行方向同样要合并相邻子线：边框横线由「外沿亮线+内沿亮线」
+      // 构成（间隔 ≤ 2×offset 时属同一条横带的两个边），
+      // 不合并会出现 4 条细带，minThick 过滤后剩 0 条（真实踩过）。
+      mergeGap: Math.max(12, Math.round(bmp.height * 0.012)),
+    });
+    const minThick = Math.max(5, Math.round(bmp.height * 0.005));
+    const thick = rowBands.filter((b) => b.end - b.start + 1 >= minThick);
+    if (thick.length < 2) return null;
+    // 外宽（带外缘）—— 与纵横比的定义保持一致
+    const w = x1 - x0 + 1;
+    let best: { t: Band; b: Band; score: number } | null = null;
+    for (let i = 0; i < thick.length; i++) {
+      for (let j = i + 1; j < thick.length; j++) {
+        const t = thick[i]!;
+        const b = thick[j]!;
+        const h = b.end - t.start + 1;
+        const aspect = h / w;
+        if (Math.abs(aspect - (options.aspectRatio ?? 1.59)) > (options.aspectTolerance ?? 0.3)) {
+          continue;
+        }
+        const score = t.end - t.start + 1 + (b.end - b.start + 1);
+        if (!best || score > best.score) best = { t, b, score };
+      }
+    }
+    return best ? { top: best.t.start, bottom: best.b.end } : null;
+  };
+  const res = cardsFromBands(bands, bmp.width, bmp.height, options, extentFn);
+  return { ...res, lines: bands.map((b) => b.center) };
 }
 
 /** 把检测结果包装为 CardSlot（尚未识别英雄）。 */

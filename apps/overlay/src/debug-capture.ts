@@ -146,8 +146,8 @@ function toBitmap(img: Electron.NativeImage): Bitmap {
 /* ------------------------------------------------------------------ */
 
 async function loadTemplates(): Promise<PreparedTemplate[]> {
-  // 模板与数据都在仓库根 data/：从 OUT_DIR 推导，与 cwd 解耦
-  const dataDir = dirname(OUT_DIR);
+  // OUT_DIR = 仓库根/debug → data 在 仓库根/data
+  const dataDir = join(dirname(OUT_DIR), 'data');
   const candidates = [join(dataDir, 'templates.json')];
   for (const path of candidates) {
     try {
@@ -187,46 +187,6 @@ function denormalize(norm: readonly number[], size: number): Uint8Array {
     out[i] = Math.max(0, Math.min(255, Math.round(128 + v * 64)));
   }
   return out;
-}
-
-/* ------------------------------------------------------------------ */
-/* 标注图                                                              */
-/* ------------------------------------------------------------------ */
-
-function buildAnnotationSvg(
-  dataUrl: string,
-  cssW: number,
-  cssH: number,
-  cards: DebugResult['cards'],
-  note: string,
-): string {
-  const boxes = cards
-    .map((c, i) => {
-      const x = c.rect.x * cssW;
-      const y = c.rect.y * cssH;
-      const w = c.rect.w * cssW;
-      const h = c.rect.h * cssH;
-      const label = c.championName ?? (c.championId ? `#${c.championId}` : '未识别');
-      const color = c.championId ? '#4ade80' : '#e0b64a';
-      return `
-        <rect x="${x}" y="${y}" width="${w}" height="${h}"
-              fill="none" stroke="${color}" stroke-width="3" />
-        <rect x="${x}" y="${y + h}" width="${Math.min(w, 240)}" height="28"
-              fill="rgba(0,0,0,0.75)" />
-        <text x="${x + 6}" y="${y + h + 20}" fill="${color}"
-              font-family="Microsoft YaHei, sans-serif" font-size="17">
-          ${i + 1}. ${label} ${c.score > 0 ? c.score.toFixed(3) : ''}
-        </text>`;
-    })
-    .join('');
-
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${cssW}" height="${cssH}"
-     viewBox="0 0 ${cssW} ${cssH}">
-    <image href="${dataUrl}" x="0" y="0" width="${cssW}" height="${cssH}" />
-    ${boxes}
-    <rect x="0" y="${cssH - 34}" width="${Math.max(cssW, note.length * 9)}" height="34" fill="rgba(0,0,0,0.8)" />
-    <text x="10" y="${cssH - 12}" fill="#ffd" font-family="Microsoft YaHei, monospace" font-size="16">${note}</text>
-  </svg>`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -292,7 +252,7 @@ app.whenReady().then(async () => {
   const templates = await loadTemplates();
   const nameById = new Map<number, string>();
   try {
-    const dsPath = join(dirname(OUT_DIR), 'dataset.json');
+    const dsPath = join(dirname(OUT_DIR), 'data', 'dataset.json');
     const raw = await readFile(dsPath, 'utf8');
     const ds = JSON.parse(raw) as { champions: Array<{ id: number; name: string }> };
     for (const c of ds.champions) nameById.set(c.id, c.name);
@@ -344,27 +304,73 @@ app.whenReady().then(async () => {
   writeFileSync(join(OUT_DIR, 'result.json'), JSON.stringify(result, null, 2));
 
   // 4) 标注图（PNG，便于直接查看）
+  //
+  // 用隐藏窗口渲染 HTML(canvas 绘制原图+检测框)，再 capturePage。
+  // ⚠️ 两个已踩的坑：
+  //   a. 不能用 nativeImage.createFromDataURL(SVG dataURL)：不支持 SVG，
+  //      产出 1x1 空图。
+  //   b. 不能把截图 base64 嵌进 data: URL 的 HTML：4MB 图 → URL 超长，
+  //      ERR_INVALID_URL。改为写 HTML 文件、用 file:// 引用 raw.png。
   const cssW = bmp.width;
   const cssH = bmp.height;
   const note = `phase=${phase ?? '?'}  lines=${det.lines.length}  cards=${det.cards.length}  scale=${scale.scale.toFixed(2)}`;
-  const svg = buildAnnotationSvg(grabbed.img.toDataURL(), cssW, cssH, cards, note);
-  const render = new BrowserWindow({ show: false, width: 1280, height: 720 });
+  const boxesHtml = cards
+    .map((c, i) => {
+      const x = c.rect.x * cssW;
+      const y = c.rect.y * cssH;
+      const w = c.rect.w * cssW;
+      const h = c.rect.h * cssH;
+      const label = c.championName ?? (c.championId ? `#${c.championId}` : '未识别');
+      const color = c.championId ? '#4ade80' : '#e0b64a';
+      const score = c.score > 0 ? ` ${c.score.toFixed(3)}` : '';
+      return { x, y, w, h, label: `${i + 1}. ${label}${score}`, color };
+    })
+    .map(
+      (b) => `
+        ctx.strokeStyle = '${b.color}'; ctx.lineWidth = 3;
+        ctx.strokeRect(${b.x}, ${b.y}, ${b.w}, ${b.h});
+        ctx.fillStyle = 'rgba(0,0,0,0.75)';
+        ctx.fillRect(${b.x}, ${b.y + b.h}, ${Math.min(b.w, 260)}, 30);
+        ctx.fillStyle = '${b.color}';
+        ctx.font = '18px "Microsoft YaHei", sans-serif';
+        ctx.fillText(${JSON.stringify(b.label)}, ${b.x + 6}, ${b.y + b.h + 21});`,
+    )
+    .join('');
+
+  const htmlPath = join(OUT_DIR, 'annotated.html');
+  const html =
+    `<canvas id="c" width="${cssW}" height="${cssH}"></canvas>` +
+    `<script>
+      const img = new Image();
+      img.onload = () => {
+        const ctx = document.getElementById('c').getContext('2d');
+        ctx.drawImage(img, 0, 0, ${cssW}, ${cssH});
+        ${boxesHtml}
+        ctx.fillStyle = 'rgba(0,0,0,0.8)';
+        ctx.fillRect(0, ${cssH - 34}, ${cssW}, 34);
+        ctx.fillStyle = '#ffd';
+        ctx.font = '16px monospace';
+        ctx.fillText(${JSON.stringify(note)}, 10, ${cssH - 12});
+        window.__done = true;
+      };
+      img.onerror = () => { window.__error = 'image load failed'; };
+      img.src = 'file:///' + ${JSON.stringify(join(OUT_DIR, 'raw.png').replace(/\\/g, '/'))};
+    </script>`;
+  writeFileSync(htmlPath, `<html><body style="margin:0">${html}</body></html>`, 'utf8');
+
+  const render = new BrowserWindow({ show: false, width: 1600, height: 1000 });
   try {
-    await render.loadURL(
-      'data:text/html;charset=utf-8,' +
-        encodeURIComponent(
-          `<html><body style="margin:0"><script>document.body.innerHTML = ${JSON.stringify(
-            `<img style="width:100vw" src="${'data:image/svg+xml;base64,' + Buffer.from(svg).toString('base64')}">`,
-          )};</` + `script></body></html>`,
-        ),
+    await render.loadFile(htmlPath);
+    // 轮询等待画完（executeJavaScript 等待 __done）
+    await render.webContents.executeJavaScript(
+      'new Promise((res, rej) => { const t = setInterval(() => { if (window.__done) { clearInterval(t); res(true); } if (window.__error) { clearInterval(t); rej(window.__error); } }, 50); })',
     );
-    await render.webContents.executeJavaScript('void 0');
-    // 直接用 NativeImage 从 dataURL 解码，避免依赖窗口尺寸
-    const { nativeImage } = await import('electron');
-    const image = nativeImage.createFromDataURL(
-      'data:image/svg+xml;base64,' + Buffer.from(svg).toString('base64'),
-    );
-    writeFileSync(join(OUT_DIR, 'annotated.png'), image.toPNG());
+    const image = await render.webContents.capturePage();
+    if (!image.isEmpty()) {
+      writeFileSync(join(OUT_DIR, 'annotated.png'), image.toPNG());
+    } else {
+      console.warn('[debug] 标注图渲染为空（result.json / raw.png 仍可用）');
+    }
   } catch (e) {
     console.warn('[debug] 标注图渲染失败（result.json / raw.png 仍可用）:', e instanceof Error ? e.message : e);
   } finally {
