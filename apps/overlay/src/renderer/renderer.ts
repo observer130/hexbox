@@ -226,15 +226,20 @@ function render(s: OverlayStateMsg): void {
 
   /* ---------------- 对局中：海克斯强度 + 出装 ---------------- */
   if (s.phase === 'InProgress') {
-    const noData = s.me.championId === 0;
-    const augBlock = noData
-      ? '<div class="li dim">· 未识别到你的英雄</div>'
+    const noChampion = s.me.championId === 0;
+
+    // 三种情况要分开说清楚，不要都归成一句「未识别到你的英雄」：
+    //   1. 真的没识别到英雄
+    //   2. 识别到了，但该英雄无官方统计
+    //   3. 正常有数据
+    const augBlock = noChampion
+      ? '<div class="li dim">· 未能识别你的英雄（若中途打开本工具，请经历一次选人）</div>'
       : s.augments.length === 0
         ? '<div class="li dim">· 该英雄暂无海克斯强度统计</div>'
         : s.augments.map((a) => augRowHtml(a)).join('');
 
     const b = s.build;
-    const buildBlock = noData
+    const buildBlock = noChampion
       ? ''
       : [
           slotHtml('出门装', b.start, true),
@@ -245,17 +250,15 @@ function render(s: OverlayStateMsg): void {
           .filter(Boolean)
           .join('') || '<div class="li dim">· 该英雄暂无出装统计</div>';
 
-    const header = s.me.name ? `${s.me.name} · 建议` : '对局中';
-
     app.innerHTML = panel(
       phaseLabel,
       isBrawlTag,
       `
         ${
-          s.me.championId > 0
-            ? `<div class="row"><span class="k">英雄</span><span class="v">${esc(s.me.name)}</span></div>
+          noChampion
+            ? ''
+            : `<div class="row"><span class="k">英雄</span><span class="v">${esc(s.me.name)}</span></div>
                <div class="sep"></div>`
-            : ''
         }
         <div class="k">海克斯强度 <span class="dim">（以该英雄为准）</span></div>
         ${augBlock}

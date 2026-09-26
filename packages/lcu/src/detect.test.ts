@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { parseCmdline, parseLockfile, basicAuthHeader, findLcuPort } from './detect.ts';
-import { isBrawlSession, type GameflowSession } from './client.ts';
+import { isBrawlSession, pickChampionIdFromGameflow, type GameflowSession } from './client.ts';
 
 test('parseCmdline 能解析标准 LCU 参数', () => {
   const cmd =
@@ -145,8 +145,7 @@ test('findLcuPort：非 401 的响应不算 LCU（200/404 都应跳过）', asyn
   }
 });
 
-test('findLcuPort：探测后必须还原 NODE_TLS_REJECT_UNAUTHORIZED', async () => {
-  const KEY = 'NODE_TLS_REJECT_UNAUTHORIZED';
+test('findLcuPort：探测后必须还原 NODE_TLS_REJECT_UNAUTHORIZED', async () => {  const KEY = 'NODE_TLS_REJECT_UNAUTHORIZED';
   const originalFetch = globalThis.fetch;
   const prev = process.env[KEY];
 
@@ -170,4 +169,72 @@ test('findLcuPort：探测后必须还原 NODE_TLS_REJECT_UNAUTHORIZED', async (
     if (prev === undefined) delete process.env[KEY];
     else process.env[KEY] = prev;
   }
+});
+
+/* ------------------------------------------------------------------ */
+/* pickChampionIdFromGameflow：对局中兜底识别英雄                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 这组测试针对一个**真实 bug**：
+ *
+ * 原实现只在 ChampSelect 阶段读取英雄，且离开该阶段就把 myChampionId 置 0。
+ * 结果「选人阶段能看到胜率，进游戏后却显示未识别到你的英雄」。
+ * pickChampionIdFromGameflow 用于在局内从 gameflow session 兜底恢复。
+ */
+
+test('pickChampionIdFromGameflow：从常见位置取出 championId', () => {
+  assert.equal(pickChampionIdFromGameflow({ championId: 902 }), 902);
+  assert.equal(
+    pickChampionIdFromGameflow({ gameData: { playerChampionId: 1, championId: 902 } }),
+    902,
+  );
+});
+
+test('pickChampionIdFromGameflow：深层嵌套也能找到', () => {
+  const session = { a: { b: { c: { championId: 902 } } } };
+  assert.equal(pickChampionIdFromGameflow(session), 902);
+});
+
+test('pickChampionIdFromGameflow：超出深度限制则放弃（避免遍历整个会话）', () => {
+  const deep = { a: { b: { c: { d: { e: { championId: 902 } } } } } };
+  // 默认 maxDepth=4 → 找不到
+  assert.equal(pickChampionIdFromGameflow(deep), 0);
+  // 放宽深度后可找到
+  assert.equal(pickChampionIdFromGameflow(deep, 6), 902);
+});
+
+test('pickChampionIdFromGameflow：只认正整数 championId，忽略非法值', () => {
+  assert.equal(pickChampionIdFromGameflow({ championId: 0 }), 0);
+  assert.equal(pickChampionIdFromGameflow({ championId: -1 }), 0);
+  assert.equal(pickChampionIdFromGameflow({ championId: 1.5 }), 0);
+  assert.equal(pickChampionIdFromGameflow({ championId: '902' }), 0); // 字符串不算
+  assert.equal(pickChampionIdFromGameflow({ championId: null }), 0);
+});
+
+test('pickChampionIdFromGameflow：键名必须恰为 championId（不误取相似键）', () => {
+  // 这些相似键不应被当成我的英雄
+  assert.equal(pickChampionIdFromGameflow({ otherChampionId: 5 }), 0);
+  assert.equal(pickChampionIdFromGameflow({ championIdList: [1, 2] }), 0);
+  assert.equal(pickChampionIdFromGameflow({ myChampionId: 5 }), 0);
+});
+
+test('pickChampionIdFromGameflow：无 championId 时返回 0（不猜）', () => {
+  assert.equal(pickChampionIdFromGameflow(null), 0);
+  assert.equal(pickChampionIdFromGameflow(undefined), 0);
+  assert.equal(pickChampionIdFromGameflow({}), 0);
+  assert.equal(pickChampionIdFromGameflow({ map: { gameMode: 'BRAWL' } }), 0);
+  assert.equal(pickChampionIdFromGameflow('字符串'), 0);
+  assert.equal(pickChampionIdFromGameflow(902), 0);
+});
+
+test('pickChampionIdFromGameflow：循环引用不会死循环', () => {
+  const a: Record<string, unknown> = { name: 'a' };
+  const b: Record<string, unknown> = { name: 'b', a };
+  a['b'] = b; // a <-> b 互相引用
+  assert.equal(pickChampionIdFromGameflow(a), 0);
+});
+
+test('pickChampionIdFromGameflow：数组里的 championId 也能找到', () => {
+  assert.equal(pickChampionIdFromGameflow({ team: [{ championId: 902 }] }), 902);
 });

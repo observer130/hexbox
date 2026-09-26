@@ -27,6 +27,7 @@ import {
   detectCredentialsDetailed,
   detectPortByListener,
   isBrawlSession,
+  pickChampionIdFromGameflow,
 } from '@hexbox/lcu';
 import { readBuilds, readDataset, readRankings } from '@hexbox/data-store';
 import {
@@ -58,6 +59,21 @@ let warnedNoCreds = false;
 let credsDetail = '';
 /** 本次选人中「我」选的英雄（0 = 未知）。 */
 let myChampionId = 0;
+
+/**
+ * 「对局进行中」的阶段集合。
+ *
+ * 这些阶段内选人会话已消失（或即将消失），因此**不能**清空 myChampionId；
+ * 只有完全离开对局才清空，否则会把上一局的英雄带到下一局。
+ */
+const IN_GAME_PHASES = new Set([
+  'ChampSelect',
+  'GameStart',
+  'InProgress',
+  'Reconnect',
+  'WaitingForStats',
+  'PreEndOfGame',
+]);
 
 const POLL_MS = 2000;
 
@@ -244,6 +260,51 @@ function slotMsg(rows: readonly BuildSlotRow[]): BuildSlotMsg[] {
   }));
 }
 
+/**
+ * 对局中兜底识别「我的英雄」。
+ *
+ * 背景：选人会话（`/lol-champ-select/v1/session`）在进入对局后即消失，
+ * 因此**冷启动直接进对局**（悬浮窗中途打开、或没经历选人）时会拿不到英雄。
+ * 这里按可靠性依次尝试几个官方 LCU 端点：
+ *
+ *   1. `/lol-champ-select/v1/session` —— 选人尚未完全结束时仍可用
+ *   2. `/lol-gameflow/v1/session`     —— 部分版本在对局内带 `championId`
+ *   3. `/lol-summoner/v1/current-summoner` —— 仅作诊断，不含英雄
+ *
+ * ⚠️ 已知局限：这些端点在**国服对局内**是否稳定返回英雄，未经真机验证
+ * （CI/无管理员环境无法复现）。因此：
+ *   - 任一步失败都只是继续下一步，不抛错；
+ *   - 全部失败时返回 0，UI 显示「未识别到你的英雄」而不是猜一个。
+ *
+ * 正常情况下**不依赖**本函数：只要经历过选人阶段，myChampionId 已被记住。
+ */
+async function recoverMyChampionId(client: LcuClient): Promise<number> {
+  // 1) 选人会话（可能仍存在）
+  const cs = await client
+    .get<{
+      myTeam?: Array<{ championId?: number; cellId?: number }>;
+      localPlayerCellId?: number;
+    }>('/lol-champ-select/v1/session')
+    .catch(() => null);
+  if (cs) {
+    const me = (cs.myTeam ?? []).find((m) => m.cellId === cs.localPlayerCellId);
+    if (typeof me?.championId === 'number' && me.championId > 0) return me.championId;
+    const any = (cs.myTeam ?? []).find(
+      (m) => typeof m.championId === 'number' && m.championId > 0,
+    );
+    if (any?.championId) return any.championId;
+  }
+
+  // 2) 游戏流会话（不同版本字段位置不一，这里广泛探测）
+  const gf = await client
+    .get<Record<string, unknown>>('/lol-gameflow/v1/session')
+    .catch(() => null);
+  const fromGf = pickChampionIdFromGameflow(gf);
+  if (fromGf > 0) return fromGf;
+
+  return 0;
+}
+
 /** 组装「我」这个英雄的全部阶段数据。 */
 function buildMeMsg(championId: number): OverlayStateMsg['me'] {
   const info = champSelectInfo(championId, {
@@ -372,13 +433,26 @@ async function pollOnce(): Promise<void> {
       // 找出「我」选的英雄：优先按 localPlayerCellId 定位。
       // 拿不到就退回「我方唯一的已选英雄」——选人早期往往只有自己选了。
       const me = team.find((m) => m.cellId === cs?.localPlayerCellId);
-      myChampionId =
+      const picked =
         typeof me?.championId === 'number' && me.championId > 0
           ? me.championId
           : picks.length === 1
             ? picks[0]!.championId
             : 0;
-    } else {
+
+      // ⚠️ 只在拿到有效值时更新，**不要**在这里清空：
+      // 选人阶段的会话在进入对局后就没了，若离开选人时把 myChampionId 置 0，
+      // 局内就会永远显示「未识别到你的英雄」（真实踩过）。
+      if (picked > 0) myChampionId = picked;
+    } else if (phase === 'InProgress' && client && myChampionId === 0) {
+      // 进对局后选人会话已消失，从游戏会话里补一次兜底。
+      // 冷启动直接进对局（悬浮窗开着但没经历选人）时会走到这里。
+      const recovered = await recoverMyChampionId(client).catch(() => 0);
+      if (recovered > 0) myChampionId = recovered;
+    }
+
+    // 完全离开对局后清空，避免把上一局的英雄带到下一局
+    if (!IN_GAME_PHASES.has(phase) && phase !== 'ChampSelect') {
       myChampionId = 0;
     }
   }
