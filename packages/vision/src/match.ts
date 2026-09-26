@@ -154,13 +154,20 @@ export function prepareTemplates(
  *
  * @returns 最佳候选；若最佳得分低于 `minScore` 则返回 null
  *          （**宁可识别不出，也不给错英雄**）
+ *
+ * ⚠️ 阈值依据（2026-09-27 真机实测，勿凭感觉调低）：
+ *   游戏内选人卡片的立绘是**实时渲染**，与官方静态头像构图差异大，
+ *   真实冠军的灰度模板得分仅 ~0.53，而**错误冠军可达 0.77+**
+ *   （两次真机验证：Quinn 排 179 名/0.528，错误匹配 0.776）。
+ *   因此默认阈值必须高到足以拒绝这类假阳性 —— 0.85 之下
+ *   一律不认定。识别的可用性待模板源换成游戏内 UI 资源后再评估。
  */
 export function matchChampion(
   gray: Uint8Array,
   templates: readonly PreparedTemplate[],
   options: { readonly minScore?: number } = {},
 ): MatchCandidate | null {
-  const minScore = options.minScore ?? 0.62;
+  const minScore = options.minScore ?? 0.85;
   if (templates.length === 0) return null;
 
   const q = normalizeGray(gray);
@@ -184,15 +191,16 @@ export function matchChampion(
  * 仅看最高分不够：若前两名得分接近，说明图像区分度低
  * （可能是加载中/被特效遮挡），此时也应拒绝。
  *
- * @param minMargin 第一名与第二名的最小分差
+ * @param minScore 最低相似度（默认 0.85,真机实测依据见 matchChampion）
+ * @param minMargin 第一名与第二名的最小分差（默认 0.10）
  */
 export function matchChampionCareful(
   gray: Uint8Array,
   templates: readonly PreparedTemplate[],
   options: { readonly minScore?: number; readonly minMargin?: number } = {},
 ): MatchCandidate | null {
-  const minScore = options.minScore ?? 0.62;
-  const minMargin = options.minMargin ?? 0.03;
+  const minScore = options.minScore ?? 0.85;
+  const minMargin = options.minMargin ?? 0.10;
   if (templates.length === 0) return null;
 
   const q = normalizeGray(gray);

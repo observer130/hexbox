@@ -36,7 +36,9 @@ import {
   makeGeometry,
   matchChampionCareful,
   normalizedRectToScreen,
+  normalizeGray,
   prepareTemplates,
+  similarity,
   type Bitmap,
   type PortraitTemplate,
   type PreparedTemplate,
@@ -75,6 +77,8 @@ interface DebugResult {
     championId: number | null;
     championName: string | null;
     score: number;
+    /** 相似度前 3 候选（诊断用；识别阈值极严，正式认定见 championId）*/
+    top3: Array<{ id: number; name: string; score: number }>;
   }>;
 }
 
@@ -279,12 +283,23 @@ app.whenReady().then(async () => {
     };
     const gray = extractGray(bmp, inner, templates[0]?.norm.length ? Math.sqrt(templates[0]!.norm.length) : 24);
     const m = gray && templates.length > 0 ? matchChampionCareful(gray, templates) : null;
+    // top3 候选仅供诊断（识别阈值极严,正式认定需要更高分）,
+    // 便于从标注图判断「模板库与游戏内渲染的差距」
+    let top3: Array<{ id: number; score: number }> = [];
+    if (gray && templates.length > 0) {
+      const q = normalizeGray(gray);
+      top3 = templates
+        .map((t) => ({ id: t.championId, score: similarity(q, t.norm) }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 3);
+    }
     cards.push({
       rect,
       screenRect: normalizedRectToScreen(rect, geo),
       championId: m?.championId ?? null,
       championName: m ? (nameById.get(m.championId) ?? null) : null,
       score: m?.score ?? 0,
+      top3: top3.map((t) => ({ id: t.id, name: nameById.get(t.id) ?? `#${t.id}`, score: t.score })),
     });
   }
 
@@ -306,13 +321,18 @@ app.whenReady().then(async () => {
   // 4) 标注图（PNG，便于直接查看）
   //
   // 用隐藏窗口渲染 HTML(canvas 绘制原图+检测框)，再 capturePage。
-  // ⚠️ 两个已踩的坑：
+  // ⚠️ 三个已踩的坑：
   //   a. 不能用 nativeImage.createFromDataURL(SVG dataURL)：不支持 SVG，
   //      产出 1x1 空图。
   //   b. 不能把截图 base64 嵌进 data: URL 的 HTML：4MB 图 → URL 超长，
   //      ERR_INVALID_URL。改为写 HTML 文件、用 file:// 引用 raw.png。
-  const cssW = bmp.width;
-  const cssH = bmp.height;
+  //   c. capturePage 只截**视口**：画布 3413×1920 配 1600×1000 窗口
+  //      只能得到左上角裁切。必须把整图**缩放进窗口**（annotateScale）。
+  const MAX_W = 1600;
+  const MAX_H = 1000;
+  const annotateScale = Math.min(MAX_W / bmp.width, MAX_H / bmp.height);
+  const cssW = Math.round(bmp.width * annotateScale);
+  const cssH = Math.round(bmp.height * annotateScale);
   const note = `phase=${phase ?? '?'}  lines=${det.lines.length}  cards=${det.cards.length}  scale=${scale.scale.toFixed(2)}`;
   const boxesHtml = cards
     .map((c, i) => {
@@ -320,20 +340,24 @@ app.whenReady().then(async () => {
       const y = c.rect.y * cssH;
       const w = c.rect.w * cssW;
       const h = c.rect.h * cssH;
-      const label = c.championName ?? (c.championId ? `#${c.championId}` : '未识别');
+      // 未认定时展示 top1 候选（诊断价值：看模板库与游戏内渲染的差距）
+      const top1 = c.top3[0];
+      const label =
+        c.championName ?? (top1 ? `未认定(最近:${top1.name} ${top1.score.toFixed(3)})` : '未识别');
       const color = c.championId ? '#4ade80' : '#e0b64a';
       const score = c.score > 0 ? ` ${c.score.toFixed(3)}` : '';
       return { x, y, w, h, label: `${i + 1}. ${label}${score}`, color };
     })
     .map(
       (b) => `
-        ctx.strokeStyle = '${b.color}'; ctx.lineWidth = 3;
+        ctx.strokeStyle = '${b.color}'; ctx.lineWidth = 2;
         ctx.strokeRect(${b.x}, ${b.y}, ${b.w}, ${b.h});
+        ctx.font = '14px "Microsoft YaHei", sans-serif';
+        const tw = ctx.measureText(${JSON.stringify(b.label)}).width + 12;
         ctx.fillStyle = 'rgba(0,0,0,0.75)';
-        ctx.fillRect(${b.x}, ${b.y + b.h}, ${Math.min(b.w, 260)}, 30);
+        ctx.fillRect(${b.x}, ${b.y + b.h}, ${'Math.min(tw, ' + cssW + ' - ' + b.x + ')'}, 24);
         ctx.fillStyle = '${b.color}';
-        ctx.font = '18px "Microsoft YaHei", sans-serif';
-        ctx.fillText(${JSON.stringify(b.label)}, ${b.x + 6}, ${b.y + b.h + 21});`,
+        ctx.fillText(${JSON.stringify(b.label)}, ${b.x + 6}, ${b.y + b.h + 17});`,
     )
     .join('');
 
@@ -382,11 +406,13 @@ app.whenReady().then(async () => {
   console.log('  raw.png        原始截屏');
   console.log('  result.json    检测结果');
   for (const [i, c] of cards.entries()) {
+    const decided = c.championName ?? '未认定';
+    const top = c.top3.map((t) => `${t.name}=${t.score.toFixed(3)}`).join(' > ');
     console.log(
-      `  #${i + 1} ${c.championName ?? '未识别'}  score=${c.score.toFixed(3)}  ` +
-        `归一化 x=${c.rect.x.toFixed(3)} w=${c.rect.w.toFixed(3)}  ` +
-        `屏幕 (${c.screenRect.x.toFixed(0)},${c.screenRect.y.toFixed(0)})`,
+      `  #${i + 1} ${decided}  score=${c.score.toFixed(3)}  ` +
+        `归一化 x=${c.rect.x.toFixed(3)} w=${c.rect.w.toFixed(3)}`,
     );
+    if (c.championId === null && top) console.log(`      候选: ${top}`);
   }
 
   app.quit();
