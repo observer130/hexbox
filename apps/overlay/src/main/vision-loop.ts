@@ -231,6 +231,10 @@ export class VisionLoop {
   private readonly intervalMs: number;
   private timer: NodeJS.Timeout | null = null;
   private running = false;
+  private lastGood: VisionOverlayMsg | null = null;
+  private failCount = 0;
+  /** 连续失败多少轮才真正清空（1.5s/轮 × 4 = 6s 容忍）。 */
+  private static readonly FAIL_TOLERANCE = 4;
 
   constructor(deps: VisionLoopDeps, intervalMs = 1500) {
     this.deps = deps;
@@ -244,10 +248,24 @@ export class VisionLoop {
       this.running = true;
       try {
         const { msg, display } = await runVisionRound(this.deps);
-        this.deps.onResult(
-          msg ?? { active: false, labels: [], diag: '未找到游戏窗口' },
-          display,
-        );
+        if (msg && msg.active) {
+          // 成功:记住结果,清零失败计数
+          this.lastGood = msg;
+          this.failCount = 0;
+          this.deps.onResult(msg, display);
+        } else {
+          this.failCount++;
+          if (this.lastGood && this.failCount < VisionLoop.FAIL_TOLERANCE) {
+            // 容忍期内保持上一次成功内容（检测在动画/光效下会间歇失败）
+            this.deps.onResult(this.lastGood, display);
+          } else {
+            this.deps.onResult(
+              msg ?? { active: false, labels: [], diag: '未找到游戏窗口' },
+              display,
+            );
+            if (this.failCount >= VisionLoop.FAIL_TOLERANCE) this.lastGood = null;
+          }
+        }
       } catch {
         this.deps.onResult(
           { active: false, labels: [], diag: '识别异常' },
