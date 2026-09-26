@@ -81,7 +81,7 @@ test('toEntries：装备 id 必须是字符串（客户端自己的格式）', (
   assert.equal(out[0]!.count, 1);
 });
 
-test('buildBlocks：槽位顺序为 出门装→鞋→优先成装→其余成装', () => {
+test('buildBlocks：槽位顺序为 出门装→优先成装→其余成装（无鞋栏）', () => {
   const blocks = buildBlocks(
     build({
       start: [
@@ -93,9 +93,20 @@ test('buildBlocks：槽位顺序为 出门装→鞋→优先成装→其余成�
     }),
   );
   assert.match(blocks[0]!.type, /^出门装/);
-  assert.match(blocks[1]!.type, /^鞋/);
-  assert.match(blocks[2]!.type, /^优先成装/);
-  assert.match(blocks[3]!.type, /^其余成装/);
+  assert.match(blocks[1]!.type, /^优先成装/);
+  assert.match(blocks[2]!.type, /^其余成装/);
+  assert.equal(
+    blocks.some((b) => b.type.startsWith('鞋')),
+    false,
+    '鞋不应单独成栏（一栏一件装备，游戏内既不好看也无信息量）',
+  );
+});
+
+test('buildBlocks：即使只有鞋数据也不产生鞋栏', () => {
+  const blocks = buildBlocks(
+    build({ shoes: [{ itemIds: [3006], pickRate: 0.5, winRate: 0.57 }] }),
+  );
+  assert.deepEqual(blocks, []);
 });
 
 test('buildBlocks：出门装只给排名第一的一套', () => {
@@ -126,25 +137,15 @@ test('buildBlocks：按登场率降序取（上游原始顺序不可靠）', () 
   assert.deepEqual(blocks[0]!.items.map((i) => i.id), ['4', '5', '6']);
 });
 
-test('buildBlocks：优先成装最多 3 套，鞋最多 2 套', () => {
+test('buildBlocks：优先成装最多 3 套', () => {
   const many = (n: number) =>
     Array.from({ length: n }, (_, i) => ({
       itemIds: [100 + i, 200 + i, 300 + i],
       pickRate: 0.2 - i / 100,
       winRate: 0.5,
     }));
-  const blocks = buildBlocks(
-    build({
-      core: many(10),
-      shoes: [
-        { itemIds: [1], pickRate: 0.5, winRate: 0.5 },
-        { itemIds: [2], pickRate: 0.4, winRate: 0.5 },
-        { itemIds: [3], pickRate: 0.3, winRate: 0.5 },
-      ],
-    }),
-  );
+  const blocks = buildBlocks(build({ core: many(10) }));
   assert.equal(blocks.filter((b) => b.type.startsWith('优先成装')).length, 3);
-  assert.equal(blocks.filter((b) => b.type.startsWith('鞋')).length, 2);
 });
 
 test('buildBlocks：其余成装把单件合并进**一个**栏位', () => {

@@ -41,9 +41,9 @@ export function toEntries(itemIds: readonly number[]): ItemSetEntry[] {
  *
  * 分块与条数（依据 docs/build-slots.md 的核实结果）：
  *   - **出门装**：只取第 1 套（官方按登场率降序的第 1 名）
- *   - **鞋**：取前 2
- *   - **优先成装**：取前 3 套三件套（官方最多约 10 条，取前 3 足够）
- *   - **其余成装**：单件列表，合并成一栏（官方展示全部 20 条）
+ *   - **优先成装**：取前 3 套三件套
+ *   - **其余成装**：单件列表，合并成一栏
+ *   - **鞋**：不单独成栏（一栏只有一件装备，游戏内既不好看也无信息量）
  *
  * ⚠️ 两处易错点：
  *   1. 上游**不是**按登场率排序的，必须自己降序排（否则第一套是随机的）；
@@ -78,10 +78,10 @@ export function buildBlocks(build: ChampionBuild): ItemSetBlock[] {
     }
   }
 
-  // 鞋：前 2
-  for (const [i, s] of byPick(build.shoes).slice(0, 2).entries()) {
-    blocks.push(mk(`鞋 ${i + 1}（${(s.winRate * 100).toFixed(1)}%）`, toEntries(s.itemIds)));
-  }
+  // 鞋：**不单独成栏**。
+  // 每栏只有一件装备，在游戏内既不好看也没信息量
+  // （鞋的选择通常已包含在核心三件套/其余成装里）。
+  // 保留 shoes 数据本身，只是不展示。
 
   // 优先成装（三件套）：前 3
   for (const [i, s] of byPick(build.core).slice(0, 3).entries()) {
