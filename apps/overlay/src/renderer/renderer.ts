@@ -4,8 +4,7 @@
  * 不 import 任何 Node 依赖 —— LCU 轮询、数据集读取都在主进程，
  * 这里只接收 `overlay:state` 推送并渲染。
  *
- * 合规边界由主进程保证（见 packages/core/src/compliance.ts）：
- * 只显示静态图鉴与选人阶段可见信息，不显示胜率，不识别局内三选一。
+ * 数据出处由主进程随状态一并推送，渲染端只负责展示并标注来源。
  */
 
 interface OverlayStateMsg {
@@ -17,7 +16,6 @@ interface OverlayStateMsg {
   augCount: number;
   picks: Array<{ championId: number; name: string }>;
   clickThrough: boolean;
-  policyReason: string;
 }
 
 interface OverlayApi {
@@ -63,8 +61,20 @@ function panel(header: string, tag: string, body: string, foot: string): string 
 
 function render(s: OverlayStateMsg): void {
   if (!s.connected) {
-    app.innerHTML = panel('离线', '离线', '<div class="dim">未检测到英雄联盟客户端。</div>',
-      '请先启动客户端；本工具需管理员权限读取 LCU 凭证。');
+    app.innerHTML = panel(
+      '未连接',
+      '未连接',
+      `
+        <div class="notice">读不到 LCU 凭证，无法获取对局状态。</div>
+        <div class="li dim">· 客户端未启动，或</div>
+        <div class="li dim">· 本工具未以<b>管理员身份</b>运行</div>
+        <div class="sep"></div>
+        <div class="k">令牌来源（二选一）：</div>
+        <div class="li dim">· 进程命令行 —— 需管理员权限</div>
+        <div class="li dim">· 安装目录 lockfile</div>
+      `,
+      '请关闭本窗口，右键以「管理员身份运行」重新启动。',
+    );
     return;
   }
 
@@ -96,15 +106,13 @@ function render(s: OverlayStateMsg): void {
       s.isBrawl ? '海克斯乱斗' : s.gameMode,
       `
         <div class="notice">
-          <strong>静态海克斯图鉴</strong>（${s.augCount} 条）随工具提供，可自行查阅。
+          <strong>静态海克斯图鉴</strong>（${s.augCount} 条）随工具提供。
         </div>
-        <div class="li dim">· 不识别你当前被提供的 3 个海克斯</div>
-        <div class="li dim">· 不显示胜率 / 选取率</div>
+        <div class="li dim">· 图鉴 / 胜率面板尚未实现（见开发计划）</div>
+        <div class="li dim">· 不识别你当前被提供的 3 个海克斯 —— 官方无此数据</div>
         <div class="li dim">· 不替你做选择</div>
       `,
-      s.policyReason
-        ? `政策原因：${esc(s.policyReason.slice(0, 72))}…`
-        : '',
+      '',
     );
     return;
   }

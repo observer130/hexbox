@@ -20,43 +20,27 @@ Hard product constraint (do **not** skip it):
 > static data, Tencent first-party public data for the CN server, and the LCU
 > local REST API when available).
 
-## ⚠️ Compliance boundary — load-bearing, not optional
+## Data sourcing (guidance, not a gate)
 
-This is the single most important rule for this repo. The compliance boundary
-is **enforced in code** at `packages/core/src/compliance.ts`
-(`DATA_POLICY` + `assertDataSourceAllowed()`), locked by tests in
-`packages/core/src/compliance.test.ts`. The rationale is captured in the
-comments of `packages/core/src/compliance.ts`.
+There is **no compliance gate and no policy table in code** — they were removed.
+Do not reintroduce an `assert*Allowed()` style blocker.
 
-**The deciding dimension is the data SOURCE, not the data CONTENT.**
-This project targets the CN server (operated by Tencent). Win rates for the
-mode published by Tencent's official data site
-([101.qq.com](https://101.qq.com/#/rankings/hextech)) are first-party official
-public data and ARE allowed (class `official-aggregated`). The earlier
-"no win rates at all" stance was a v1 misreading of Riot's developer policy
-(which governs Riot's own developer ecosystem, not Tencent's CN first-party
-publications) and was corrected in v2.
+`ProviderInfo.dataClass` (see `packages/core/src/provider.ts`) is a plain
+descriptive label used to attribute data in the UI. It carries no allow/deny
+semantics.
 
-The policy table:
+What this means in practice:
 
-- `official-static` ✅ — official public static definitions (CommunityDragon,
-  Data Dragon, Tencent first-party CDN `game.gtimg.cn`).
-- `official-aggregated` ✅ — official first-party aggregated stats (win/pick
-  rates, ranks from 101.qq.com / `mlol.qt.qq.com` public endpoints).
-  Must be shown with source attribution and the upstream `dtstatdate`.
-- `third-party-scraped` ❌ — data scraped/repackaged from third-party sites.
-- `live-session` ❌ — the official Live Client Data API has no augment data;
-  only obtainable via memory reading/OCR, both excluded.
-- `process-invasive` ❌ — **permanent red line (手段红线)**: no memory reading,
-  no injection, no game-process handles, no packet parsing.
-
-Do not flip any `DATA_POLICY` entry without updating the code gate and its
-tests (tests will catch a mismatch). Never wire a source that is
-not first-party official (e.g. random third-party scrapers) — tests fail by
-design when you do, and that is correct.
-
-If a task seems to require crossing this boundary, stop and ask the user rather
-than working around it.
+- Prefer official / first-party sources (CommunityDragon, Data Dragon, Tencent
+  CN official such as `101.qq.com`, `mlol.qt.qq.com`, `game.gtimg.cn`, and the
+  local LCU REST API). Label the source in the UI.
+- Screenshot + OCR of the official game UI is a **normal, acceptable** technique.
+  It reads only on-screen pixels and is not an invasive method.
+- **Do not** read game memory, inject, hook the game process, or parse packets.
+  That is the one hard technical line, and it is a product decision — not a
+  policy engine. If a task seems to need it, ask the user.
+- A `live-session`-labelled source (in-game augment offers) is fine; label it in
+  the UI as "read from screen" rather than an API value.
 
 ## Repository layout
 
@@ -64,7 +48,7 @@ pnpm workspace monorepo.
 
 ```
 packages/
-  core/                       domain models + compliance gate + Provider iface
+  core/                       domain models + Provider iface
   provider-communitydragon/  static data source (global static definitions)
   provider-tencent/           CN first-party source (kiwi statics + mode rankings)
   provider-registry/          registry (all enabled providers registered here)
@@ -99,7 +83,7 @@ From the repo root:
 
 ```bash
 pnpm typecheck     # pnpm -r typecheck (full project)
-pnpm test          # pnpm -r test     (compliance 7 + lcu 8 + others)
+pnpm test          # pnpm -r test     (lcu 8 + provider-tencent + others)
 pnpm build         # pnpm -r build
 pnpm dev:web       # web dev server
 pnpm dev:overlay   # overlay (admin + desktop required)
@@ -113,8 +97,7 @@ pnpm --filter @hexbox/web typecheck
 ```
 
 Tests use Node's built-in runner: `node --experimental-strip-types --test ...`.
-**Make the suite green before committing.** New behavior must include/extend
-tests, especially anything touching `compliance.ts`.
+**Make the suite green before committing.** New behavior should include tests.
 
 ## TypeScript conventions (enforced in tsconfig.base.json)
 
@@ -135,8 +118,6 @@ run:
 - TypeScript, strict mode, functional where reasonable.
 - Single quotes, no trailing semicolons.
 - Comments in Chinese are fine and consistent with the rest of the repo.
-- Keep the compliance gate self-documenting: if policy intent changes,
-  update `DATA_POLICY`, its comments, and the tests together.
 
 ## Commit / PR guidelines
 
@@ -146,13 +127,10 @@ run:
   `.env*`, `*.log` — already covered by `.gitignore`.
 - Do not commit local LCU tokens/paths; the LCU client reads them at runtime.
 
-## Out of scope (do not add without explicit approval)
+## Out of scope
 
-- Any memory injection, game-process hooking, or packet inspection —
-  permanent red line regardless of what data it would unlock.
-- Data scraped/repackaged from third-party sites (`third-party-scraped`).
-  Official first-party surfaces only: CommunityDragon / Data Dragon /
-  Tencent CN official (`101.qq.com`, `mlol.qt.qq.com`, `game.gtimg.cn`).
-- In-game augment offers (`live-session`) — not exposed by any official API.
-- New official sources still need to be registered in `DATA_POLICY`
-  (packages/core/src/compliance.ts) before use.
+- Memory injection, game-process hooking, or packet inspection — the one hard
+  technical line. If a feature seems to need it, ask the user instead.
+- Data scraped/repackaged from third-party sites. Prefer first-party surfaces:
+  CommunityDragon / Data Dragon / Tencent CN official
+  (`101.qq.com`, `mlol.qt.qq.com`, `game.gtimg.cn`).

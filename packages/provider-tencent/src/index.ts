@@ -1,7 +1,7 @@
 /**
  * 腾讯国服一方数据源 (provider-tencent)
  *
- * 来源（均为运营方官方公开渠道，判定依据见 @hexbox/core 的 DATA_POLICY）：
+ * 来源（均为运营方官方公开渠道）：
  *   1. 海克斯图鉴（official-static）：
  *      https://game.gtimg.cn/images/lol/act/img/js/kiwi/kiwi_augments.json
  *      101.qq.com 官方数据站自身使用的图鉴数据：官方数字 ID（1001+）、
@@ -18,7 +18,6 @@
  */
 
 import {
-  assertDataClassAllowed,
   type AugmentMode,
   type AugmentRarity,
   type AugmentRankEntry,
@@ -365,8 +364,6 @@ export function createTencentStaticProvider(options: TencentOptions = {}): Stati
     },
 
     async load(signal?: AbortSignal): Promise<Dataset> {
-      // 合规闸门：官方静态类数据明确允许。
-      assertDataClassAllowed('official-static');
       const raws = await getJson<RawKiwiAugment[]>(url, signal);
       const hextechs = normalizeKiwiAugments(raws);
       return {
@@ -412,9 +409,6 @@ export function createTencentRankingProvider(options: TencentOptions = {}): Rank
     },
 
     async load(signal?: AbortSignal): Promise<RankingSnapshot> {
-      // 合规闸门：官方聚合统计类数据明确允许。
-      assertDataClassAllowed('official-aggregated');
-
       let lastErr: unknown = null;
       for (const date of statDates) {
         try {

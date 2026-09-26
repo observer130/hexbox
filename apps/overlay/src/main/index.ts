@@ -17,9 +17,9 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
-import { LcuClient, detectCredentials, isBrawlSession } from '@hexbox/lcu';
+import { LcuClient, detectCredentials, detectPortByListener, isBrawlSession } from '@hexbox/lcu';
 import { readDataset } from '@hexbox/data-store';
-import { DATA_POLICY, type Dataset } from '@hexbox/core';
+import { type Dataset } from '@hexbox/core';
 
 const execFileAsync = promisify(execFile);
 
@@ -32,6 +32,8 @@ let client: LcuClient | null = null;
 let dataset: Dataset | null = null;
 let lastPhase: string | null = null;
 let clickThrough = true;
+/** 凭证探测失败只提示一次，避免每 2s 刷屏。 */
+let warnedNoCreds = false;
 
 const POLL_MS = 2000;
 
@@ -46,8 +48,6 @@ interface OverlayStateMsg {
   /** 选人阶段我方已选英雄（pregame-visible，政策允许）。 */
   picks: Array<{ championId: number; name: string }>;
   clickThrough: boolean;
-  /** 被禁数据类别的原因（用于在 UI 上诚实说明"为什么不显示"）。 */
-  policyReason: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,17 +64,25 @@ async function findGameWindowRect(): Promise<Rectangle | null> {
   const windir = process.env['windir'] ?? 'C:\\Windows';
   const ps = join(windir, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 
+  // 注意：必须用 Add-Type -TypeDefinition 而不是 -MemberDefinition。
+  // -MemberDefinition 会把 RECT 放进嵌套类型（Hexbox.WinApi+RECT），
+  // `New-Object Hexbox.RECT` 找不到它 → GetWindowRect 静默失败 → 定位永远走兜底分支。
   const script = `
-$sig = @'
-[DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-[StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+$src = @'
+using System;
+using System.Runtime.InteropServices;
+[StructLayout(LayoutKind.Sequential)]
+public struct HEXBOX_RECT { public int Left, Top, Right, Bottom; }
+public static class HexboxWinApi {
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out HEXBOX_RECT lpRect);
+}
 '@
-Add-Type -MemberDefinition $sig -Name WinApi -Namespace Hexbox -ErrorAction SilentlyContinue
+Add-Type -TypeDefinition $src -ErrorAction SilentlyContinue
 $proc = Get-Process -Name 'LeagueClientUx','League of Legends' -ErrorAction SilentlyContinue |
   Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
 if (-not $proc) { exit 0 }
-$r = New-Object Hexbox.RECT
-[Hexbox.WinApi]::GetWindowRect($proc.MainWindowHandle, [ref]$r) | Out-Null
+$r = New-Object HEXBOX_RECT
+[HexboxWinApi]::GetWindowRect($proc.MainWindowHandle, [ref]$r) | Out-Null
 [PSCustomObject]@{ X=$r.Left; Y=$r.Top; W=($r.Right-$r.Left); H=($r.Bottom-$r.Top) } |
   ConvertTo-Json -Compress
 `;
@@ -165,6 +173,20 @@ async function pollOnce(): Promise<void> {
     if (creds) {
       client = new LcuClient(creds);
       console.log(`[hexbox] LCU 已连接 (port ${creds.port}, via ${creds.source})`);
+    } else if (!warnedNoCreds) {
+      // 凭证探测失败是「悬浮窗永不出现」最常见的原因，必须显式报出来，
+      // 否则表现为「程序在跑但什么都不显示」，极难排查。
+      warnedNoCreds = true;
+      // 顺带探一下端口，区分「客户端没开」和「客户端开了但读不到凭证」
+      const alive = await detectPortByListener()
+        .then((cs) => cs.length > 0)
+        .catch(() => false);
+      console.warn(
+        alive
+          ? '[hexbox] 检测到英雄联盟客户端，但读不到 LCU 凭证（命令行/lockfile 均不可读）。' +
+              '\n         悬浮窗需要**以管理员身份运行**才能读到令牌 —— 请用管理员权限重开。'
+          : '[hexbox] 未检测到英雄联盟客户端；请先启动客户端，并以管理员身份运行本工具。',
+      );
     }
   }
 
@@ -197,7 +219,9 @@ async function pollOnce(): Promise<void> {
   }
 
   // 可见性随阶段自动切换（不抢焦点）
-  const show = phase === 'ChampSelect' || phase === 'InProgress';
+  // 注意：连不上时必须也把窗口显示出来，否则用户看到的是「什么都没有」，
+  // 无法区分「没在对局」和「根本连不上客户端」。连不上时显示诊断面板。
+  const show = phase === 'ChampSelect' || phase === 'InProgress' || !connected;
   if (phase !== lastPhase) {
     lastPhase = phase;
     if (win) {
@@ -223,9 +247,6 @@ async function pollOnce(): Promise<void> {
     augCount: dataset?.augments.length ?? 0,
     picks,
     clickThrough,
-    policyReason: DATA_POLICY['official-aggregated'].allowed
-      ? ''
-      : DATA_POLICY['official-aggregated'].reason,
   };
 
   if (win && !win.isDestroyed()) {
@@ -262,7 +283,8 @@ function createWindow(): void {
     hasShadow: false,
     show: false, // 由阶段驱动显示
     webPreferences: {
-      preload: join(__dirname, 'preload', 'index.cjs'),
+      // __dirname 是 dist/main，preload/renderer 都是它的兄弟目录（dist/preload、dist/renderer）
+      preload: join(__dirname, '..', 'preload', 'index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
@@ -273,7 +295,7 @@ function createWindow(): void {
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   win.setIgnoreMouseEvents(clickThrough, { forward: true });
 
-  void win.loadFile(join(__dirname, 'renderer', 'index.html'));
+  void win.loadFile(join(__dirname, '..', 'renderer', 'index.html'));
 }
 
 function applyClickThrough(on: boolean): void {

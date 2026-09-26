@@ -263,18 +263,28 @@ test('排行榜 provider：上游报错时返回空快照而非抛出', async ()
 });
 
 test('排行榜 provider：HTTP 失败后回退到更早日期', async () => {
-  let n = 0;
+  // 不能写死「T-1 = 某天」：候选窗口由真实当前日期生成，写死会让测试
+  // 随日历漂移而失效（日期一过，首个候选日就不再是被 mock 失败的那天）。
+  // 这里改为让「首个候选日」动态失败，其余日期成功。
+  const firstCandidate = Array.from({ length: 5 }, (_, i) =>
+    new Date(Date.now() - (i + 1) * 86_400_000).toISOString().slice(0, 10).replace(/-/g, ''),
+  )[0]!;
+
+  let failures = 0;
+  const tried: string[] = [];
   const provider = createTencentRankingProvider({
     fetchImpl: (async (input: RequestInfo | URL) => {
       const date = String(input).match(/dtstatdate=(\d{8})/)![1]!;
-      if (date === '20260924') {
-        n++;
+      tried.push(date);
+      if (date === firstCandidate) {
+        failures++;
         return new Response('err', { status: 502 });
       }
       return jsonResponse({ code: 0, data: { _fieldValues: { R1: RUNE_RAW } } });
     }) as typeof fetch,
   });
   const snap = await provider.load();
-  assert.ok(n >= 2, 'T-1 失败后应重试更早日期');
+  assert.ok(failures >= 2, `首个候选日 ${firstCandidate} 失败后应重试更早日期`);
+  assert.ok(new Set(tried).size >= 2, '应尝试过至少两个不同日期');
   assert.ok(snap.augments.length > 0);
 });

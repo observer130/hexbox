@@ -3,8 +3,8 @@
  * 排行榜视图（official-aggregated）
  *
  * 数据来源：腾讯 101 官方数据站（101.qq.com）一方公开接口。
- * 合规要求（见 @hexbox/core 的 DATA_POLICY，official-aggregated）：
- *   - 必须标注来源与上游统计日期（meta.dataDate）；
+ * 展示约定：
+ *   - 标注来源与上游统计日期（meta.dataDate）；
  *   - 上游无数据时显示「暂无数据」，不用旧数据冒充。
  */
 import { computed, ref } from 'vue';

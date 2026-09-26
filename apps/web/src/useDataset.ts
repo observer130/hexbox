@@ -8,8 +8,7 @@
  * 不在源码中打包数据 —— 800KB+ JSON 会让构建产物无谓膨胀。
  * 排行榜加载失败不应影响图鉴展示（两份状态独立）。
  *
- * 合规边界见 packages/core/src/compliance.ts：
- * 排行榜展示必须标注来源与统计日期（meta.dataDate）。
+ * 排行榜展示应标注来源与统计日期（meta.dataDate），便于用户甄别出处。
  */
 
 import { ref, shallowRef, type Ref } from 'vue';

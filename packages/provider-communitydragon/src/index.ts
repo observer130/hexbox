@@ -10,7 +10,7 @@
  *   写成 `global/zh_cn/default/v1/...` 会 404 —— 不要照搬 `global/default/v1/`。
  */
 
-import { assertDataClassAllowed, type Augment, type AugmentMode, type AugmentRarity, type Champion, type Dataset, type Item, type StaticProvider } from '@hexbox/core';
+import { type Augment, type AugmentMode, type AugmentRarity, type Champion, type Dataset, type Item, type StaticProvider } from '@hexbox/core';
 
 const DEFAULT_BASE =
   'https://raw.communitydragon.org/latest/plugins/rcp-be-lol-game-data/global';
@@ -179,10 +179,6 @@ export function createCommunityDragonProvider(
     },
 
     async load(signal?: AbortSignal): Promise<Dataset> {
-      // 合规闸门：官方静态类数据明确允许。
-      // 若未来有人把 dataClass 改成受限类别，这里会立刻抛错。
-      assertDataClassAllowed('official-static');
-
       const [rawAugments, rawLists, rawChampions, rawItems] = await Promise.all([
         getJson<RawAugment[]>('cherry-augments.json', signal),
         getJson<RawAugmentList[]>('augment-lists.json', signal),

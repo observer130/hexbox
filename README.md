@@ -3,10 +3,11 @@
 英雄联盟 **海克斯乱斗** 助手：数据查询站 + 游戏内悬浮窗辅助。
 
 > **硬性约束**：不读内存、不注入、不解析封包，也不打开游戏进程句柄。
+> （截屏 + OCR 不属于此列 —— 它只读取屏幕上玩家肉眼可见的内容。）
 
-> **数据来源声明**：静态图鉴来自 CommunityDragon 与腾讯一方公开 CDN；
-> 排行榜来自腾讯官方数据站 101.qq.com 的一方公开接口（判定依据见
-> `packages/core/src/compliance.ts` 中 `DATA_POLICY` 的说明注释）。
+> **数据来源**：静态图鉴来自 CommunityDragon 与腾讯一方公开 CDN；
+> 排行榜来自腾讯官方数据站 101.qq.com 的一方公开接口。
+> 展示时标注来源与统计日期。
 
 ## 快速开始
 
@@ -62,7 +63,7 @@ pnpm dev:overlay
 
 ```bash
 pnpm typecheck   # 全量类型检查
-pnpm test        # 全量测试（合规 + lcu + provider）
+pnpm test        # 全量测试（lcu + provider + ...）
 pnpm build       # 构建所有包
 ```
 
@@ -70,7 +71,7 @@ pnpm build       # 构建所有包
 
 ```
 packages/
-  core/                       领域模型 + 合规闸门 + Provider 接口
+  core/                       领域模型 + Provider 接口
   provider-communitydragon/   国际服静态数据源
   provider-tencent/           国服一方数据源（官方图鉴 + 模式排行榜）
   provider-registry/          注册表（启用中的数据源集中登记）
@@ -84,19 +85,7 @@ apps/
 
 数据流：`CommunityDragon + 腾讯一方 --pnpm sync--> data/*.json --读取--> 数据站/悬浮窗`
 
-## 合规要点
-
-- **判定维度是数据来源，而非数据内容**：只接运营方/官方一方公开数据。
-  国服由腾讯运营，101.qq.com 为腾讯官方数据站，其公开发布的
-  英雄/海克斯胜率属于一方官方公开数据（`official-aggregated`），可以使用。
-- 展示统计数据时必须标注来源与上游统计日期（dtstatdate）。
-- **不做**局内三选一识别 —— 官方 Live Client Data API 无此数据
-  （swagger 24 端点/24 schema 中 augment/cherry/kiwi/hextech/brawl 零命中），
-  只能靠截屏 OCR 或读内存，均已排除。
-- **手段红线永不妥协**：不读内存、不注入、不打开游戏进程句柄、不解析封包。
-- 不接第三方爬取/二次加工的数据（`third-party-scraped`）。
-
-## 合规声明
+## 法律声明
 
 本产品未获得 Riot Games 认可，不代表 Riot Games 或任何参与制作、管理 Riot Games
 财产的人士的观点或意见。Riot Games 及所有相关财产均为 Riot Games, Inc. 的商标
