@@ -108,11 +108,16 @@ export async function runVisionRound(
   const display = screen.getPrimaryDisplay();
   // 统一换算：自动区分「显示器快照」与「窗口快照」两种形态
   // （S2 真机验收教训：二者混淆导致标签横向错位）
-  const { geo } = makeScreenGeometry(bmp, windowPhysical, {
+  const { geo, kind, scale } = makeScreenGeometry(bmp, windowPhysical, {
     bounds: display.bounds,
     scaleFactor: display.scaleFactor,
     workArea: display.workArea,
   });
+  console.log(
+    `[hexbox:vision] 截屏 ${bmp.width}x${bmp.height} 窗口` +
+      `${windowPhysical ? `${windowPhysical.width}x${windowPhysical.height}@${windowPhysical.x},${windowPhysical.y}` : '未知'}` +
+      ` 判定=${kind} scale=${scale.toFixed(3)}`,
+  );
 
   const det = detectCards(bmp);
   if (!det.confident || det.cards.length === 0) {

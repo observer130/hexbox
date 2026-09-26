@@ -48,12 +48,11 @@ test('captureScale：截屏宽为 0 时按 1.0 兜底', () => {
 /* snapshotKind：窗口快照 vs 显示器快照（S2 坐标错位修复的判据）         */
 /* ------------------------------------------------------------------ */
 
-test('snapshotKind：截屏与显示器纵横比一致、窗口不同 → display', () => {
-  // 真机 S2 场景变体: 显示器逻辑 1920×1080@1.25(16:9),
-  // 窗口 2000×1125(16:9)与显示器同比 —— 三方同比时退化为 window(无偏移,误差小)
+test('snapshotKind：截屏与显示器纵横比一致、窗口同比但未占满 → display（联合判据）', () => {
+  // 三方同比但窗口只占显示器 83%(2000/2400) → 联合判据归 display
   assert.equal(
     snapshotKind({ width: 4800, height: 2700 }, { width: 2400, height: 1350 }, { width: 2000, height: 1125 }),
-    'window',
+    'display',
   );
 });
 
@@ -63,6 +62,23 @@ test('snapshotKind：截屏与显示器同比而窗口不同比 → display', ()
   assert.equal(
     snapshotKind({ width: 4800, height: 2700 }, { width: 2400, height: 1350 }, { width: 1600, height: 1200 }),
     'display',
+  );
+});
+
+test('snapshotKind：三方同比且窗口未占满显示器 → display（S2 真机退化场景）', () => {
+  // 真机 S2 第二轮验收: 全部 16:9,窗口 1600×900 逻辑占显示器 2400×1350 的 67%
+  // → desktopCapturer 返回的是显示器快照（含窗口外桌面）,
+  //   按窗口快照处理会让标签偏移一个窗口宽度
+  assert.equal(
+    snapshotKind({ width: 3413, height: 1920 }, { width: 3000, height: 1688 }, { width: 1600, height: 900 }),
+    'display',
+  );
+});
+
+test('snapshotKind：窗口占满显示器（>0.9）→ window（等价直通）', () => {
+  assert.equal(
+    snapshotKind({ width: 3440, height: 1440 }, { width: 3440, height: 1440 }, { width: 3440, height: 1440 }),
+    'window',
   );
 });
 
@@ -108,21 +124,20 @@ test('makeScreenGeometry：显示器快照形态下标签落在窗口内（S2 �
 });
 
 test('makeScreenGeometry：窗口快照形态下无偏移直通', () => {
-  // 真机 S1 场景:截屏 3413×1920 = 窗口 1600×900 × 2.133(窗口快照)
+  // S1 场景变体:截屏 3413×1920 与窗口同比,且窗口占满显示器（无边框全屏）
+  // → snapshotKind 判 window,截屏即窗口内容,无偏移
   const display = {
-    bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    bounds: { x: 0, y: 0, width: 2730, height: 1536 },
     scaleFactor: 1.25,
-    workArea: { x: 0, y: 0, width: 1920, height: 1040 },
+    workArea: { x: 0, y: 0, width: 2730, height: 1536 },
   };
-  const winPhysical = { x: 391, y: 1, width: 1600, height: 900 };
+  const winPhysical = { x: 0, y: 0, width: 3413, height: 1920 };
   const { geo, kind } = makeScreenGeometry(
     { width: 3413, height: 1920 },
     winPhysical,
     display,
   );
   assert.equal(kind, 'window');
-  assert.ok(Math.abs(geo.windowX - 391 / 1.25) < 1e-6);
-  assert.ok(Math.abs(geo.windowWidth - 1600 / 1.25) < 1e-6);
-  // 窗口内左上角归一化 (0,0) → 屏幕坐标 = 窗口逻辑左上角
-  assert.ok(Math.abs(geo.windowX - 312.8) < 0.5);
+  assert.ok(Math.abs(geo.windowX - 0) < 1e-6);
+  assert.ok(Math.abs(geo.windowWidth - 3413 / 1.25) < 1e-6);
 });

@@ -105,14 +105,16 @@ export function captureScale(
 /**
  * 判断截屏内容是「窗口快照」还是「显示器快照」。
  *
- * 真机教训（S2 验收发现）：desktopCapturer 的行为有两种实测形态：
- *   - 窗口快照：截屏 = 窗口内容 × 内部缩放（如 3413/1600=2.13）
- *   - 显示器快照：截屏 = 整屏内容 × 内部缩放（如 4587×1920 = 2293×960 逻辑屏×2）
- * 二者混淆会让所有横向坐标错位（标签画到屏幕左侧）。
+ * 真机教训（S2 验收两轮）：desktopCapturer 的行为有两种实测形态，
+ * 且游戏窗口与显示器常同为 16:9,纵横比判据会退化（三者同比无法区分）。
  *
- * 判据（纵横比 + 相对占比，不依赖固定倍数）：
- *   截屏纵横比接近**显示器**纵横比而偏离**窗口**纵横比 → display；
- *   反之 → window。窗口未知时保守归为 window（无偏移直通，误差较小）。
+ * 联合判据（按优先级）：
+ *   1. 纵横比不一致时,谁与截屏同比 → 谁是快照来源；
+ *   2. 同比时看**窗口占显示器的比例**：窗口物理宽 ÷ 显示器物理宽 < 0.9
+ *      → 截屏若是窗口快照,其纵横比×缩放仍应等于窗口比,但真实场景中
+ *      desktopCapturer 在窗口未占满屏幕时倾向返回显示器快照 ——
+ *      认定 display（否则标签偏移一个窗口宽度,误差远大于翻转风险）。
+ *   3. 窗口占满显示器（>0.9）→ 两者等价,归 window（无偏移直通）。
  */
 export function snapshotKind(
   capture: { readonly width: number; readonly height: number },
@@ -127,7 +129,12 @@ export function snapshotKind(
   const winRatio = windowPhysical.width / Math.max(1, windowPhysical.height);
   const winOff = Math.abs(capRatio - winRatio) / winRatio;
 
-  return dispOff < winOff ? 'display' : 'window';
+  if (Math.abs(dispOff - winOff) > 0.02) {
+    return dispOff < winOff ? 'display' : 'window';
+  }
+  // 同比退化:窗口未占满显示器 → display 快照
+  const winShare = windowPhysical.width / Math.max(1, displayPhysical.width);
+  return winShare < 0.9 ? 'display' : 'window';
 }
 
 /**
