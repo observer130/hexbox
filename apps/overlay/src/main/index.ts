@@ -28,7 +28,8 @@ import {
   isBrawlSession,
   pickChampionIdFromGameflow,
 } from '@hexbox/lcu';
-import { readBuilds, readDataset, readRankings } from '@hexbox/data-store';
+import { readBuilds, readDataset, readRankings, readTemplates } from '@hexbox/data-store';
+import { base64ToBits, decodePack, type NameFingerprint } from '@hexbox/vision';
 import {
   augmentStrength,
   champSelectInfo,
@@ -40,12 +41,15 @@ import {
   type Dataset,
   type RankingSnapshot,
 } from '@hexbox/core';
+import { VisionLoop, type VisionOverlayMsg } from './vision-loop.ts';
 
 // ---------------------------------------------------------------------------
 // 悬浮窗状态
 // ---------------------------------------------------------------------------
 
 let win: BrowserWindow | null = null;
+/** S2 全屏透明覆盖窗口（选人阶段显示卡片胜率标签）。 */
+let overlayWin: BrowserWindow | null = null;
 let client: LcuClient | null = null;
 let dataset: Dataset | null = null;
 let rankings: RankingSnapshot | null = null;
@@ -56,6 +60,10 @@ let warnedNoCreds = false;
 let credsDetail = '';
 /** 本次选人中「我」选的英雄（0 = 未知）。 */
 let myChampionId = 0;
+/** S2 视觉循环（选人阶段启用）。 */
+let visionLoop: VisionLoop | null = null;
+/** 名字指纹库（视觉循环用）。 */
+let nameLibrary: NameFingerprint[] = [];
 
 /**
  * 「对局进行中」的阶段集合。
@@ -445,6 +453,14 @@ async function pollOnce(): Promise<void> {
         win.hide();
       }
     }
+    // S2 覆盖层与视觉循环：仅选人阶段启用
+    if (phase === 'ChampSelect') {
+      overlayWin?.showInactive();
+      visionLoop?.start();
+    } else {
+      visionLoop?.stop();
+      overlayWin?.hide();
+    }
   }
 
   const msg: OverlayStateMsg = {
@@ -518,6 +534,48 @@ function createWindow(): void {
   void win.loadFile(join(__dirname, '..', 'renderer', 'index.html'));
 }
 
+/**
+ * S2 覆盖窗口：全屏透明、点击穿透、绝不抢焦点。
+ *
+ * 与侧边悬浮窗的区别：它**铺满整个显示器**，内容按识别到的
+ * 卡片屏幕坐标绝对定位（见 vision/card-overlay.ts）。
+ */
+function createOverlayWindow(): void {
+  const display = screen.getPrimaryDisplay();
+  overlayWin = new BrowserWindow({
+    x: display.workArea.x,
+    y: display.workArea.y,
+    width: display.workArea.width,
+    height: display.workArea.height,
+    transparent: true,
+    frame: false,
+    alwaysOnTop: true,
+    focusable: false,
+    skipTaskbar: true,
+    resizable: false,
+    movable: false,
+    hasShadow: false,
+    show: false,
+    webPreferences: {
+      preload: join(__dirname, '..', 'preload', 'index.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+  overlayWin.setAlwaysOnTop(true, 'screen-saver');
+  overlayWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  // 覆盖层永远穿透 —— 它只展示,不接受任何输入
+  overlayWin.setIgnoreMouseEvents(true, { forward: true });
+  void overlayWin.loadFile(join(__dirname, '..', 'renderer', 'overlay.html'));
+}
+
+function pushOverlayVision(msg: VisionOverlayMsg): void {
+  if (overlayWin && !overlayWin.isDestroyed()) {
+    overlayWin.webContents.send('overlay:vision', msg);
+  }
+}
+
 function applyClickThrough(on: boolean): void {
   clickThrough = on;
   win?.setIgnoreMouseEvents(on, { forward: true });
@@ -539,7 +597,16 @@ app.whenReady().then(() => {
 
   registerIpc();
   createWindow();
+  createOverlayWindow();
   void loadDataset();
+  void loadNameLibrary();
+  visionLoop = new VisionLoop({
+    // getter 形式:指纹/榜单是异步加载的,每轮识别取最新值
+    nameLibrary: () => nameLibrary,
+    rankings: () => rankings,
+    championName: (id) => championName(id),
+    onResult: pushOverlayVision,
+  });
   void pollLoop();
 
   setInterval(() => void positionOverlay(), 3000);
@@ -550,6 +617,32 @@ app.whenReady().then(() => {
     setTimeout(() => app.quit(), 4000);
   }
 });
+
+/**
+ * 加载名字指纹库（OCR 阶段 1）。
+ * 读不到不阻断 —— 视觉循环会降级为「定位成功但识别不出」。
+ */
+async function loadNameLibrary(): Promise<void> {
+  try {
+    const dataDir = join(app.getAppPath(), '..', '..', 'data');
+    const encoded = await readTemplates(dataDir);
+    if (!encoded) {
+      console.warn('[hexbox] 无模板包（pnpm templates 生成）—— 覆盖层将无法识别英雄');
+      return;
+    }
+    const pack = decodePack(encoded);
+    nameLibrary = (pack.names ?? []).map((n) => ({
+      championId: n.championId,
+      name: n.name,
+      width: n.width,
+      height: n.height,
+      bits: base64ToBits(n.bits, n.width * n.height),
+    }));
+    console.log(`[hexbox] 名字指纹 ${nameLibrary.length} 个已加载`);
+  } catch (e) {
+    console.warn('[hexbox] 名字指纹加载失败:', e instanceof Error ? e.message : e);
+  }
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

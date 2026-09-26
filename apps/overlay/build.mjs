@@ -46,13 +46,16 @@ await build({
   logLevel: 'info',
 });
 
-// 2) 渲染端 → IIFE
+// 2) 渲染端 → IIFE（侧边悬浮窗 + S2 全屏覆盖层,两个入口）
 //    渲染端只 import preload 暴露的 `window.overlay`，
 //    不 import 任何 workspace/Node 依赖（LCU 与数据集读取都在主进程），
 //    因此无需 external，也不会误把 node:* 打进来。
 await build({
-  entryPoints: [join(here, 'src', 'renderer', 'renderer.ts')],
-  outfile: join(out, 'renderer', 'renderer.js'),
+  entryPoints: [
+    join(here, 'src', 'renderer', 'renderer.ts'),
+    join(here, 'src', 'renderer', 'overlay-canvas.ts'),
+  ],
+  outdir: join(out, 'renderer'),
   platform: 'browser',
   format: 'iife',
   target: 'chrome120',
@@ -64,7 +67,7 @@ await build({
 
 // 3) 静态资源
 await mkdir(join(out, 'renderer'), { recursive: true });
-for (const f of ['index.html', 'styles.css']) {
+for (const f of ['index.html', 'overlay.html', 'styles.css']) {
   await cp(join(here, 'src', 'renderer', f), join(out, 'renderer', f));
 }
 
