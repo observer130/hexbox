@@ -76,6 +76,9 @@ importers:
       '@hexbox/provider-registry':
         specifier: workspace:*
         version: link:../provider-registry
+      '@hexbox/provider-tencent':
+        specifier: workspace:*
+        version: link:../provider-tencent
     devDependencies:
       typescript:
         specifier: ^5.7.2

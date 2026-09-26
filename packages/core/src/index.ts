@@ -1,3 +1,3 @@
 export * from './types.ts';
 export * from './provider.ts';
-export * from './rankboard.ts';
+export * from './overlay-view.ts';

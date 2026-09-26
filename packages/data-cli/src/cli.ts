@@ -22,13 +22,16 @@ import { pathToFileURL } from 'node:url';
 import {
   checkFreshness,
   checkRankingsFreshness,
+  readBuilds,
   readDataset,
   readRankings,
+  writeBuilds,
   writeDataset,
   writeRankings,
 } from '@hexbox/data-store';
 import { createRankingProviders, createStaticProviders } from '@hexbox/provider-registry';
-import type { Dataset, RankingSnapshot } from '@hexbox/core';
+import { fetchHeroDetails } from '@hexbox/provider-tencent';
+import type { ChampionDetailSet, Dataset, RankingSnapshot } from '@hexbox/core';
 
 const DEFAULT_STORE = resolve(process.cwd(), 'data');
 
@@ -122,8 +125,69 @@ async function cmdSync(storeRoot: string): Promise<number> {
     console.log(`✓ 已写入 ${path}  (${formatBytes(size)})`);
   }
 
+  // ---- 单英雄海斗详情（出装 / 海克斯强度 / 加点）----
+  // 依赖图鉴里的英雄列表；图鉴失败则跳过（不阻断整体）
+  const championIds = (await readDataset(storeRoot))?.champions.map((c) => c.id) ?? [];
+  if (championIds.length === 0) {
+    console.log('\n  · 单英雄详情 … △ 跳过（无英雄列表，请先确保图鉴同步成功）');
+  } else {
+    await cmdSyncBuilds(storeRoot, championIds);
+  }
+
   if (failures > 0) console.log(`\n⚠ ${failures} 个数据源失败，数据可能不完整`);
   return 0;
+}
+
+/**
+ * 预抓全部英雄的海斗详情并落盘。
+ *
+ * 为什么预抓而不是运行时拉：悬浮窗需保持「只读本地、离线可用」。
+ * 245 个英雄、并发 6，只打一次上游。
+ */
+async function cmdSyncBuilds(storeRoot: string, championIds: readonly number[]): Promise<void> {
+  const total = championIds.length;
+  process.stdout.write(`\n  · 单英雄海斗详情 (${total} 个英雄) … `);
+  const t0 = Date.now();
+
+  let lastPrint = 0;
+  const details = await fetchHeroDetails(championIds, {
+    concurrency: 6,
+    onProgress: (done, all) => {
+      // 每 ~10% 打一次进度，避免 245 行刷屏
+      if (done - lastPrint >= Math.ceil(all / 10) || done === all) {
+        lastPrint = done;
+        process.stdout.write(`\r  · 单英雄海斗详情 … ${done}/${all}   `);
+      }
+    },
+  }).catch((err: unknown) => {
+    console.error(`\n      ${err instanceof Error ? err.message : String(err)}`);
+    return [];
+  });
+
+  if (details.length === 0) {
+    console.log(`\r  · 单英雄海斗详情 … ✗ 全部失败（未写入）`);
+    return;
+  }
+
+  const set: ChampionDetailSet = {
+    meta: {
+      source: 'tencent-hero-detail',
+      dataDate: details[0]?.dataDate ?? '',
+      fetchedAt: new Date().toISOString(),
+      count: details.length,
+    },
+    details,
+  };
+
+  const path = await writeBuilds(storeRoot, set);
+  const { size } = await stat(path);
+  const miss = total - details.length;
+  console.log(
+    `\r  · 单英雄海斗详情 … ✓ ${Date.now() - t0}ms  ` +
+      `[${details.length}/${total} 个英雄${miss > 0 ? `，${miss} 个无数据` : ''}] ` +
+      `统计日期 ${set.meta.dataDate || '未知'}`,
+  );
+  console.log(`✓ 已写入 ${path}  (${formatBytes(size)})`);
 }
 
 async function cmdStatus(storeRoot: string): Promise<number> {

@@ -21,12 +21,17 @@ import {
   type AugmentMode,
   type AugmentRarity,
   type AugmentRankEntry,
+  type BuildItemStat,
+  type ChampionAugmentStat,
+  type ChampionBuild,
+  type ChampionDetail,
   type Dataset,
   type HeroPartner,
   type HeroRankEntry,
   type HextechStatic,
   type RankingProvider,
   type RankingSnapshot,
+  type SkillOrder,
   type StaticProvider,
 } from '@hexbox/core';
 
@@ -325,6 +330,299 @@ export function parseDataDate(raw: string | null): string {
 }
 
 /* ------------------------------------------------------------------ */
+/* 单英雄海斗详情解析                                                  */
+/* ------------------------------------------------------------------ */
+
+/** `fuwen_hero_rank` 的返回形状（我们实际使用的字段）。 */
+export interface RawHeroDetail {
+  dtstatdate?: string;
+  /** `排名|英雄ID|海克斯ID|等级|登场率|强度`，`#` 分隔。 */
+  augment_json_irank?: string;
+  /** JSON：`{"1":{"itemone":"123430","winrate":6033,"showrate":6758}}`（万分比）。 */
+  itemone_json?: string;
+  /** JSON：`{"1":{"itemcore":"a&b&c","winrate":6172,"showrate":699}}`。 */
+  itemcore_json?: string;
+  /** `itemIds$登场率$胜率`，`#` 分隔（出门装组合）。 */
+  itemout?: string;
+  /** `itemId$登场率$胜率`，`#` 分隔。 */
+  itemshoes?: string;
+  /** `排名_六件_登场率_胜率`，`;` 分隔（成型六件套）。 */
+  itemover_rec?: string;
+  /** `英雄ID|胜率|登场率|排名`，`#` 分隔。 */
+  championid_json?: string;
+  /** JSON：`{"1":{"qwe":"1&3&2","sk_s":"1312","sk_w":"5578","sks":{...}}}`。 */
+  skill_json?: string;
+}
+
+/**
+ * 解析该英雄的海克斯强度表（`augment_json_irank`）。
+ *
+ * ⚠️ 上游格式**带稀有度分组**，不是单一平铺列表：
+ *
+ *   `255:1|157|1077|255|0.2452|S#2|157|1336|255|0.2105|S#…`
+ *    `└组头┘ └─────── 第 1 条 ───────┘└── 第 2 条（省略组头）──┘
+ *    `…&kGold:1|157|1077|kGold|0.2452|S#2|…`
+ *
+ * 即：组头为 `<组名>:<排名>|…`，同组后续条目省略组名，仅 `<排名>|…`。
+ * 组名 `255` 表示「全部品质」（页面默认页签，亚索 126 条）；
+ * `kGold`/`kPrismatic`/`kSilver` 为各品质分组。
+ *
+ * 字段：`排名|英雄ID|海克斯ID|等级|登场率|强度`
+ * 注意第 5 列是**登场率**，不是胜率。
+ *
+ * @param raw     上游原始串
+ * @param groupBy 要取的分组；默认 `255`（全部品质）。
+ *                传 'all-groups' 可拿到去重后的全部条目。
+ */
+export function parseChampionAugments(
+  raw: string | undefined,
+  groupBy: string = '255',
+): ChampionAugmentStat[] {
+  if (!raw) return [];
+
+  interface Row extends ChampionAugmentStat {
+    readonly group: string;
+  }
+  const rows: Row[] = [];
+
+  for (const seg of raw.split('&')) {
+    // 每个 & 分段是一个品质组；段内以 # 分隔条目
+    for (const block of seg.split('#')) {
+      if (!block) continue;
+      const f = block.split('|');
+      if (f.length < 6) continue;
+
+      // 组头形如 `255:1`（第 0 列含冒号）；否则沿用上一个组名
+      let group = rows.length > 0 ? rows[rows.length - 1]!.group : '255';
+      let rankField = f[0] ?? '';
+      const colon = rankField.indexOf(':');
+      if (colon >= 0) {
+        group = rankField.slice(0, colon);
+        rankField = rankField.slice(colon + 1);
+      }
+
+      const rank = toInt(rankField, -1);
+      const augmentId = toInt(f[2], -1);
+      if (rank <= 0 || augmentId <= 0) continue;
+
+      rows.push({
+        group,
+        rank,
+        augmentId,
+        level: (f[3] ?? '').trim(),
+        pickRate: toNum(f[4]),
+        tier: (f[5] ?? '').trim(),
+      });
+    }
+  }
+
+  const picked =
+    groupBy === 'all-groups' ? rows : rows.filter((r) => r.group === groupBy);
+
+  // 同一分组内按 augmentId 去重（上游偶有重复），保留排名靠前者
+  const best = new Map<number, Row>();
+  for (const r of picked) {
+    const prev = best.get(r.augmentId);
+    if (!prev || r.rank < prev.rank) best.set(r.augmentId, r);
+  }
+
+  return [...best.values()]
+    .map(({ group: _group, ...rest }) => rest)
+    .sort((a, b) => a.rank - b.rank);
+}
+
+/**
+ * 解析 `itemshoes` / `itemout` 系列（`itemIds$登场率$胜率`，`#` 分隔）。
+ *
+ * 注意顺序是**登场率在前、胜率在后**（与 `itemone_json` 的字段名一致）。
+ */
+export function parseItemStatList(raw: string | undefined): BuildItemStat[] {
+  if (!raw) return [];
+  const out: BuildItemStat[] = [];
+  for (const block of raw.split('#')) {
+    if (!block) continue;
+    const f = block.split('$');
+    if (f.length < 3) continue;
+    const itemIds = (f[0] ?? '')
+      .split(',')
+      .map((x) => toInt(x, -1))
+      .filter((x) => x > 0);
+    if (itemIds.length === 0) continue;
+    out.push({ itemIds, pickRate: toNum(f[1]), winRate: toNum(f[2]) });
+  }
+  return out;
+}
+
+/**
+ * 解析 `itemone_json` / `itemcore_json` 系列（JSON，比率为**万分比**）。
+ *
+ * 万分比换算：6033 → 0.6033。上游用整数规避浮点，我们必须还原。
+ */
+export function parseItemStatJson(
+  raw: string | undefined,
+  key: 'itemone' | 'itemcore',
+): BuildItemStat[] {
+  if (!raw) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return []; // 脏数据不应拖垮整个详情
+  }
+  if (typeof parsed !== 'object' || parsed === null) return [];
+
+  const out: BuildItemStat[] = [];
+  for (const v of Object.values(parsed as Record<string, unknown>)) {
+    if (typeof v !== 'object' || v === null) continue;
+    const rec = v as Record<string, unknown>;
+    const idStr = String(rec[key] ?? '');
+    if (!idStr) continue;
+    const itemIds = idStr
+      .split(/[&,]/)
+      .map((x) => toInt(x, -1))
+      .filter((x) => x > 0);
+    if (itemIds.length === 0) continue;
+    out.push({
+      itemIds,
+      winRate: toInt(String(rec['winrate'] ?? ''), 0) / 10_000,
+      pickRate: toInt(String(rec['showrate'] ?? ''), 0) / 10_000,
+    });
+  }
+  // 按登场率降序：玩家最该先看到最常被采用的方案
+  return out.sort((a, b) => b.pickRate - a.pickRate);
+}
+
+/** 解析出装（汇总五个上游字段）。 */
+export function parseChampionBuild(raw: RawHeroDetail): ChampionBuild {
+  return {
+    start: parseItemStatJson(raw.itemone_json, 'itemone'),
+    shoes: parseItemStatList(raw.itemshoes),
+    core: parseItemStatJson(raw.itemcore_json, 'itemcore'),
+    // 出门装组合（如「灵巧披风+增幅典籍」），与 itemone 的单件不同
+    startCombo: parseItemStatList(raw.itemout),
+    // 完整六件套（上游 itemover_rec，`排名_6件_登场率_胜率`，`;` 分隔）
+    full: parseItemOverRec(raw.itemover_rec),
+  };
+}
+
+/**
+ * 解析完整六件套（`itemover_rec`）。
+ *
+ * 格式：`排名_装备1,装备2,…,装备6_登场率_胜率`，条目以 `;` 分隔。
+ * 与 `itemout` 的区别：`itemout` 是**出门装**组合，本字段是**成型六件套**。
+ */
+export function parseItemOverRec(raw: string | undefined): BuildItemStat[] {
+  if (!raw) return [];
+  const out: BuildItemStat[] = [];
+  for (const block of raw.split(';')) {
+    if (!block) continue;
+    const f = block.split('_');
+    if (f.length < 4) continue;
+    const itemIds = (f[1] ?? '')
+      .split(',')
+      .map((x) => toInt(x, -1))
+      .filter((x) => x > 0);
+    if (itemIds.length === 0) continue;
+    out.push({ itemIds, pickRate: toNum(f[2]), winRate: toNum(f[3]) });
+  }
+  return out.sort((a, b) => b.pickRate - a.pickRate);
+}
+
+/** 解析最佳拍档（`英雄ID|胜率|登场率|排名`，`#` 分隔）。 */
+export function parseChampionPartners(raw: string | undefined): HeroPartner[] {
+  if (!raw) return [];
+  const out: HeroPartner[] = [];
+  for (const block of raw.split('#')) {
+    if (!block) continue;
+    const f = block.split('|');
+    if (f.length < 4) continue;
+    const championId = toInt(f[0], -1);
+    if (championId <= 0) continue;
+    out.push({
+      championId,
+      winRate: toNum(f[1]),
+      pickRate: toNum(f[2]),
+      rank: toInt(f[3]),
+    });
+  }
+  return out.sort((a, b) => a.rank - b.rank);
+}
+
+/**
+ * 解析技能加点（`skill_json`，最多保留前 3 套方案）。
+ *
+ * ⚠️ `sk_s` / `sk_w` 是**原始计数**（如 1312 / 5578），不是 0..1 比率。
+ * 登场率需用 `sk_w`（该方案总场次）作为分母换算：`sk_s / sk_w`。
+ * 直接当比率用会得到 131200% 这种荒谬数字。
+ */
+export function parseSkillOrders(raw: string | undefined, limit = 3): SkillOrder[] {
+  if (!raw) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (typeof parsed !== 'object' || parsed === null) return [];
+
+  const nums = (s: unknown): number[] =>
+    String(s ?? '')
+      .split('&')
+      .map((x) => toInt(x, -1))
+      .filter((x) => x > 0 && x <= 4);
+
+  /** 由 sk_s / sk_w 两个原始计数算出登场率。 */
+  const ratio = (s: unknown, w: unknown): number => {
+    const pick = toInt(String(s ?? ''), 0);
+    const total = toInt(String(w ?? ''), 0);
+    if (total <= 0 || pick < 0) return 0;
+    return pick / total;
+  };
+
+  const out: SkillOrder[] = [];
+  for (const v of Object.values(parsed as Record<string, unknown>)) {
+    if (typeof v !== 'object' || v === null) continue;
+    const rec = v as Record<string, unknown>;
+    // 取该方案下登场率最高的加点序列
+    const subs = rec['sks'];
+    let bestOrder: number[] = [];
+    let bestRatio = -1;
+    if (typeof subs === 'object' && subs !== null) {
+      for (const s of Object.values(subs as Record<string, unknown>)) {
+        if (typeof s !== 'object' || s === null) continue;
+        const sr = s as Record<string, unknown>;
+        const r = ratio(sr['sk_s'], sr['sk_w']);
+        if (r > bestRatio) {
+          bestRatio = r;
+          bestOrder = nums(sr['sk']);
+        }
+      }
+    }
+    out.push({
+      priority: nums(rec['qwe']),
+      order: bestOrder,
+      pickRate: bestRatio > 0 ? bestRatio : 0,
+    });
+  }
+  return out.sort((a, b) => b.pickRate - a.pickRate).slice(0, limit);
+}
+
+/** 把 `fuwen_hero_rank` 的返回解析为 ChampionDetail。 */
+export function parseChampionDetail(
+  championId: number,
+  raw: RawHeroDetail,
+): ChampionDetail {
+  return {
+    championId,
+    augments: parseChampionAugments(raw.augment_json_irank),
+    build: parseChampionBuild(raw),
+    skills: parseSkillOrders(raw.skill_json),
+    partners: parseChampionPartners(raw.championid_json),
+    dataDate: raw.dtstatdate ?? '',
+  };
+}
+
+/* ------------------------------------------------------------------ */
 /* Provider 工厂                                                      */
 /* ------------------------------------------------------------------ */
 
@@ -458,4 +756,93 @@ function fallbackStatDates(): string[] {
     const d = new Date(Date.now() - (i + 1) * 86_400_000);
     return d.toISOString().slice(0, 10).replace(/-/g, '');
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* 单英雄海斗详情：拉取                                                */
+/* ------------------------------------------------------------------ */
+
+export const HERO_DETAIL_URL =
+  'https://mlol.qt.qq.com/go/battle_info/odp_proxy/fuwen_hero_rank';
+
+export interface HeroDetailOptions {
+  /** 覆盖详情地址（测试用）。 */
+  detailUrl?: string;
+  /** 自定义 fetch（测试注入用）。 */
+  fetchImpl?: typeof fetch;
+  /** 并发度（预抓 245 个英雄时用，默认 6）。 */
+  concurrency?: number;
+  /** 进度回调（预抓时打印进度）。 */
+  onProgress?: (done: number, total: number) => void;
+}
+
+/**
+ * 拉取单个英雄的海斗详情。
+ *
+ * 上游地址：`fuwen_hero_rank?championid=<id>`
+ * （注意与全局榜 `fuwen_aram_hero_rank_v2` 是两个不同接口）
+ *
+ * 失败时返回 null 而不是抛错 —— 预抓 245 个英雄时，
+ * 个别英雄无数据/网络抖动不应让整批失败。
+ */
+export async function fetchHeroDetail(
+  championId: number,
+  options: HeroDetailOptions = {},
+): Promise<ChampionDetail | null> {
+  const url = options.detailUrl ?? HERO_DETAIL_URL;
+  const doFetch = options.fetchImpl ?? fetch;
+  try {
+    const res = await doFetch(`${url}?championid=${championId}`, {
+      headers: { 'user-agent': DEFAULT_UA },
+    });
+    if (!res.ok) return null;
+    const fieldValue = extractFieldValue(await res.json());
+    if (!fieldValue) return null;
+    const value = unwrapValue(fieldValue);
+    if (typeof value !== 'object' || value === null) return null;
+    const detail = parseChampionDetail(championId, value as RawHeroDetail);
+    // 完全无内容的条目视为无数据
+    if (
+      detail.augments.length === 0 &&
+      detail.build.start.length === 0 &&
+      detail.build.core.length === 0
+    ) {
+      return null;
+    }
+    return detail;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 批量预抓多个英雄的详情（供 `pnpm sync` 落盘）。
+ *
+ * 用**有上限的并发**而不是 Promise.all 全发：245 个请求同时打上游
+ * 既容易被限流，也无谓占满连接。默认并发 6。
+ */
+export async function fetchHeroDetails(
+  championIds: readonly number[],
+  options: HeroDetailOptions = {},
+): Promise<ChampionDetail[]> {
+  const concurrency = Math.max(1, options.concurrency ?? 6);
+  const out: ChampionDetail[] = [];
+  let done = 0;
+  let idx = 0;
+
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = idx++;
+      if (i >= championIds.length) return;
+      const id = championIds[i]!;
+      const d = await fetchHeroDetail(id, options);
+      if (d) out.push(d);
+      done++;
+      options.onProgress?.(done, championIds.length);
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, championIds.length) }, worker));
+  // 并发完成顺序不定，按英雄 ID 排序保证落盘稳定（便于 diff）
+  return out.sort((a, b) => a.championId - b.championId);
 }

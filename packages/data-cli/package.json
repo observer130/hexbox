@@ -7,7 +7,8 @@
   "dependencies": {
     "@hexbox/core": "workspace:*",
     "@hexbox/data-store": "workspace:*",
-    "@hexbox/provider-registry": "workspace:*"
+    "@hexbox/provider-registry": "workspace:*",
+    "@hexbox/provider-tencent": "workspace:*"
   },
   "bin": {
     "hexbox-sync": "./src/cli.ts"

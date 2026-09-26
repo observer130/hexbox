@@ -139,35 +139,40 @@ body {
   font-size: 11px;
 }
 
-/* 强度榜分组 */
-.grp {
-  margin-bottom: 4px;
-}
-.grphd {
+/* 选人阶段：我的英雄胜率 */
+.me {
   display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  font-weight: 600;
-  margin: 4px 0 2px;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 0 2px;
 }
-.bullet {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  flex-shrink: 0;
+.mename {
+  font-size: 15px;
+  font-weight: 600;
+}
+.mewr {
+  margin-left: auto;
+  font-size: 22px;
+  font-weight: 700;
+  color: #4ade80;
+  line-height: 1;
+}
+.wrlabel {
+  font-size: 10px;
+  font-weight: 400;
+  margin-left: 4px;
 }
 
-/* 单个海克斯条目 */
+/* 海克斯强度行 */
 .aug {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 2px 0;
+  padding: 3px 0;
 }
 .ico {
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   border-radius: 4px;
   flex-shrink: 0;
   background: #1b2233;
@@ -190,33 +195,58 @@ body {
 .heroes {
   font-size: 9px;
   line-height: 1.3;
-  overflow: hidden;
-  text-overflow: ellipsis;
+}
+/* 强度评级徽标 */
+.tier {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  color: #0f1420;
+  font-size: 12px;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+}
+
+/* 出装槽位 */
+.slot {
+  margin: 4px 0 6px;
+}
+.slotlabel {
+  font-size: 10px;
+  color: #c8a84e;
+  margin-bottom: 2px;
+}
+.buildrow {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 1px 0;
+}
+.buildnames {
+  flex: 1;
+  min-width: 0;
+  font-size: 10px;
+  line-height: 1.35;
+  color: #cdd6e6;
+}
+.buildnames .plus {
+  color: #55627a;
+}
+.buildstat {
+  flex-shrink: 0;
+  text-align: right;
   white-space: nowrap;
 }
-.augstat {
-  text-align: right;
-  flex-shrink: 0;
-}
-.wr {
-  font-size: 11px;
+.buildstat .wr {
+  font-size: 10px;
   font-weight: 600;
   color: #4ade80;
 }
-.pr {
+.buildstat .pr {
   font-size: 9px;
-}
-
-/* 排名变化 */
-.chg {
-  font-size: 9px;
-  margin-left: 3px;
-}
-.chg.up {
-  color: #4ade80;
-}
-.chg.down {
-  color: #e08a8a;
+  margin-left: 4px;
 }
 
 /* 免责说明 */
@@ -225,9 +255,9 @@ body {
   line-height: 1.4;
 }
 
-/* body 可滚动：320x460 放不下完整榜单 */
+/* body 可滚动：340x560 放不下完整内容 */
 .body {
-  max-height: 372px;
+  max-height: 472px;
   overflow-y: auto;
   overflow-x: hidden;
   padding-right: 2px;

@@ -179,3 +179,97 @@ export interface RankingsMeta {
   /** 抓取时间 (ISO 8601)。 */
   readonly fetchedAt: string;
 }
+
+/* ------------------------------------------------------------------ */
+/* 单英雄海斗详情（官方 101 站英雄页的海斗口径）                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 该英雄的单个海克斯强度（上游 `augment_json_irank`）。
+ *
+ * 这是**以该英雄为准**的口径，与全局海克斯榜（`AugmentRankEntry`）不同：
+ * 同一个海克斯在不同英雄身上强度不同，官方对此按英雄单独统计。
+ *
+ * 上游格式：`排名|英雄ID|海克斯ID|等级|登场率|强度`，以 `#` 分隔。
+ */
+export interface ChampionAugmentStat {
+  /** 该英雄口径下的强度排名。 */
+  readonly rank: number;
+  /** 国服海克斯数字 ID（对应 HextechStatic.id）。 */
+  readonly augmentId: number;
+  /** 稀有度等级掩码，如 `kGold` / `kPrismatic`。 */
+  readonly level: string;
+  /** **登场率**（0..1）。注意：不是胜率 —— UI 文案不可写错。 */
+  readonly pickRate: number;
+  /** 强度评级（S/A/B/C…），官方直出。 */
+  readonly tier: string;
+}
+
+/** 一件装备及其统计（上游 `itemone_json` / `itemcore_json` 等）。 */
+export interface BuildItemStat {
+  /** 装备 ID 列表（核心组合为多件，用 `&` 分隔后拆开）。 */
+  readonly itemIds: readonly number[];
+  /** 登场率（0..1）。 */
+  readonly pickRate: number;
+  /** 胜率（0..1）。 */
+  readonly winRate: number;
+}
+
+/**
+ * 出装建议（上游多个字段汇总）。
+ *
+ * 上游各字段格式不一，统一归一化为 BuildItemStat：
+ *   - `itemone_json`  : JSON，winrate/showrate 为**万分比**；单件出门装
+ *   - `itemcore_json` : JSON，itemcore 用 `&` 分隔；核心三件套
+ *   - `itemshoes`     : `itemId$登场率$胜率`；鞋子
+ *   - `itemout`       : `itemIds$登场率$胜率`；**出门装组合**
+ *   - `itemover_rec`  : `排名_六件_登场率_胜率`（`;` 分隔）；**成型六件套**
+ */
+export interface ChampionBuild {
+  /** 出门装单件（按登场率降序）。 */
+  readonly start: readonly BuildItemStat[];
+  /** 出门装组合（如「灵巧披风+增幅典籍」）。 */
+  readonly startCombo: readonly BuildItemStat[];
+  /** 鞋子。 */
+  readonly shoes: readonly BuildItemStat[];
+  /** 核心三件套组合。 */
+  readonly core: readonly BuildItemStat[];
+  /** 成型六件套。 */
+  readonly full: readonly BuildItemStat[];
+}
+
+/** 技能加点方案（上游 `skill_json`，暂只保留加点序列与统计）。 */
+export interface SkillOrder {
+  /** 主/副/一级技能（如 `1&3&2` → [1,3,2]）。 */
+  readonly priority: readonly number[];
+  /** 加点序列（如 `1&2&3&1&1&4&…`）。 */
+  readonly order: readonly number[];
+  /** 登场率（0..1）。 */
+  readonly pickRate: number;
+}
+
+/** 单个英雄的海斗模式详情。 */
+export interface ChampionDetail {
+  readonly championId: number;
+  /** 该英雄的海克斯强度（已按上游排名升序）。 */
+  readonly augments: readonly ChampionAugmentStat[];
+  readonly build: ChampionBuild;
+  /** 技能加点方案（按登场率降序，最多保留前 3）。 */
+  readonly skills: readonly SkillOrder[];
+  /** 最佳拍档（championId + 胜率 + 登场率）。 */
+  readonly partners: readonly HeroPartner[];
+  /** 上游统计日期 `YYYYMMDD`。 */
+  readonly dataDate: string;
+}
+
+/** 单英雄详情的集合（由 `pnpm sync` 预抓，供悬浮窗离线读取）。 */
+export interface ChampionDetailSet {
+  readonly meta: {
+    readonly source: string;
+    readonly dataDate: string;
+    readonly fetchedAt: string;
+    /** 成功抓取的英雄数，便于判断数据完整性。 */
+    readonly count: number;
+  };
+  readonly details: readonly ChampionDetail[];
+}

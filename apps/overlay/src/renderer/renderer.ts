@@ -1,26 +1,27 @@
 /**
  * 悬浮窗渲染端（纯浏览器环境）
  *
- * 不 import 任何 Node 依赖 —— LCU 轮询、数据集读取、排行榜 join 都在主进程，
+ * 不 import 任何 Node 依赖 —— LCU 轮询、数据读取、join 都在主进程，
  * 这里只接收 `overlay:state` 推送并渲染。
  *
- * 数据出处由主进程随状态一并推送，渲染端只负责展示并标注来源。
+ * 分阶段渲染（见 docs/OVERLAY-STAGES.md）：
+ *   - 选人阶段：只显示**所选英雄的胜率**（此时玩家在选英雄，
+ *     海克斯还没出现，显示海克斯数据是错误的）。
+ *   - 局内：显示该英雄口径的**海克斯强度**与**出装建议**。
  */
 
-interface BoardRow {
+interface AugmentRow {
   name: string;
   icon: string;
-  winRate: number;
+  tier: string;
   pickRate: number;
-  winRankChange: number;
-  bestHeroes: string[];
-  hasDef: boolean;
+  rarity: string;
 }
 
-interface BoardGroup {
-  rarity: string;
-  label: string;
-  rows: BoardRow[];
+interface BuildSlot {
+  names: string[];
+  pickRate: number;
+  winRate: number;
 }
 
 interface OverlayStateMsg {
@@ -29,12 +30,17 @@ interface OverlayStateMsg {
   gameMode: string;
   queueId: number | null;
   isBrawl: boolean;
-  augCount: number;
   picks: Array<{ championId: number; name: string }>;
   clickThrough: boolean;
-  board: BoardGroup[];
-  rankMeta: { available: boolean; dataDate: string; stale: boolean };
-  advice: { championName: string; rows: BoardRow[] };
+  me: { championId: number; name: string; winRate: number; hasData: boolean };
+  augments: AugmentRow[];
+  build: {
+    start: BuildSlot[];
+    shoes: BuildSlot[];
+    core: BuildSlot[];
+    full: BuildSlot[];
+  };
+  meta: { dataDate: string; hasBuilds: boolean };
   credsDetail: string;
 }
 
@@ -77,80 +83,38 @@ const RARITY_COLOR: Record<string, string> = {
   kEventChoice: '#6fb3d2',
 };
 
-function pct(rate: number): string {
-  return `${(rate * 100).toFixed(1)}%`;
+/** 强度评级配色：S 最强 → C 最弱。 */
+const TIER_COLOR: Record<string, string> = {
+  S: '#e0b64a',
+  A: '#c084fc',
+  B: '#6fb3d2',
+  C: '#9fb0c9',
+  D: '#8b96ad',
+};
+
+function pct(rate: number, digits = 1): string {
+  return `${(rate * 100).toFixed(digits)}%`;
 }
 
-/** 排名变化徽标：↑3 / ↓2 / —。 */
-function changeHtml(n: number): string {
-  if (n > 0) return `<span class="chg up">↑${n}</span>`;
-  if (n < 0) return `<span class="chg down">↓${-n}</span>`;
-  return '';
-}
-
-/** 一行海克斯：图标 + 名称 + 胜率 + 适配英雄。 */
-function rowHtml(r: BoardRow): string {
-  const icon = r.icon
-    ? `<img class="ico" src="${esc(r.icon)}" alt="" loading="lazy" />`
-    : `<div class="ico ph"></div>`;
-  const heroes = r.bestHeroes.length
-    ? `<div class="heroes dim">适合 ${r.bestHeroes.map((h) => esc(h)).join(' / ')}</div>`
-    : '';
-  const warn = r.hasDef ? '' : '<span class="warn" title="图鉴中暂无此海克斯">?</span>';
-  return `
-    <div class="aug">
-      ${icon}
-      <div class="augmain">
-        <div class="augname">${esc(r.name)}${warn}</div>
-        ${heroes}
-      </div>
-      <div class="augstat">
-        <div class="wr">${pct(r.winRate)}${changeHtml(r.winRankChange)}</div>
-        <div class="pr dim">选取 ${pct(r.pickRate)}</div>
-      </div>
-    </div>`;
-}
-
-/** 强度榜：按稀有度分组，每组一个小标题。 */
-function boardHtml(groups: BoardGroup[]): string {
-  return groups
-    .map((g) => {
-      const color = RARITY_COLOR[g.rarity] ?? '#9fb0c9';
-      const rows = g.rows.map((r) => rowHtml(r)).join('');
-      return `
-        <div class="grp">
-          <div class="grphd" style="color:${color}">
-            <span class="bullet" style="background:${color}"></span>${esc(g.label)}
-          </div>
-          ${rows}
-        </div>`;
-    })
-    .join('');
-}
-
-/** 数据出处脚注（来源 + 统计日期 + 过期提示）。 */
-function sourceFoot(meta: OverlayStateMsg['rankMeta']): string {
-  if (!meta.available) {
-    return '<span class="dim">暂无排行数据（请运行 pnpm sync）</span>';
-  }
+/** 数据出处脚注。 */
+function sourceFoot(meta: OverlayStateMsg['meta']): string {
   const date = meta.dataDate
     ? `${meta.dataDate.slice(0, 4)}-${meta.dataDate.slice(4, 6)}-${meta.dataDate.slice(6, 8)}`
     : '未知';
-  const stale = meta.stale ? ' <span class="warn">⚠ 数据可能已过期</span>' : '';
-  return `<span class="dim">海克斯胜率 · 101.qq.com 官方统计 · ${date}</span>${stale}`;
+  return `<span class="dim">数据 101.qq.com 官方 · 统计日 ${date}</span>`;
 }
 
 function panel(header: string, tag: string, body: string, foot: string): string {
   return `
     <div class="panel">
-      <div class="hd"><span class="dot${tag === '离线' ? ' off' : ''}"></span> hexbox
+      <div class="hd"><span class="dot${tag === '未连接' ? ' off' : ''}"></span> hexbox
         <span class="tag">${esc(header)}</span></div>
       <div class="body">${body}</div>
       ${foot ? `<div class="foot">${foot}</div>` : ''}
     </div>`;
 }
 
-/** 离线诊断面板（连不上 LCU 时显示，避免"什么都没有"的困惑）。 */
+/** 离线诊断面板（连不上 LCU 时显示）。 */
 function offlinePanel(s: OverlayStateMsg): string {
   const detail = s.credsDetail
     ? `<div class="li dim">探测详情: ${esc(s.credsDetail)}</div>`
@@ -175,6 +139,46 @@ function offlinePanel(s: OverlayStateMsg): string {
   );
 }
 
+/** 一个海克斯强度行。 */
+function augRowHtml(a: AugmentRow): string {
+  const icon = a.icon
+    ? `<img class="ico" src="${esc(a.icon)}" alt="" loading="lazy" />`
+    : `<div class="ico ph"></div>`;
+  const color = TIER_COLOR[a.tier] ?? RARITY_COLOR[a.rarity] ?? '#9fb0c9';
+  return `
+    <div class="aug">
+      ${icon}
+      <div class="augmain">
+        <div class="augname">${esc(a.name)}</div>
+        <div class="heroes dim">登场率 ${pct(a.pickRate)}</div>
+      </div>
+      <div class="tier" style="background:${color}">${esc(a.tier)}</div>
+    </div>`;
+}
+
+/** 一个出装槽位（含方案列表）。 */
+function slotHtml(label: string, slots: BuildSlot[], compact = false): string {
+  if (slots.length === 0) return '';
+  const items = slots
+    .map((s) => {
+      const names = s.names.map((n) => esc(n)).join(' <span class="plus">+</span> ');
+      return `
+        <div class="buildrow">
+          <div class="buildnames">${names}</div>
+          <div class="buildstat">
+            <span class="wr">${pct(s.winRate)}</span>
+            <span class="dim pr">登场 ${pct(s.pickRate)}</span>
+          </div>
+        </div>`;
+    })
+    .join('');
+  return `
+    <div class="slot ${compact ? 'compact' : ''}">
+      <div class="slotlabel">${esc(label)}</div>
+      ${items}
+    </div>`;
+}
+
 function render(s: OverlayStateMsg): void {
   if (!s.connected) {
     app.innerHTML = offlinePanel(s);
@@ -183,34 +187,26 @@ function render(s: OverlayStateMsg): void {
 
   const phaseLabel = PHASE_LABEL[s.phase] ?? s.phase;
   const isBrawlTag = s.isBrawl ? '海克斯乱斗' : s.gameMode;
-  const noBoard = !s.rankMeta.available;
 
-  /* ---------------- 选人阶段 ---------------- */
+  /* ---------------- 英雄选择阶段：只显示英雄胜率 ---------------- */
   if (s.phase === 'ChampSelect') {
     const picks = s.picks.length
       ? s.picks.map((p) => `<span class="chip">${esc(p.name)}</span>`).join('')
       : '<span class="dim">（尚无已选英雄）</span>';
 
-    // 我方英雄的针对性推荐
-    let adviceBlock = '';
-    if (s.advice.championName && s.advice.rows.length > 0) {
-      adviceBlock = `
-        <div class="grphd" style="color:#c8a84e">
-          <span class="bullet" style="background:#c8a84e"></span>
-          ${esc(s.advice.championName)} 的高胜率海克斯
-        </div>
-        ${s.advice.rows.map((r) => rowHtml(r)).join('')}`;
-    } else if (s.advice.championName) {
-      adviceBlock =
-        '<div class="li dim">· 该英雄暂无官方适配统计</div>';
-    } else {
-      adviceBlock =
-        '<div class="li dim">· 选出英雄后显示其高胜率海克斯</div>';
-    }
-
-    const boardBlock = noBoard
-      ? '<div class="li dim">· 无排行数据，仅有静态图鉴</div>'
-      : boardHtml(s.board);
+    // 玩家此时在做「选英雄」的决策，因此核心信息是该英雄的胜率。
+    // 不发散到海克斯/出装 —— 那些在选人阶段没有决策价值。
+    const meBlock = s.me.championId > 0
+      ? `
+        <div class="me">
+          <div class="mename">${esc(s.me.name)}</div>
+          ${
+            s.me.hasData
+              ? `<div class="mewr">${pct(s.me.winRate)}<span class="dim wrlabel">海斗胜率</span></div>`
+              : '<div class="dim">暂无该英雄的海斗统计</div>'
+          }
+        </div>`
+      : '<div class="li dim">选出英雄后显示其海斗胜率</div>';
 
     app.innerHTML = panel(
       phaseLabel,
@@ -221,36 +217,58 @@ function render(s: OverlayStateMsg): void {
         <div class="k">我方已选</div>
         <div class="chips">${picks}</div>
         <div class="sep"></div>
-        ${adviceBlock}
-        <div class="sep"></div>
-        <div class="k">全局强度榜</div>
-        ${boardBlock}
+        ${meBlock}
       `,
-      // 注意：不能把 brawl 徽标与来源脚注做成二选一 ——
-      // 选人阶段正是展示"推荐"的地方，恰恰最需要标注数据出处与统计日期。
-      `${s.isBrawl ? '<span class="ok">✓ 已识别为海克斯乱斗</span>' : ''}${sourceFoot(s.rankMeta)}`,
+      `${s.isBrawl ? '<span class="ok">✓ 已识别为海克斯乱斗</span>' : ''}${sourceFoot(s.meta)}`,
     );
     return;
   }
-  /* ---------------- 对局中 ---------------- */
+
+  /* ---------------- 对局中：海克斯强度 + 出装 ---------------- */
   if (s.phase === 'InProgress') {
-    const boardBlock = noBoard
-      ? '<div class="li dim">· 无排行数据，请运行 pnpm sync</div>'
-      : boardHtml(s.board);
+    const noData = s.me.championId === 0;
+    const augBlock = noData
+      ? '<div class="li dim">· 未识别到你的英雄</div>'
+      : s.augments.length === 0
+        ? '<div class="li dim">· 该英雄暂无海克斯强度统计</div>'
+        : s.augments.map((a) => augRowHtml(a)).join('');
+
+    const b = s.build;
+    const buildBlock = noData
+      ? ''
+      : [
+          slotHtml('出门装', b.start, true),
+          slotHtml('鞋子', b.shoes, true),
+          slotHtml('核心装备', b.core),
+          slotHtml('成型六件套', b.full),
+        ]
+          .filter(Boolean)
+          .join('') || '<div class="li dim">· 该英雄暂无出装统计</div>';
+
+    const header = s.me.name ? `${s.me.name} · 建议` : '对局中';
 
     app.innerHTML = panel(
       phaseLabel,
       isBrawlTag,
       `
-        <div class="k">海克斯强度榜</div>
-        ${boardBlock}
+        ${
+          s.me.championId > 0
+            ? `<div class="row"><span class="k">英雄</span><span class="v">${esc(s.me.name)}</span></div>
+               <div class="sep"></div>`
+            : ''
+        }
+        <div class="k">海克斯强度 <span class="dim">（以该英雄为准）</span></div>
+        ${augBlock}
+        <div class="sep"></div>
+        <div class="k">出装建议</div>
+        ${buildBlock}
         <div class="sep"></div>
         <div class="li dim note">
           依据官方统计排序，供参考。不识别你当前被提供的 3 个海克斯，
           也不替你做选择。
         </div>
       `,
-      sourceFoot(s.rankMeta),
+      sourceFoot(s.meta),
     );
     return;
   }

@@ -9,6 +9,11 @@
  * ⚠️ 安全边界（本项目核心承诺）：
  *   只创建自己的窗口、只读取**进程元数据/窗口几何**，
  *   绝不打开游戏进程句柄、不读内存、不注入、不解析封包。
+ *
+ * 分阶段设计（见 docs/OVERLAY-STAGES.md）：
+ *   不同阶段玩家在做的决策不同，因此显示内容也不同 ——
+ *   - 选人：在**选英雄** → 只给该英雄胜率
+ *   - 局内：在**选海克斯 / 出装** → 给该英雄口径的海克斯强度与出装建议
  */
 
 import { app, BrowserWindow, ipcMain, screen, type Rectangle } from 'electron';
@@ -23,14 +28,16 @@ import {
   detectPortByListener,
   isBrawlSession,
 } from '@hexbox/lcu';
-import { checkRankingsFreshness, readDataset, readRankings } from '@hexbox/data-store';
+import { readBuilds, readDataset, readRankings } from '@hexbox/data-store';
 import {
-  bestAugmentsForChampion,
-  buildRankBoard,
-  hasRankingData,
-  RARITY_LABEL,
+  augmentStrength,
+  champSelectInfo,
+  championBuild,
+  findDetail,
+  hasBuildData,
+  type BuildSlotRow,
+  type ChampionDetailSet,
   type Dataset,
-  type RarityGroup,
   type RankingSnapshot,
 } from '@hexbox/core';
 
@@ -43,79 +50,67 @@ const execFileAsync = promisify(execFile);
 let win: BrowserWindow | null = null;
 let client: LcuClient | null = null;
 let dataset: Dataset | null = null;
+let rankings: RankingSnapshot | null = null;
+let builds: ChampionDetailSet | null = null;
 let lastPhase: string | null = null;
 let clickThrough = true;
-/** 凭证探测失败只提示一次，避免每 2s 刷屏。 */
 let warnedNoCreds = false;
-/** 凭证探测失败的详细原因（推送给渲染端，让诊断面板能说清是哪一步失败）。 */
 let credsDetail = '';
-
-/** 排行榜快照与派生的面板数据（启动时算一次，不随轮询重算）。 */
-let rankings: RankingSnapshot | null = null;
-/** 按稀有度分组的强度榜（已在启动时 join 好图鉴）。 */
-let rankBoard: readonly RarityGroup[] = [];
-/** 排行榜是否过期（用于标注，不阻断展示）。 */
-let rankingsStale = false;
-/** 本次选人中「我」选的英雄（0 = 未知），用于给出针对性建议。 */
+/** 本次选人中「我」选的英雄（0 = 未知）。 */
 let myChampionId = 0;
 
 const POLL_MS = 2000;
 
-/** 推送给渲染端的状态（渲染端据此渲染，不做任何 IO）。 */
+/** 一条海克斯强度（渲染端直接可用）。 */
+interface AugmentRowMsg {
+  name: string;
+  icon: string;
+  tier: string;
+  pickRate: number;
+  rarity: string;
+}
+
+/** 一个出装槽位。 */
+interface BuildSlotMsg {
+  names: string[];
+  pickRate: number;
+  winRate: number;
+}
+
 interface OverlayStateMsg {
   connected: boolean;
   phase: string;
   gameMode: string;
   queueId: number | null;
   isBrawl: boolean;
-  augCount: number;
-  /** 选人阶段我方已选英雄（pregame-visible，政策允许）。 */
   picks: Array<{ championId: number; name: string }>;
   clickThrough: boolean;
-  /** 强度榜（按稀有度分组，已截断到一屏可读的量）。 */
-  board: BoardGroupMsg[];
-  /** 排行榜元信息，用于在 UI 上标注来源与统计日期。 */
-  rankMeta: {
-    /** 是否有可用排行数据。 */
-    available: boolean;
-    /** 上游统计日期（YYYYMMDD）。 */
-    dataDate: string;
-    /** 数据是否已过期（仍展示，但需标注）。 */
-    stale: boolean;
+  /** 我选的英雄（选人阶段）。 */
+  me: {
+    championId: number;
+    name: string;
+    /** 海斗模式胜率（0..1）。 */
+    winRate: number;
+    /** 是否有官方统计。 */
+    hasData: boolean;
   };
-  /**
-   * 「我」当前英雄的适配海克斯。
-   *
-   * 注意命名：这是**基于官方统计的推荐**，不是「你被提供了什么」——
-   * 本项目不识别局内三选一（那需要截屏 + OCR，属后续计划）。
-   */
-  advice: {
-    /** 我的英雄名（空串 = 尚未确定）。 */
-    championName: string;
-    /** 针对该英雄的高胜率海克斯。 */
-    rows: BoardGroupMsg['rows'];
+  /** 该英雄的海克斯强度（局内；按官方排名）。 */
+  augments: AugmentRowMsg[];
+  /** 出装建议（局内）。 */
+  build: {
+    start: BuildSlotMsg[];
+    shoes: BuildSlotMsg[];
+    core: BuildSlotMsg[];
+    full: BuildSlotMsg[];
   };
-  /** 未连接时的探测详情（让用户知道卡在哪一步）。 */
+  /** 数据出处（来源 + 统计日期）。 */
+  meta: { dataDate: string; hasBuilds: boolean };
   credsDetail: string;
 }
 
-/** 推送给渲染端的分组（保持扁平，渲染端无需再做任何计算）。 */
-interface BoardGroupMsg {
-  rarity: string;
-  label: string;
-  rows: Array<{
-    name: string;
-    icon: string;
-    winRate: number;
-    pickRate: number;
-    winRankChange: number;
-    bestHeroes: string[];
-    /** 是否命中图鉴（false 时 UI 可标示为「仅统计」）。 */
-    hasDef: boolean;
-  }>;
-}
+const EMPTY_BUILD = { start: [], shoes: [], core: [], full: [] };
 
-// ---------------------------------------------------------------------------
+/* ------------------------------------------------------------------ */
 // 游戏窗口定位（只读窗口几何信息）
 // ---------------------------------------------------------------------------
 
@@ -171,8 +166,9 @@ $r = New-Object HEXBOX_RECT
 }
 
 function computeOverlayBounds(game: Rectangle | null, display: Rectangle): Rectangle {
-  const WIDTH = 320;
-  const HEIGHT = 460;
+  // 高度按内容量加大：局内要放强度榜 + 出装
+  const WIDTH = 340;
+  const HEIGHT = 560;
   const MARGIN = 16;
 
   if (!game) {
@@ -206,29 +202,19 @@ async function loadDataset(): Promise<void> {
   // electron . 的 cwd 是 apps/overlay，数据在仓库根的 data/
   const envDir = process.env['HEXBOX_DATA_DIR'];
   const dir = envDir ?? join(app.getAppPath(), '..', '..', 'data');
+
   try {
     dataset = await readDataset(dir);
-    if (dataset) {
-      console.log(`[hexbox] 数据集已加载: 海克斯 ${dataset.augments.length} / 英雄 ${dataset.champions.length}`);
-    } else {
-      console.warn(`[hexbox] 未找到数据集 (${dir})，请先运行 pnpm sync`);
-    }
+    console.log(
+      dataset
+        ? `[hexbox] 图鉴已加载: 海克斯(cn) ${dataset.hextechs.length} / 英雄 ${dataset.champions.length} / 装备 ${dataset.items.length}`
+        : `[hexbox] 未找到图鉴 (${dir})，请先运行 pnpm sync`,
+    );
   } catch (e) {
-    console.warn('[hexbox] 数据集读取失败:', e instanceof Error ? e.message : e);
+    console.warn('[hexbox] 图鉴读取失败:', e instanceof Error ? e.message : e);
     dataset = null;
   }
 
-  // 排行榜独立加载：失败不影响图鉴（两者本就独立落盘）
-  await loadRankings(dir);
-}
-
-/**
- * 加载排行榜并预先算好强度榜。
- *
- * 在启动时算一次而不是每次轮询都算：榜单是静态数据（每日更新），
- * 每 2s 重算 211 条纯属浪费。
- */
-async function loadRankings(dir: string): Promise<void> {
   try {
     rankings = await readRankings(dir);
   } catch (e) {
@@ -236,65 +222,72 @@ async function loadRankings(dir: string): Promise<void> {
     rankings = null;
   }
 
-  if (!hasRankingData(rankings)) {
-    rankBoard = [];
-    rankingsStale = false;
-    console.warn(`[hexbox] 排行榜无可用数据 (${dir})，请运行 pnpm sync`);
-    return;
+  try {
+    builds = await readBuilds(dir);
+    console.log(
+      builds
+        ? `[hexbox] 英雄详情已加载: ${builds.details.length} 个英雄  统计日期 ${builds.meta.dataDate || '未知'}`
+        : `[hexbox] 未找到英雄详情 (${dir})，出装建议不可用`,
+    );
+  } catch (e) {
+    console.warn('[hexbox] 英雄详情读取失败:', e instanceof Error ? e.message : e);
+    builds = null;
   }
-
-  const freshness = checkRankingsFreshness(rankings);
-  rankingsStale = freshness.stale;
-
-  rankBoard = buildRankBoard({
-    rankings,
-    // ID 桥：排行榜用国服数字 ID，必须用国服图鉴 join
-    hextechs: dataset?.hextechs ?? [],
-    champions: dataset?.champions ?? [],
-    perGroup: 6,
-  });
-
-  const total = rankBoard.reduce((n, g) => n + g.rows.length, 0);
-  console.log(
-    `[hexbox] 排行榜已加载: ${total} 条 / ${rankBoard.length} 组  ` +
-      `统计日期 ${rankings?.meta.dataDate || '未知'}${rankingsStale ? '  ⚠ 已过期' : ''}`,
-  );
 }
 
-/** 把强度榜转成渲染端可直接用的扁平结构。 */
-function boardMsg(): BoardGroupMsg[] {
-  return rankBoard.map((g) => ({
-    rarity: g.rarity,
-    label: RARITY_LABEL[g.rarity],
-    rows: g.rows.map((r) => ({
-      name: r.name,
-      icon: r.icon,
-      winRate: r.winRate,
-      pickRate: r.pickRate,
-      winRankChange: r.winRankChange,
-      bestHeroes: [...r.bestHeroes],
-      hasDef: r.hasDef,
-    })),
+/** 把出装槽位转为推送结构。 */
+function slotMsg(rows: readonly BuildSlotRow[]): BuildSlotMsg[] {
+  return rows.map((r) => ({
+    names: [...r.names],
+    pickRate: r.pickRate,
+    winRate: r.winRate,
   }));
 }
 
-/** 当前对局英雄的适配海克斯（无数据时返回空数组）。 */
-function augmentAdviceFor(championId: number): BoardGroupMsg['rows'] {
-  if (!hasRankingData(rankings)) return [];
-  return bestAugmentsForChampion(championId, {
-    rankings,
-    hextechs: dataset?.hextechs ?? [],
+/** 组装「我」这个英雄的全部阶段数据。 */
+function buildMeMsg(championId: number): OverlayStateMsg['me'] {
+  const info = champSelectInfo(championId, {
+    heroes: rankings?.heroes ?? [],
     champions: dataset?.champions ?? [],
-    limit: 5,
+  });
+  return {
+    championId: info.championId,
+    name: info.name,
+    winRate: info.winRate,
+    hasData: info.hasData,
+  };
+}
+
+function buildAugmentMsg(championId: number): AugmentRowMsg[] {
+  const detail = findDetail(builds, championId);
+  if (!detail) return [];
+  return augmentStrength({
+    detail,
+    hextechs: dataset?.hextechs ?? [],
+    limit: 10,
   }).map((r) => ({
     name: r.name,
     icon: r.icon,
-    winRate: r.winRate,
+    tier: r.tier,
     pickRate: r.pickRate,
-    winRankChange: r.winRankChange,
-    bestHeroes: [...r.bestHeroes],
-    hasDef: r.hasDef,
+    rarity: r.rarity,
   }));
+}
+
+function buildBuildMsg(championId: number): OverlayStateMsg['build'] {
+  const detail = findDetail(builds, championId);
+  if (!detail) return EMPTY_BUILD;
+  const v = championBuild({
+    detail,
+    items: dataset?.items ?? [],
+    limit: 3,
+  });
+  return {
+    start: slotMsg(v.start),
+    shoes: slotMsg(v.shoes),
+    core: slotMsg(v.core),
+    full: slotMsg(v.full),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -315,23 +308,18 @@ async function pollOnce(): Promise<void> {
     const res = await detectCredentialsDetailed().catch(() => null);
     if (res?.credentials) {
       client = new LcuClient(res.credentials);
-      console.log(
-        `[hexbox] LCU 已连接 (port ${res.credentials.port}, ${res.detail})`,
-      );
+      console.log(`[hexbox] LCU 已连接 (port ${res.credentials.port}, ${res.detail})`);
       credsDetail = '';
     } else if (!warnedNoCreds) {
       // 凭证探测失败是「悬浮窗永不出现」最常见的原因，必须显式报出来，
       // 否则表现为「程序在跑但什么都不显示」，极难排查。
-      //
-      // 四种原因需要区分对待 —— 笼统说「请用管理员运行」会把用户支到
-      // 错误的排查方向（很多情况下管理员也没用）。
       warnedNoCreds = true;
       const running = res?.clientRunning ?? false;
       const detail = res?.detail ?? '探测未返回结果';
       credsDetail = detail;
       const hint = running
         ? [
-            `[hexbox] 检测到英雄联盟客户端，但读不到 LCU 凭证。`,
+            '[hexbox] 检测到英雄联盟客户端，但读不到 LCU 凭证。',
             `         探测详情: ${detail}`,
             '         排查顺序（逐项尝试，不必全部满足）：',
             '           1. 确认本工具以**管理员身份**运行（否则读不到进程命令行）',
@@ -362,7 +350,6 @@ async function pollOnce(): Promise<void> {
       session = s;
       phase = String(s.phase ?? 'None');
     } else {
-      // 会话读取失败可能意味着客户端退出
       client = null;
     }
 
@@ -370,25 +357,27 @@ async function pollOnce(): Promise<void> {
     if (phase === 'ChampSelect' && client) {
       const cs = await client
         .get<{
-          myTeam?: Array<{ championId?: number; cellId?: number; summonerId?: number }>;
+          myTeam?: Array<{ championId?: number; cellId?: number }>;
           localPlayerCellId?: number;
         }>('/lol-champ-select/v1/session')
         .catch(() => null);
       const team = cs?.myTeam ?? [];
       picks = team
         .filter((m) => typeof m.championId === 'number' && m.championId > 0)
-        .map((m) => ({ championId: m.championId as number, name: championName(m.championId as number) }));
+        .map((m) => ({
+          championId: m.championId as number,
+          name: championName(m.championId as number),
+        }));
 
       // 找出「我」选的英雄：优先按 localPlayerCellId 定位。
       // 拿不到就退回「我方唯一的已选英雄」——选人早期往往只有自己选了。
       const me = team.find((m) => m.cellId === cs?.localPlayerCellId);
-      const myId =
+      myChampionId =
         typeof me?.championId === 'number' && me.championId > 0
           ? me.championId
           : picks.length === 1
             ? picks[0]!.championId
             : 0;
-      myChampionId = myId;
     } else {
       myChampionId = 0;
     }
@@ -420,18 +409,14 @@ async function pollOnce(): Promise<void> {
     queueId:
       (session as { gameData?: { queue?: { id?: number } } } | null)?.gameData?.queue?.id ?? null,
     isBrawl: isBrawlSession(session as Parameters<typeof isBrawlSession>[0]),
-    augCount: dataset?.augments.length ?? 0,
     picks,
     clickThrough,
-    board: boardMsg(),
-    rankMeta: {
-      available: hasRankingData(rankings),
-      dataDate: rankings?.meta.dataDate ?? '',
-      stale: rankingsStale,
-    },
-    advice: {
-      championName: myChampionId > 0 ? championName(myChampionId) : '',
-      rows: myChampionId > 0 ? augmentAdviceFor(myChampionId) : [],
+    me: buildMeMsg(myChampionId),
+    augments: myChampionId > 0 ? buildAugmentMsg(myChampionId) : [],
+    build: myChampionId > 0 ? buildBuildMsg(myChampionId) : EMPTY_BUILD,
+    meta: {
+      dataDate: builds?.meta.dataDate ?? rankings?.meta.dataDate ?? '',
+      hasBuilds: hasBuildData(builds),
     },
     credsDetail,
   };
@@ -458,8 +443,8 @@ async function pollLoop(): Promise<void> {
 
 function createWindow(): void {
   win = new BrowserWindow({
-    width: 320,
-    height: 460,
+    width: 340,
+    height: 560,
     transparent: true,
     frame: false,
     alwaysOnTop: true,
@@ -470,7 +455,7 @@ function createWindow(): void {
     hasShadow: false,
     show: false, // 由阶段驱动显示
     webPreferences: {
-      // __dirname 是 dist/main，preload/renderer 都是它的兄弟目录（dist/preload、dist/renderer）
+      // __dirname 是 dist/main，preload/renderer 都是它的兄弟目录
       preload: join(__dirname, '..', 'preload', 'index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
