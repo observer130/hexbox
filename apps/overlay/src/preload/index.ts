@@ -34,6 +34,11 @@ const api = {
   onVision: (cb: (m: unknown) => void): void => {
     ipcRenderer.on('overlay:vision', (_e, m: unknown) => cb(m));
   },
+
+  /** S2 覆盖层：覆盖窗口换显示器/尺寸变化。 */
+  onResize: (cb: (d: { width: number; height: number }) => void): void => {
+    ipcRenderer.on('overlay:resize', (_e, d: { width: number; height: number }) => cb(d));
+  },
 } as const;
 
 export type OverlayApi = typeof api;

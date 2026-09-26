@@ -61,7 +61,7 @@ export interface VisionLoopDeps {
   /** 英雄名映射。 */
   readonly championName: (id: number) => string;
   /** 识别结果的消费方（主进程推给覆盖窗口）。 */
-  readonly onResult: (msg: VisionOverlayMsg) => void;
+  readonly onResult: (msg: VisionOverlayMsg, display: Electron.Display) => void;
 }
 
 /** deps 字段可能是值或 getter,统一取值。 */
@@ -72,8 +72,15 @@ function resolveDeps<T>(v: T | (() => T)): T {
 /** 单轮识别（供 vision-loop 与 debug 工具复用）。 */
 async function captureGameBitmap(): Promise<{
   bmp: Bitmap;
+  display: Electron.Display;
 } | null> {
-  const display = screen.getPrimaryDisplay();
+  // 先找游戏窗口所在显示器 —— 游戏可能不在主显示器
+  // （多显示器 + 不同 DPI 时,主显示器的 scaleFactor/尺寸全是错的）
+  const windowPhysical = await findGameWindowRect();
+  const display = windowPhysical
+    ? screen.getDisplayNearestPoint({ x: windowPhysical.x + 10, y: windowPhysical.y + 10 })
+    : screen.getPrimaryDisplay();
+
   const sources = await desktopCapturer.getSources({
     types: ['window'],
     thumbnailSize: { width: display.size.width * 2, height: display.size.height * 2 },
@@ -93,19 +100,20 @@ async function captureGameBitmap(): Promise<{
     data[i + 2] = raw[i]!;
     data[i + 3] = raw[i + 3]!;
   }
-  return { bmp: { width: size.width, height: size.height, data } };
+  return { bmp: { width: size.width, height: size.height, data }, display };
 }
 
 /** 一轮识别：返回 null 表示「本轮无可信结果,应清空」。 */
 export async function runVisionRound(
   deps: VisionLoopDeps,
-): Promise<VisionOverlayMsg | null> {
+): Promise<{ msg: VisionOverlayMsg | null; display: Electron.Display }> {
   const windowPhysical = await findGameWindowRect();
   const grabbed = await captureGameBitmap();
-  if (!grabbed) return null;
-  const { bmp } = grabbed;
+  if (!grabbed) {
+    return { msg: null, display: screen.getPrimaryDisplay() };
+  }
+  const { bmp, display } = grabbed;
 
-  const display = screen.getPrimaryDisplay();
   // 统一换算：自动区分「显示器快照」与「窗口快照」两种形态
   // （S2 真机验收教训：二者混淆导致标签横向错位）
   const { geo, kind, scale } = makeScreenGeometry(bmp, windowPhysical, {
@@ -116,6 +124,7 @@ export async function runVisionRound(
   console.log(
     `[hexbox:vision] 截屏 ${bmp.width}x${bmp.height} 窗口` +
       `${windowPhysical ? `${windowPhysical.width}x${windowPhysical.height}@${windowPhysical.x},${windowPhysical.y}` : '未知'}` +
+      ` 显示器${display.bounds.width}x${display.bounds.height}@${display.scaleFactor}` +
       ` 判定=${kind} scale=${scale.toFixed(3)}`,
   );
 
@@ -127,9 +136,12 @@ export async function runVisionRound(
       portraits.length > 0 ? identifyConfirmedChampion(bmp, CONFIRM_SLOTS, portraits) : null;
     if (!confirmed) {
       return {
-        active: false,
-        labels: [],
-        diag: `未检出卡片: ${det.reason ?? '?'}`,
+        msg: {
+          active: false,
+          labels: [],
+          diag: `未检出卡片: ${det.reason ?? '?'}`,
+        },
+        display,
       };
     }
 
@@ -148,9 +160,12 @@ export async function runVisionRound(
       championId: confirmed.championId,
     };
     return {
-      active: true,
-      labels: [label],
-      diag: `确认态: ${confirmed.slot} score=${confirmed.score.toFixed(3)}`,
+      msg: {
+        active: true,
+        labels: [label],
+        diag: `确认态: ${confirmed.slot} score=${confirmed.score.toFixed(3)}`,
+      },
+      display,
     };
   }
 
@@ -199,7 +214,10 @@ export async function runVisionRound(
     );
   }
 
-  return { active: true, labels, diag: `卡片 ${det.cards.length} 张` };
+  return {
+    msg: { active: true, labels, diag: `卡片 ${det.cards.length} 张` },
+    display,
+  };
 }
 
 /**
@@ -225,12 +243,16 @@ export class VisionLoop {
       if (this.running) return;
       this.running = true;
       try {
-        const msg = await runVisionRound(this.deps);
+        const { msg, display } = await runVisionRound(this.deps);
         this.deps.onResult(
           msg ?? { active: false, labels: [], diag: '未找到游戏窗口' },
+          display,
         );
       } catch {
-        this.deps.onResult({ active: false, labels: [], diag: '识别异常' });
+        this.deps.onResult(
+          { active: false, labels: [], diag: '识别异常' },
+          screen.getPrimaryDisplay(),
+        );
       } finally {
         this.running = false;
       }
@@ -244,7 +266,7 @@ export class VisionLoop {
       clearInterval(this.timer);
       this.timer = null;
     }
-    this.deps.onResult({ active: false, labels: [] });
+    this.deps.onResult({ active: false, labels: [] }, screen.getPrimaryDisplay());
   }
 
   get isRunning(): boolean {

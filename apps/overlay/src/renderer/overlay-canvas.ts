@@ -30,11 +30,15 @@ interface VisionMsg {
 /** preload 暴露的接口（见 preload/index.ts）。本文件不与 renderer.ts 共存于同一页面。 */
 declare const visionOverlayApi: {
   onVision: (cb: (m: unknown) => void) => void;
+  onResize: (cb: (d: { width: number; height: number }) => void) => void;
 };
 
 const api = {
   onVision: (cb: (m: VisionMsg) => void): void => {
     visionOverlayApi.onVision((m) => cb(m as VisionMsg));
+  },
+  onResize: (cb: (d: { width: number; height: number }) => void): void => {
+    visionOverlayApi.onResize(cb);
   },
 };
 
@@ -46,6 +50,10 @@ function resizeCanvas(): void {
 }
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
+
+// 覆盖窗口换显示器时,主进程会推 overlay:resize（setBounds 后 resize 事件
+// 顺序不保证,显式同步一次,避免画布尺寸与窗口不符导致内容裁切）
+api.onResize(() => setTimeout(resizeCanvas, 50));
 
 function roundRect(
   ctx: CanvasRenderingContext2D,

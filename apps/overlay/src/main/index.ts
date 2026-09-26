@@ -548,6 +548,9 @@ function createWindow(): void {
  *
  * 与侧边悬浮窗的区别：它**铺满整个显示器**，内容按识别到的
  * 卡片屏幕坐标绝对定位（见 vision/card-overlay.ts）。
+ *
+ * ⚠️ 游戏可能不在主显示器 —— 窗口必须放在**游戏所在的显示器**上
+ * （display 参数由 vision-loop 每轮回报,坐标错位时先查这里）。
  */
 function createOverlayWindow(): void {
   const display = screen.getPrimaryDisplay();
@@ -579,10 +582,36 @@ function createOverlayWindow(): void {
   void overlayWin.loadFile(join(__dirname, '..', 'renderer', 'overlay.html'));
 }
 
-function pushOverlayVision(msg: VisionOverlayMsg): void {
-  if (overlayWin && !overlayWin.isDestroyed()) {
-    overlayWin.webContents.send('overlay:vision', msg);
+/** 把覆盖窗口移动/缩放到指定显示器（游戏换屏时同步）。 */
+function positionOverlayOn(display: Electron.Display): void {
+  if (!overlayWin || overlayWin.isDestroyed()) return;
+  const target = {
+    x: display.workArea.x,
+    y: display.workArea.y,
+    width: display.workArea.width,
+    height: display.workArea.height,
+  };
+  const cur = overlayWin.getBounds();
+  if (
+    cur.x !== target.x ||
+    cur.y !== target.y ||
+    cur.width !== target.width ||
+    cur.height !== target.height
+  ) {
+    overlayWin.setBounds(target);
   }
+  // 覆盖层内容按窗口内逻辑坐标绘制,窗口尺寸变化后画布要重设
+  overlayWin.webContents.send('overlay:resize', {
+    width: target.width,
+    height: target.height,
+  });
+}
+
+function pushOverlayVision(msg: VisionOverlayMsg, display: Electron.Display): void {
+  if (!overlayWin || overlayWin.isDestroyed()) return;
+  positionOverlayOn(display);
+  overlayWin.showInactive();
+  overlayWin.webContents.send('overlay:vision', msg);
 }
 
 function applyClickThrough(on: boolean): void {
