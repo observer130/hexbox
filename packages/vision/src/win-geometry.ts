@@ -190,7 +190,26 @@ export function makeScreenGeometry(
       width: windowRect.width,
       height: windowRect.height,
     };
-    // 窗口在显示器逻辑坐标系中的子矩形（相对整屏）
+
+    if (kind === 'window') {
+      // 窗口快照：截屏就是窗口内容（等比缩放），无偏移直通
+      return {
+        kind,
+        scale: capture.width / Math.max(1, win.width),
+        estimated: false,
+        geo: {
+          captureWidth: capture.width,
+          captureHeight: capture.height,
+          windowX: win.x,
+          windowY: win.y,
+          windowWidth: win.width,
+          windowHeight: win.height,
+        },
+      };
+    }
+
+    // 显示器快照：截屏≈显示器等比缩放，窗口是其中的子矩形。
+    // nx0 = win.x/dispW, nw = win.width/dispW（截屏与显示器同比）
     const nx0 = win.x / dispW;
     const ny0 = win.y / dispH;
     const nw = win.width / dispW;
@@ -203,6 +222,10 @@ export function makeScreenGeometry(
         captureWidth: capture.width,
         captureHeight: capture.height,
         // normalizedRectToScreen: screen = windowX + n.x * windowWidth
+        // 目标: screen = win.x + ((n.x - nx0)/nw) * win.width
+        //   → windowX     = win.x - (nx0/nw) * win.width
+        //     windowWidth = win.width / nw = 显示器逻辑宽（把截屏内归一化
+        //     换算成窗口内归一化的系数）
         windowX: win.x - (nx0 / nw) * win.width,
         windowY: win.y - (ny0 / nh) * win.height,
         windowWidth: win.width / nw,
