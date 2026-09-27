@@ -47,9 +47,24 @@ const canvas = document.getElementById('vision') as HTMLCanvasElement;
 /** 最近一次推送的消息;resize/画布重设后用它重绘,避免清空后空白。 */
 let lastMsg: VisionMsg | null = null;
 
+/**
+ * 画布清晰度（真机验收反馈:文字发虚）：
+ * canvas.width/height 是**物理像素**,而 window.innerWidth 是逻辑 DIP。
+ * 直接把逻辑尺寸赋给 canvas 会让高分屏（DPR 1.5）把 1px 画布拉伸到
+ * 1.5 物理像素上 —— 文字全部模糊。必须按 devicePixelRatio 放大画布
+ * 并用 ctx.scale 统一坐标,绘制代码仍用逻辑坐标、无需感知 DPR。
+ */
 function resizeCanvas(): void {
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(window.innerWidth * dpr);
+  canvas.height = Math.round(window.innerHeight * dpr);
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    // CSS 尺寸保持逻辑值（画布只占满窗口）
+    canvas.style.width = `${window.innerWidth}px`;
+    canvas.style.height = `${window.innerHeight}px`;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
   // 画布尺寸变化会清空内容 —— 用最近消息重绘
   if (lastMsg) draw(lastMsg);
 }
@@ -83,12 +98,13 @@ function draw(msg: VisionMsg): void {
   lastMsg = msg; // 供 resize 重绘
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // DPR 变换后 clearRect 也要覆盖整窗（用逻辑尺寸）
+  ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
   if (!msg.active) return;
 
   console.log(
     `[overlay-canvas] draw labels=${msg.labels.length} ` +
-      `canvas=${canvas.width}x${canvas.height}`,
+      `canvas=${canvas.width}x${canvas.height} dpr=${window.devicePixelRatio || 1}`,
   );
 
   for (const l of msg.labels) {
@@ -102,27 +118,26 @@ function draw(msg: VisionMsg): void {
     roundRect(ctx, l.x, l.y, l.w, l.h, 6);
     ctx.stroke();
 
-    // 紧凑标签（顶栏槽位,高 ~26）单行:胜率 + 英雄名;
-    // 常规标签（卡片下方,高 ≥ 34）另带「101 官方统计」脚注
+    // 紧凑标签（顶栏槽位,高 ~26）只画胜率 —— 槽位盒 ~62px 宽,
+    // 胜率+英雄名双文本必然重叠（真机验收截图实测）,英雄名省略
     const compact = l.h < 30;
 
-    // 胜率（大字,单行垂直居中）
+    // 胜率（大字,单行垂直居中,水平居中让窄标签视觉平衡）
     ctx.fillStyle = accent;
     ctx.textBaseline = 'middle';
-    ctx.textAlign = 'left';
-    ctx.font = `700 ${Math.round(l.h * (compact ? 0.6 : 0.52))}px "Microsoft YaHei", sans-serif`;
-    ctx.fillText(l.text, l.x + 8, l.y + l.h * 0.5);
-
-    // 英雄名（右侧,超宽截断 —— 槽位标签只有 ~56-90px 宽）
-    ctx.fillStyle = '#c8a84e';
-    ctx.font = `600 ${Math.round(l.h * (compact ? 0.4 : 0.3))}px "Microsoft YaHei", sans-serif`;
-    ctx.textAlign = 'right';
-    const nameRight = l.x + l.w - 8;
-    const nameMaxW = l.w - 16 - (compact ? ctx.measureText(l.text).width + 10 : 0);
-    ctx.fillText(l.sub, nameRight, l.y + l.h * 0.5, Math.max(24, nameMaxW));
+    ctx.textAlign = 'center';
+    ctx.font = `700 ${Math.round(l.h * (compact ? 0.62 : 0.52))}px "Microsoft YaHei", sans-serif`;
+    ctx.fillText(l.text, l.x + l.w / 2, l.y + l.h * 0.5);
     ctx.textAlign = 'left';
 
     if (!compact) {
+      // 英雄名（右侧小字）
+      ctx.fillStyle = '#c8a84e';
+      ctx.font = `600 ${Math.round(l.h * 0.3)}px "Microsoft YaHei", sans-serif`;
+      ctx.textAlign = 'right';
+      ctx.fillText(l.sub, l.x + l.w - 10, l.y + l.h * 0.42, Math.max(24, l.w - 90));
+      ctx.textAlign = 'left';
+
       // 脚注:数据出处
       ctx.fillStyle = 'rgba(139, 150, 173, 0.75)';
       ctx.font = `400 ${Math.round(l.h * 0.2)}px "Microsoft YaHei", sans-serif`;

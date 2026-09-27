@@ -89,10 +89,11 @@ function interiorStats(gray: Uint8Array): InteriorStats {
 /**
  * 槽位是否被头像占用。
  *
- * 真机数据（2400×1344 截图,12% 内缩 16×16 灰度）：
- *   占用格 std 60.9~64.3,空格 std 1.8~8.7 —— 0.18 的阈值
- *   （≈45.9）距空格上限仍有 5 倍余量,同时容纳合成测试数据
- *   与不同内容的真实头像。
+ * 真机数据（12% 内缩 16×16 灰度 std）：
+ *   空格 1.8~8.7;占用格亮色头像 60+,**暗色头像可低至 42**
+ *   （2026-09-28 验收截图:沃里克暗底发光,std=42,曾因阈值 0.18
+ *   被误判为空格 → 不显示标签 —— 真实 bug）。
+ *   阈值 0.12×255≈30.6:空格上限的 3.5 倍,暗头像下限的 1.4 倍。
  */
 export function isSlotOccupied(bmp: Bitmap, rect: Rect): boolean {
   // 内缩 12%：避开边框亮线（边框会抬高 std 造成误判）
@@ -104,7 +105,7 @@ export function isSlotOccupied(bmp: Bitmap, rect: Rect): boolean {
   };
   const gray = extractGray(bmp, inner, 16);
   if (!gray) return false;
-  return interiorStats(gray).std >= 0.18 * 255;
+  return interiorStats(gray).std >= 0.12 * 255;
 }
 
 /* ------------------------------------------------------------------ */
@@ -123,7 +124,7 @@ export interface TopBarCandidate {
 }
 
 export interface TopBarScanOptions {
-  /** 占用判定阈值（0..1,占 255 灰度比例）。默认 0.18。 */
+  /** 占用判定阈值（0..1,占 255 灰度比例）。默认 0.12。 */
   readonly occupiedStd?: number;
   /** 匹配最低得分。默认 0.80（方头像同源,真机 0.93+）。 */
   readonly minScore?: number;
@@ -152,7 +153,7 @@ export function detectTopBarCandidates(
   templates: readonly PreparedTemplate[],
   options: TopBarScanOptions = {},
 ): TopBarCandidate[] {
-  const occupiedStd = (options.occupiedStd ?? 0.18) * 255;
+  const occupiedStd = (options.occupiedStd ?? 0.12) * 255;
   const minScore = options.minScore ?? 0.8;
   const minMargin = options.minMargin ?? 0.05;
   const out: TopBarCandidate[] = [];
@@ -212,7 +213,7 @@ export function diagnoseTopBarSlots(
   templates: readonly PreparedTemplate[],
   options: TopBarScanOptions = {},
 ): TopBarSlotDiag[] {
-  const occupiedStd = (options.occupiedStd ?? 0.18) * 255;
+  const occupiedStd = (options.occupiedStd ?? 0.12) * 255;
   const out: TopBarSlotDiag[] = [];
   for (let k = 0; k < captureSlots.length && k < TOP_BAR_ROW.count; k++) {
     const rect = captureSlots[k]!;

@@ -24,6 +24,7 @@ import {
   findGameWindowRect,
   makeScreenGeometry,
   matchName,
+  createLabelMemory,
   slotLabelFor,
   topBarSlotRects,
   windowRectToCapture,
@@ -249,16 +250,22 @@ export async function runVisionRound(
  *
  * `setActive(true)` 在进入 ChampSelect 时调用;离开时 `setActive(false)`。
  * 内部串行执行（上一轮完成才开始下一轮）,避免截屏堆积。
+ *
+ * 标签记忆（真机 bug 修复,2026-09-28）：卡片检测对动画/光效敏感,
+ * 「3 张卡某轮只检出 2 张」的部分失败会以 active=true 覆盖旧结果,
+ * 第三张卡片的胜率因此消失。现在每轮结果先经 `rememberLabels`
+ * 按**位置**补齐 TTL 内缺失的旧标签,再推送 —— 显示连续性不受
+ * 单轮检测抖动影响（TTL 6 轮 × 1.5s = 9s,足够覆盖检测闪烁）。
  */
 export class VisionLoop {
   private readonly deps: VisionLoopDeps;
   private readonly intervalMs: number;
   private timer: NodeJS.Timeout | null = null;
   private running = false;
-  private lastGood: VisionOverlayMsg | null = null;
+  /** 标签记忆（rememberLabels 的状态体）。 */
+  private memory = createLabelMemory();
+  private round = 0;
   private failCount = 0;
-  /** 连续失败多少轮才真正清空（1.5s/轮 × 4 = 6s 容忍）。 */
-  private static readonly FAIL_TOLERANCE = 4;
 
   constructor(deps: VisionLoopDeps, intervalMs = 1500) {
     this.deps = deps;
@@ -272,24 +279,22 @@ export class VisionLoop {
       this.running = true;
       try {
         const { msg, display } = await runVisionRound(this.deps);
-        if (msg && msg.active) {
-          // 成功:记住结果,清零失败计数
-          this.lastGood = msg;
+        this.round++;
+        const active = msg !== null && msg.active;
+        // 记忆补齐:本轮识别到的标签 + TTL 内未过期的旧标签
+        const labels = this.memory.update(msg?.labels ?? [], this.round, active);
+        if (active) {
           this.failCount = 0;
-          this.deps.onResult(msg, display);
         } else {
           this.failCount++;
-          if (this.lastGood && this.failCount < VisionLoop.FAIL_TOLERANCE) {
-            // 容忍期内保持上一次成功内容（检测在动画/光效下会间歇失败）
-            this.deps.onResult(this.lastGood, display);
-          } else {
-            this.deps.onResult(
-              msg ?? { active: false, labels: [], diag: '未找到游戏窗口' },
-              display,
-            );
-            if (this.failCount >= VisionLoop.FAIL_TOLERANCE) this.lastGood = null;
-          }
         }
+        const shown = active || labels.length > 0;
+        this.deps.onResult(
+          shown
+            ? { active: true, labels, diag: msg?.diag ?? '记忆保持' }
+            : { active: false, labels: [], diag: msg?.diag ?? '未找到游戏窗口' },
+          display,
+        );
       } catch {
         this.deps.onResult(
           { active: false, labels: [], diag: '识别异常' },
@@ -308,6 +313,9 @@ export class VisionLoop {
       clearInterval(this.timer);
       this.timer = null;
     }
+    this.memory.reset();
+    this.round = 0;
+    this.failCount = 0;
     this.deps.onResult({ active: false, labels: [] }, screen.getPrimaryDisplay());
   }
 
