@@ -11,7 +11,6 @@
 import type { Rect } from './types.ts';
 import type { CaptureGeometry } from './types.ts';
 import { normalizedRectToScreen } from './geometry.ts';
-
 /** 一个待绘制标签（屏幕逻辑坐标）。 */
 export interface CardLabel {
   /** 标签矩形（屏幕逻辑坐标,DIP）。 */
@@ -75,6 +74,62 @@ export function cardLabelFor(
     x: card.x,
     y,
     w: card.w,
+    h,
+    text: pct,
+    sub: options.name,
+    hasData: options.hasData,
+    championId: options.championId,
+  };
+}
+
+/** 顶栏槽位标签选项（紧凑版,槽位盒只有 ~90 逻辑像素宽）。 */
+export interface SlotLabelOptions {
+  readonly name: string;
+  readonly winRate: number;
+  readonly hasData: boolean;
+  readonly championId: number;
+  /** 标签高度（DIP）。默认 26。 */
+  readonly labelHeight?: number;
+  /** 标签与槽位底缘的间距（DIP）。默认 4。 */
+  readonly gap?: number;
+}
+
+/**
+ * 顶栏槽位矩形（**截屏归一化**）→ 下方紧凑标签（屏幕逻辑坐标）。
+ *
+ * 与 cardLabelFor 的区别：
+ *   - 输入是截屏空间的槽位矩形（调用方先用 win-geometry 的
+ *     windowRectToCapture 把窗口归一化的槽位几何变换过来 ——
+ *     与识别用同一坐标系,标签与头像必然对齐）;
+ *   - 标签更紧凑（高 26、单行,渲染端据此缩字号）;
+ *   - **不做上下翻转**：顶栏在屏幕最上方,下方必然有空间;
+ *     越出工作区底缘时把 y 夹回工作区内（防御极端窗口位置）。
+ */
+export function slotLabelFor(
+  captureSlotRect: Rect,
+  geo: CaptureGeometry,
+  workArea: { x: number; y: number; width: number; height: number },
+  options: SlotLabelOptions,
+): CardLabel {
+  const gap = options.gap ?? 4;
+  const h = options.labelHeight ?? 26;
+  const slot = normalizedRectToScreen(captureSlotRect, geo);
+
+  const pct = options.hasData ? `${(options.winRate * 100).toFixed(1)}%` : '暂无数据';
+  // 槽位盒很窄（~90 DIP）,标签以槽位为中心、至少 56 宽,
+  // 保证「54.6%」「暂无数据」单行放得下
+  const w = Math.max(56, slot.w);
+
+  let y = slot.y + slot.h + gap;
+  // 防御：极端窗口位置下夹回工作区（顶栏场景正常不会触发）
+  if (y + h > workArea.y + workArea.height) {
+    y = workArea.y + workArea.height - h;
+  }
+
+  return {
+    x: slot.x + slot.w / 2 - w / 2,
+    y,
+    w,
     h,
     text: pct,
     sub: options.name,

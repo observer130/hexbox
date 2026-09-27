@@ -720,15 +720,22 @@ async function loadNameLibrary(): Promise<void> {
       height: n.height,
       bits: base64ToBits(n.bits, n.width * n.height),
     }));
+    // 头像模板必须排除 60000+ 的「变体 ID」条目（CDragon
+    // champion-summary 的静态定义占位,如 60038 = 虚空行者的变体）：
+    // 它们与真英雄同图,匹配命中后 join 不到排行榜/详情数据,
+    // 会显示「暂无数据」—— 看起来像识别失败,实为 ID 无效。
+    const realPortraits = pack.templates.filter((t) => t.championId > 0 && t.championId < 60000);
+    const skipped = pack.templates.length - realPortraits.length;
     portraits = prepareTemplates(
-      pack.templates.map((t) => ({
+      realPortraits.map((t) => ({
         championId: t.championId,
         size: t.size,
         gray: denormalizeToGray(t.norm, t.size),
       })),
     );
     console.log(
-      `[hexbox] 名字指纹 ${nameLibrary.length} 个 / 头像模板 ${portraits.length} 个已加载`,
+      `[hexbox] 名字指纹 ${nameLibrary.length} 个 / 头像模板 ${portraits.length} 个已加载` +
+        (skipped > 0 ? `（排除 ${skipped} 个 60000+ 变体 ID）` : ''),
     );
   } catch (e) {
     console.warn('[hexbox] 名字指纹加载失败:', e instanceof Error ? e.message : e);

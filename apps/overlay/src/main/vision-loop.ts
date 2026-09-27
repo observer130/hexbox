@@ -18,13 +18,15 @@ import { desktopCapturer, screen } from 'electron';
 import {
   cardLabelFor,
   detectCards,
+  detectTopBarCandidates,
   extractGrayRaw,
   extractNameStrip,
   findGameWindowRect,
-  identifyConfirmedChampion,
   makeScreenGeometry,
   matchName,
-  CONFIRM_SLOTS,
+  slotLabelFor,
+  topBarSlotRects,
+  windowRectToCapture,
   NAME_STRIP,
   type Bitmap,
   type CardLabel,
@@ -54,7 +56,13 @@ export interface VisionOverlayMsg {
 export interface VisionLoopDeps {
   /** 名字指纹库（pnpm templates 产物）。getter 允许异步加载后更新。 */
   readonly nameLibrary: readonly NameFingerprint[] | (() => readonly NameFingerprint[]);
-  /** 头像模板（确认阶段识别用）。getter 允许异步加载后更新。 */
+  /**
+   * 头像模板（确认态顶栏逐格识别用）。
+   *
+   * ⚠️ 必须排除 60000+ 的「变体 ID」条目（CDragon champion-summary
+   * 的静态定义占位,如 60038 = 虚空行者的变体）—— 它们与真英雄
+   * 同名同图,匹配命中后 join 不到排行榜数据。getter 允许异步加载后更新。
+   */
   readonly portraits?: readonly PreparedTemplate[] | (() => readonly PreparedTemplate[] | undefined);
   /** 英雄榜（胜率 join 数据源）。 */
   readonly rankings: RankingSnapshot | null | (() => RankingSnapshot | null);
@@ -130,40 +138,56 @@ export async function runVisionRound(
 
   const det = detectCards(bmp);
   if (!det.confident || det.cards.length === 0) {
-    // 选人**确认阶段**：卡片消失、显示大立绘 → 用顶部栏/玩家条方头像识别
+    // 选人**确认态**（已锁定英雄）：顶栏「可用」列出未选的备选英雄,
+    // 逐格识别并显示每个备选英雄的胜率（需求语义,2026-09-28 用户确认）。
     const portraits = (resolveDeps(deps.portraits) ?? []) as readonly PreparedTemplate[];
-    const confirmed =
-      portraits.length > 0 ? identifyConfirmedChampion(bmp, CONFIRM_SLOTS, portraits) : null;
-    if (!confirmed) {
+    const rankings = resolveDeps(deps.rankings) as RankingSnapshot | null;
+    if (portraits.length === 0) {
+      return {
+        msg: { active: false, labels: [], diag: `未检出卡片: ${det.reason ?? '?'}` },
+        display,
+      };
+    }
+
+    // 槽位几何按窗口归一化存储 → 先变换到截屏空间再识别
+    // （display 形态截屏里窗口只是子矩形,不变换会整体错位）
+    const captureSlots = topBarSlotRects().map(
+      (r) => windowRectToCapture(r, bmp, windowPhysical, display),
+    );
+    const labels: CardLabel[] = [];
+    const identified: string[] = [];
+    for (const cand of detectTopBarCandidates(bmp, captureSlots, portraits)) {
+      const row = rankings?.heroes.find((h) => h.championId === cand.championId);
+      const sub = deps.championName(cand.championId);
+      identified.push(`${sub}=${cand.score.toFixed(2)}`);
+      // 标签定位用截屏空间的槽位矩形（与识别同一坐标系）
+      labels.push(
+        slotLabelFor(captureSlots[cand.slotIndex]!, geo, display.workArea, {
+          name: sub,
+          winRate: row?.winRate ?? 0,
+          hasData: row !== undefined,
+          championId: cand.championId,
+        }),
+      );
+    }
+
+    // 逐格识别全部失败时降级提示（而不是无显示 —— 便于真机排查）
+    if (labels.length === 0) {
       return {
         msg: {
           active: false,
           labels: [],
-          diag: `未检出卡片: ${det.reason ?? '?'}`,
+          diag: `确认态: 顶栏无识别成功的格子（模板 ${portraits.length}）`,
         },
         display,
       };
     }
 
-    const row = resolveDeps(deps.rankings)?.heroes.find(
-      (h) => h.championId === confirmed.championId,
-    );
-    // 悬停确认态:标签固定显示在左上(顶部栏下方),与头像同行易对照
-    const label: CardLabel = {
-      x: display.workArea.x + 24,
-      y: display.workArea.y + 90,
-      w: 190,
-      h: 34,
-      text: row ? `${(row.winRate * 100).toFixed(1)}%` : '暂无数据',
-      sub: deps.championName(confirmed.championId),
-      hasData: row !== undefined,
-      championId: confirmed.championId,
-    };
     return {
       msg: {
         active: true,
-        labels: [label],
-        diag: `确认态: ${confirmed.slot} score=${confirmed.score.toFixed(3)}`,
+        labels,
+        diag: `确认态顶栏: ${identified.join(' ')}`,
       },
       display,
     };

@@ -33,6 +33,7 @@ import {
   captureScale,
   decodePack,
   detectCards,
+  diagnoseTopBarSlots,
   encodePng,
   extractGray,
   extractGrayRaw,
@@ -45,6 +46,8 @@ import {
   normalizeGray,
   prepareTemplates,
   similarity,
+  topBarSlotRects,
+  windowRectToCapture,
   type Bitmap,
   type NameFingerprint,
   type PortraitTemplate,
@@ -86,6 +89,12 @@ interface DebugResult {
     score: number;
     /** 相似度前 3 候选（诊断用；识别阈值极严，正式认定见 championId）*/
     top3: Array<{ id: number; name: string; score: number }>;
+  }>;
+  /** 顶栏逐格诊断（确认态排查;占用格带 top3 候选）。 */
+  topBar?: Array<{
+    slotIndex: number;
+    occupied: boolean;
+    top?: Array<{ id: number; name: string; score: number }>;
   }>;
 }
 
@@ -164,14 +173,16 @@ async function loadTemplates(): Promise<PreparedTemplate[]> {
     try {
       const encoded = await readFile(path, 'utf8');
       const pack = decodePack(encoded);
-      const portraits: PortraitTemplate[] = pack.templates.map((t) => ({
-        championId: t.championId,
-        size: t.size,
-        // 序列化存的是归一化值；先反归一化回 0..255，比较时两端
-        // 都走 normalizeGray 统一管线（逆变换 + 再标准化 ≈ 恒等，
-        // 序列化舍入 < 1e-4，对相关性排序无影响）
-        gray: denormalize(t.norm, t.size),
-      }));
+      const portraits: PortraitTemplate[] = pack.templates
+        .filter((t) => t.championId > 0 && t.championId < 60000) // 排除 CDragon 变体 ID
+        .map((t) => ({
+          championId: t.championId,
+          size: t.size,
+          // 序列化存的是归一化值；先反归一化回 0..255，比较时两端
+          // 都走 normalizeGray 统一管线（逆变换 + 再标准化 ≈ 恒等，
+          // 序列化舍入 < 1e-4，对相关性排序无影响）
+          gray: denormalize(t.norm, t.size),
+        }));
       console.log(`[debug] 模板包 ${pack.count} 个 (${pack.size}×${pack.size}) ← ${path}`);
       return prepareTemplates(portraits);
     } catch {
@@ -379,6 +390,30 @@ app.whenReady().then(async () => {
     cards,
   };
 
+  // 3.5) 顶栏逐格诊断（确认态排查用,不受卡片检测成败影响）
+  //      输出每格占用状态与 top3 候选 —— 区分「槽位错」与「阈值高」
+  let topBar: DebugResult['topBar'] = undefined;
+  if (templates.length > 0) {
+    const captureSlots = topBarSlotRects().map(
+      (r) => windowRectToCapture(r, bmp, windowPhysical, display),
+    );
+    const diag = diagnoseTopBarSlots(bmp, captureSlots, templates);
+    topBar = diag.map((d) => ({
+      slotIndex: d.slotIndex,
+      occupied: d.occupied,
+      top: d.top?.map((t) => ({
+        id: t.championId,
+        name: nameById.get(t.championId) ?? `#${t.championId}`,
+        score: t.score,
+      })),
+    }));
+    console.log('[debug] 顶栏逐格: ' + diag.map((d) =>
+      d.occupied
+        ? `${d.slotIndex + 1}:${(d.top?.[0]?.championId ?? 0) > 0 ? nameById.get(d.top![0]!.championId) ?? d.top![0]!.championId : '?'}=${d.top?.[0]?.score.toFixed(2)}`
+        : `${d.slotIndex + 1}:空`,
+    ).join(' '));
+  }
+
   writeFileSync(join(OUT_DIR, 'raw.png'), grabbed.img.toPNG());
   writeFileSync(join(OUT_DIR, 'result.json'), JSON.stringify(result, null, 2));
 
@@ -427,6 +462,16 @@ app.whenReady().then(async () => {
         c.rect.h * NAME_STRIP.height,
         0x6f, 0xb3, 0xd2, 2,
       );
+    }
+    // 顶栏槽位框（确认态核对提取区域;紫=占用/灰=空）
+    if (topBar) {
+      const captureSlots = topBarSlotRects();
+      // topBar 与 captureSlots 同序（都按槽位 0..9）
+      for (const [k, d] of topBar.entries()) {
+        const r = captureSlots[k]!;
+        const [rr, gg, bb] = d.occupied ? [0xc0, 0x84, 0xfc] : [0x8b, 0x96, 0xad];
+        drawRect(r.x, r.y, r.w, r.h, rr, gg, bb, 2);
+      }
     }
     writeFileSync(join(OUT_DIR, 'annotated.png'), encodePng({ width: W, height: H, data: ann }));
   }

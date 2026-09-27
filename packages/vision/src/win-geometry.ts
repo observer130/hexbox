@@ -25,7 +25,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
-import type { CaptureGeometry } from './types.ts';
+import type { CaptureGeometry, Rect } from './types.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -247,5 +247,55 @@ export function makeScreenGeometry(
       windowWidth: display.workArea.width,
       windowHeight: display.workArea.height,
     },
+  };
+}
+
+/**
+ * **窗口内归一化**矩形 → **截屏归一化**矩形（窗口 UI 元素识别用）。
+ *
+ * 背景：顶栏槽位等 UI 元素的几何按**窗口**归一化存储（跨分辨率稳定,
+ * 两张真机截图交叉验证一致）。但截屏有两种实测形态
+ * （snapshotKind）：window 形态下截屏=窗口内容,两种归一化相等;
+ * display 形态下窗口只是截屏的子矩形,必须**平移缩放**。
+ *
+ * 两种形态的统一表达（capture 是显示器逻辑尺寸 × 同一比例）：
+ *   - window 形态：nx0=0, nw=1（窗口铺满截屏）
+ *   - display 形态：nx0 = win.x/dispW, nw = win.width/dispW
+ * 变换：capture.x = nx0 + rect.x * nw
+ * （window 形态退化为恒等;windowRect 为 null 时同样恒等。）
+ *
+ * ⚠️ 必须与 makeScreenGeometry 用同一份 display/window 形态判定 ——
+ * 所以本函数接受与 makeScreenGeometry 相同的参数,内部复用 snapshotKind。
+ */
+export function windowRectToCapture(
+  rect: Rect,
+  capture: { readonly width: number; readonly height: number },
+  windowRect: PhysicalRect | null,
+  display: {
+    readonly bounds: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+    readonly scaleFactor: number;
+  },
+): Rect {
+  const dispW = Math.max(1, display.bounds.width);
+  const dispH = Math.max(1, display.bounds.height);
+  const nx0 = windowRect ? windowRect.x / dispW : 0;
+  const ny0 = windowRect ? windowRect.y / dispH : 0;
+  const nw = windowRect ? windowRect.width / dispW : 1;
+  const nh = windowRect ? windowRect.height / dispH : 1;
+  // 窗口纵横比与截屏不一致时（window 快照形态）,窗口归一化即截屏归一化
+  const kind = snapshotKind(
+    capture,
+    { width: Math.round(dispW * display.scaleFactor), height: Math.round(dispH * display.scaleFactor) },
+    windowRect,
+    windowRect ? windowRect.width / dispW : 1,
+  );
+  if (kind === 'window' || !windowRect) {
+    return rect;
+  }
+  return {
+    x: nx0 + rect.x * nw,
+    y: ny0 + rect.y * nh,
+    w: rect.w * nw,
+    h: rect.h * nh,
   };
 }

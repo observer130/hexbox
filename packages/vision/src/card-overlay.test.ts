@@ -5,7 +5,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { cardLabelFor } from './card-overlay.ts';
+import { cardLabelFor, slotLabelFor } from './card-overlay.ts';
+import { normalizedRectToScreen } from './geometry.ts';
 
 /** 与真机一致的几何：窗口 1600x900 @ (313,1),截屏 3413x1920。 */
 const GEO = {
@@ -75,4 +76,73 @@ test('cardLabelFor：翻转仍越界时贴显示器底部', () => {
     championId: 1,
   });
   assert.ok(Math.abs(label.y + label.h - 40) < 1e-6);
+});
+
+test('slotLabelFor：标签在槽位正下方、居中对齐、最小宽 56', () => {
+  // display 形态真机几何:截屏 3413×1920（显示器逻辑 2400×1350）,
+  // 窗口 1600×900 @ (313,1)。槽位矩形已是**截屏空间**归一化
+  // （windowRectToCapture 的产物）:格 0 窗口内 x0=659/2400 →
+  // 截屏 313/2400 + (659/2400)×(1600/2400)。
+  const geo = {
+    captureWidth: 3413,
+    captureHeight: 1920,
+    windowX: 313,
+    windowY: 1,
+    windowWidth: 1600,
+    windowHeight: 900,
+  };
+  const nx0 = 313 / 2400;
+  const nw = 1600 / 2400;
+  const ny0 = 1 / 1350;
+  const nh = 900 / 1350;
+  const winSlot = { x: 659 / 2400, y: 19 / 1350, w: 93 / 2400, h: 94 / 1350 };
+  const captureSlot = {
+    x: nx0 + winSlot.x * nw,
+    y: ny0 + winSlot.y * nh,
+    w: winSlot.w * nw,
+    h: winSlot.h * nh,
+  };
+  const workArea = { x: 0, y: 0, width: 2400, height: 1344 };
+  const label = slotLabelFor(captureSlot, geo, workArea, {
+    name: '不屈之枪',
+    winRate: 0.572,
+    hasData: true,
+    championId: 80,
+  });
+  assert.equal(label.text, '57.2%');
+  assert.equal(label.sub, '不屈之枪');
+  assert.ok(label.w >= 56, `标签宽应 ≥56,实际 ${label.w}`);
+  // 水平居中:标签中心 = 槽位中心
+  const slotScreen = normalizedRectToScreen(captureSlot, geo);
+  const slotCenter = slotScreen.x + slotScreen.w / 2;
+  const labelCenter = label.x + label.w / 2;
+  assert.ok(Math.abs(slotCenter - labelCenter) < 1e-6);
+  // 垂直:标签上缘 = 槽位下缘 + gap
+  assert.ok(Math.abs(label.y - (slotScreen.y + slotScreen.h + 4)) < 1e-6);
+});
+
+test('slotLabelFor：无数据显示「暂无数据」', () => {
+  const geo = {
+    captureWidth: 1000, captureHeight: 1000,
+    windowX: 0, windowY: 0, windowWidth: 1000, windowHeight: 1000,
+  };
+  const workArea = { x: 0, y: 0, width: 1000, height: 1000 };
+  const label = slotLabelFor({ x: 0.3, y: 0.1, w: 0.04, h: 0.07 }, geo, workArea, {
+    name: 'x', winRate: 0, hasData: false, championId: 1,
+  });
+  assert.equal(label.text, '暂无数据');
+  assert.equal(label.hasData, false);
+});
+
+test('slotLabelFor：越出工作区底缘时夹回（防御,正常不触发）', () => {
+  const geo = {
+    captureWidth: 1000, captureHeight: 1000,
+    windowX: 0, windowY: 0, windowWidth: 1000, windowHeight: 1000,
+  };
+  // 槽位贴近工作区底部
+  const workArea = { x: 0, y: 0, width: 1000, height: 200 };
+  const label = slotLabelFor({ x: 0.3, y: 0.9, w: 0.04, h: 0.07 }, geo, workArea, {
+    name: 'x', winRate: 0.5, hasData: true, championId: 1,
+  });
+  assert.ok(label.y + label.h <= 200 + 1e-6, `${label.y + label.h} 应 ≤ 200`);
 });

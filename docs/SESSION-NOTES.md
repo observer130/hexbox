@@ -1,64 +1,74 @@
-# P2-S2 会话交接备忘（2026-09-27 收工）
+# P2-S2 会话交接备忘（2026-09-28 收工）
 
 > 用途：下次会话直接续上,不重复排查。状态以本文为准。
+> 上一份备忘（09-27）中「确认态误检」问题的修复记录见下。
 
-## 当前状态：S2 阶段一 ✅ / 阶段二 ❌(已知问题,明天修)
+## 当前状态：S2 阶段一 ✅ / 阶段二 ✅（离线回放验证,待真机验收）
 
-### 已验证可用 ✅
+### 09-28 修复：确认态（锁定英雄后）无显示
 
-1. **卡片定位**（vision/grid.ts）：多轮真机稳定检出 2~3 张卡片
-2. **名字 OCR**（vision/ocr.ts + templates.json 名字指纹库）：
-   离线回放 2/2 正确;真机识别出 戏命师 48.9% / 腕豪 52.1% / 冰霜女巫 等
-3. **胜率 join**（core/champSelectInfo + rankings.json）
-4. **覆盖窗口渲染**（overlay.html + overlay-canvas.ts）：
-   截图证实标签正确绘制在卡片下方
-5. **侧边悬浮窗数据**：首次真正工作(封魔剑魂 56.0% 截图证实)
-6. **失败容忍**：连续 4 轮失败才清空,标签不再闪失
+**需求语义修正（重要,勿回退）**：
+旧实现把确认态当成「识别已锁定的英雄、把它的胜率画在左上角」——
+**错的**。正确需求（用户确认）：锁定后顶部「可用」栏列出的是
+**未选的备选英雄**（方头像）,应给**每个有头像的格子**各显示一个胜率标签。
 
-### 待修问题 ❌（明天从这里开始）
+**离线回放已验证**（用 debug/confirmed-state.png 真机截图）：
+- 格 1 狂暴之心 0.950 / 格 2 炼金术士 0.943（方头像与模板库同源,得分远超卡片立绘）
+- 标签正确落在槽位正下方 (752,80) / (826,80)
+- 悬停态（raw.png）不受影响:2 张卡片 + OCR 正常
 
-**问题：确认态(锁定英雄后,大立绘)出现 2 个「暂无数据/未识别」标签,
-画在了皮肤轮播缩略图附近(x≈830 和 x≈1380, y≈930 逻辑)——
-而预期是: 左上角(24,90)显示已锁定英雄的胜率。**
+### 根因链（三处叠加,都已修）
 
-分析（按可能性排序）:
-1. 确认态截屏里 detectCards 仍检出了 2 个"卡片"(误检,把皮肤
-   缩略图/轮播 UI 当卡片) → 走了卡片分支而非确认分支 →
-   OCR 失败 → 暂无数据。日志应有 `卡片 2 张` 而非 `确认态` —— **明天先看日志确认**
-2. identifyConfirmedChampion 的槽位仍不准确
-   (TOP_BAR_SLOT y=0.0185 需实测复核;PLAYER_BAR_SLOT 0.3741 同)
+| # | 根因 | 修复 |
+|---|---|---|
+| 1 | 提取头像时内缩 0.15（为卡片立绘设计的参数）把方头像得分从 0.93 压到 0.79,永远过不了 0.85 | 方头像用**整个槽位盒**提取（inset=0）,得分 0.93+ |
+| 2 | `matchChampionCareful` 的 minMargin=0.10 会误杀真机数据（肯恩 vs 炼金 margin=0.094） | 顶栏用独立阈值 0.80/0.05（`detectTopBarCandidates`） |
+| 3 | 旧槽位几何偏差 ~20px 且只处理第 1 格 | 实测校准 10 格几何（见 confirmed.ts TOP_BAR_ROW）,逐格处理 |
 
-**修复方向（明天）**:
-- 若日志是 `确认态: top-bar-1 score=...` 但标签画错位置 → 纯坐标问题
-- 若日志是 `卡片 2 张` → 确认态下 detectCards 误检 → 需要在
-  detectCards 加"皮肤轮播区"拒绝条件,或确认态先于卡片检测
-  （检查顶部栏第 1 格是否有头像 → 有则直接走确认分支）
+另修:`data/templates.json` 里的 **60000+ 变体 ID**（CDragon 静态占位,
+如 60038 = 虚空行者的变体,与真英雄同名同图）会让匹配命中后 join 不到
+数据 → 主进程与 debug 工具加载模板时已排除（championId < 60000）。
 
-### 验收环境备忘
-- 用户显示器: 2400×1350 逻辑? 实际日志 `显示器2294x960@1.5`,
-  截屏 3413×1920, 窗口 1600×900(逻辑,GetWindowRect 直出,勿除 scaleFactor)
-- snapshotKind 判定=window;vision-loop 每轮打印
-  `[hexbox:vision] 截屏...判定=...scale=...`
-- 诊断日志: `[overlay:renderer]` 转发渲染端 console/preload-error/did-fail-load
+### 关键实测数据（2026-09-28,勿凭印象改）
+
+- **槽位几何**（2400×1350 逻辑坐标）:第 1 格左缘 x=659,顶 y=19,
+  格盒 93×94,步进 110,共 10 格。归一化后与分辨率无关 ——
+  两张不同分辨率真机截图（3413×1920 / 2400×1344）的竖线归一化中心
+  完全一致（x0=0.2746, step=0.0458）。
+- **占用检测**:12% 内缩 16×16 灰度的标准差 —— 占用格 60+,空格 <9;
+  阈值取 0.18×255≈46。
+- **快照形态**:本机显示器 2294×960@1.5（宽高比 2.39）,两态截图
+  都判为 **window 形态**;`windowRectToCapture` 在 display 形态下的
+  平移缩放由单测覆盖。
+
+### 新增代码地图
+
+| 文件 | 内容 |
+|---|---|
+| `vision/confirmed.ts` | 重写:TOP_BAR_ROW 几何 / isSlotOccupied / detectTopBarCandidates / diagnoseTopBarSlots（旧单格接口标 @deprecated 保留） |
+| `vision/win-geometry.ts` | 增 `windowRectToCapture`（窗口归一化→截屏归一化,window 形态恒等） |
+| `vision/card-overlay.ts` | 增 `slotLabelFor`（槽位下方紧凑标签,最小宽 56,不翻转） |
+| `overlay/main/vision-loop.ts` | 确认态分支:逐格识别 → 每格一个 slotLabelFor 标签;全失败时降级提示（diag 可见） |
+| `overlay/main/index.ts` | 模板加载排除 60000+ 变体 ID |
+| `overlay/debug-capture.ts` | result.json 增 topBar 逐格诊断;标注图画出 10 个槽位框 |
+| `overlay/renderer/overlay-canvas.ts` | 紧凑标签渲染（高 <30 单行:胜率+英雄名截断） |
+
+### 验收环境备忘（沿袭 09-27）
+- 显示器 2294×960@1.5,截屏 3413×1920,窗口 1600×900(逻辑,GetWindowRect 直出)
+- 诊断日志: `[hexbox:vision]` 每轮打印判定形态;确认态 diag 打印每格 `英雄=分数`
 - 覆盖层自测: `$env:OVERLAY_TEST_VISIBLE='1'; pnpm --filter @hexbox/overlay debug:overlay-test`
-  （本机 4 标签渲染正确）
 
-### 本轮已提交（git log 摘要）
-- 56de21c 渲染端路径错误回滚 + 诊断转发（preload 路径是真凶）
-- 12fb126 失败容忍(FAIL_TOLERANCE=4)
-- ba10326 GetWindowRect 逻辑坐标口径修正(勿除 scaleFactor)
-- 6ecb163 window/display 分支分离(标签超宽根因)
-- 21d322c/debug-overlay-test.ts 可见模式自测
-- 2e6abcb debug:overlay-test npm script
+### 测试与文档状态
+- vision 112 项（新增 confirmed 10 项 + geometry/card-overlay 各 3 项）,全仓 260 项全绿
+- `docs/SCREENSHOT-DEV.md` §3.3 已更新为两阶段新语义
 
-### S2 验收清单（docs/SCREENSHOT-DEV.md §六）
-1. ✅ 分辨率/窗口变化自适应
-2. ✅ 识别不确定时不绘制(暂无数据/未识别标签是灰色的,不猜数字)
-3. ⏳ 覆盖层不影响操作(用户未报告异常,待确认)
-4. ✅ 纯函数单测(vision 96 项)+ 标注图人工核对
-5. ✅ 三闸门全绿
+### 下一步（真机验收清单）
+1. 进入选人,悬停 2~3 张卡片 → 覆盖层每张卡片下方显示胜率（原有功能,应不回归）
+2. 锁定英雄 → 顶栏每个备选头像下方显示胜率标签;**核对标签与头像对齐**
+3. 对局内/其它界面 → 覆盖层清空,不残留
+4. 若标签错位:跑 `pnpm --filter @hexbox/overlay debug:capture`,看 result.json
+   的 topBar 逐格诊断 + annotated.png 的槽位框（紫=占用,灰=空）
 
 ### S2 剩余 + S3/S4
-- S2 收尾: 确认态修复(上文)
 - S3: 召唤师技能推荐(需先调研数据源,勿假设)
 - S4: 移除侧边悬浮窗(当前保留用于对照)

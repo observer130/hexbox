@@ -21,6 +21,8 @@ import {
   toCapturePixels,
   toNormalized,
 } from './geometry.ts';
+import { windowRectToCapture } from './win-geometry.ts';
+import type { Rect } from './types.ts';
 
 /** 实测环境：全屏窗口。 */
 const REAL = makeGeometry(4587, 1920, { x: 0, y: 0, width: 2294, height: 960 });
@@ -130,4 +132,35 @@ test('makeGeometry：完整保留窗口信息', () => {
   assert.equal(g.windowY, 2);
   assert.equal(g.windowWidth, 3);
   assert.equal(g.windowHeight, 4);
+});
+
+test('windowRectToCapture：window 形态恒等', () => {
+  // window 快照形态（winShare ≥ 0.9）:窗口归一化 = 截屏归一化
+  const capture = { width: 1600, height: 900 };
+  const windowRect = { x: 0, y: 0, width: 1600, height: 900 };
+  const display = { bounds: { x: 0, y: 0, width: 1600, height: 900 }, scaleFactor: 1 };
+  const r: Rect = { x: 0.25, y: 0.1, w: 0.05, h: 0.08 };
+  assert.deepEqual(windowRectToCapture(r, capture, windowRect, display), r);
+});
+
+test('windowRectToCapture：display 形态平移缩放（真机口径）', () => {
+  // 真机:截屏 3413×1920 ≈ 显示器逻辑 2400×1350 的等比缩放,
+  // 窗口逻辑 1600×900 @ (313,1)（GetWindowRect 直出）。
+  // 窗口在截屏里的归一化范围: nx0=313/2400≈0.1304, nw=1600/2400≈0.6667。
+  // 窗口内 0.5 → 截屏 0.1304 + 0.5×0.6667 ≈ 0.4638。
+  const capture = { width: 3413, height: 1920 };
+  const windowRect = { x: 313, y: 1, width: 1600, height: 900 };
+  const display = { bounds: { x: 0, y: 0, width: 2400, height: 1350 }, scaleFactor: 1.5 };
+  const r: Rect = { x: 0.5, y: 0.5, w: 0.1, h: 0.1 };
+  const out = windowRectToCapture(r, capture, windowRect, display);
+  assert.ok(Math.abs(out.x - (313 / 2400 + 0.5 * (1600 / 2400))) < 1e-9, `out.x=${out.x}`);
+  assert.ok(Math.abs(out.w - 0.1 * (1600 / 2400)) < 1e-9);
+  assert.ok(Math.abs(out.y - (1 / 1350 + 0.5 * (900 / 1350))) < 1e-9);
+});
+
+test('windowRectToCapture：无窗口矩形时恒等（兜底口径）', () => {
+  const capture = { width: 3413, height: 1920 };
+  const display = { bounds: { x: 0, y: 0, width: 2400, height: 1350 }, scaleFactor: 1.5 };
+  const r: Rect = { x: 0.3, y: 0.2, w: 0.04, h: 0.07 };
+  assert.deepEqual(windowRectToCapture(r, capture, null, display), r);
 });

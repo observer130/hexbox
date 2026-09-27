@@ -102,23 +102,32 @@ function draw(msg: VisionMsg): void {
     roundRect(ctx, l.x, l.y, l.w, l.h, 6);
     ctx.stroke();
 
-    // 胜率（大字）
-    ctx.fillStyle = accent;
-    ctx.font = `700 ${Math.round(l.h * 0.52)}px "Microsoft YaHei", sans-serif`;
-    ctx.textBaseline = 'middle';
-    ctx.fillText(l.text, l.x + 10, l.y + l.h * 0.46);
+    // 紧凑标签（顶栏槽位,高 ~26）单行:胜率 + 英雄名;
+    // 常规标签（卡片下方,高 ≥ 34）另带「101 官方统计」脚注
+    const compact = l.h < 30;
 
-    // 英雄名（小字,右上）
+    // 胜率（大字,单行垂直居中）
+    ctx.fillStyle = accent;
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.font = `700 ${Math.round(l.h * (compact ? 0.6 : 0.52))}px "Microsoft YaHei", sans-serif`;
+    ctx.fillText(l.text, l.x + 8, l.y + l.h * 0.5);
+
+    // 英雄名（右侧,超宽截断 —— 槽位标签只有 ~56-90px 宽）
     ctx.fillStyle = '#c8a84e';
-    ctx.font = `600 ${Math.round(l.h * 0.3)}px "Microsoft YaHei", sans-serif`;
+    ctx.font = `600 ${Math.round(l.h * (compact ? 0.4 : 0.3))}px "Microsoft YaHei", sans-serif`;
     ctx.textAlign = 'right';
-    ctx.fillText(l.sub, l.x + l.w - 10, l.y + l.h * 0.42);
+    const nameRight = l.x + l.w - 8;
+    const nameMaxW = l.w - 16 - (compact ? ctx.measureText(l.text).width + 10 : 0);
+    ctx.fillText(l.sub, nameRight, l.y + l.h * 0.5, Math.max(24, nameMaxW));
     ctx.textAlign = 'left';
 
-    // 脚注:数据出处
-    ctx.fillStyle = 'rgba(139, 150, 173, 0.75)';
-    ctx.font = `400 ${Math.round(l.h * 0.2)}px "Microsoft YaHei", sans-serif`;
-    ctx.fillText('101 官方统计', l.x + 10, l.y + l.h * 0.82);
+    if (!compact) {
+      // 脚注:数据出处
+      ctx.fillStyle = 'rgba(139, 150, 173, 0.75)';
+      ctx.font = `400 ${Math.round(l.h * 0.2)}px "Microsoft YaHei", sans-serif`;
+      ctx.fillText('101 官方统计', l.x + 10, l.y + l.h * 0.82);
+    }
   }
 }
 
