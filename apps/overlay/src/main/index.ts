@@ -17,8 +17,53 @@
  */
 
 import { app, BrowserWindow, ipcMain, screen } from 'electron';
-import { existsSync } from 'node:fs';
+import { appendFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { inspect } from 'node:util';
+
+/**
+ * 把 console 输出同时写入日志文件（UTF-8），供真机排查。
+ *
+ * ⚠️ 为什么不用 PowerShell 的 `*>` 重定向（真实浪费时间的事故）：
+ * 本机 PowerShell 5.1 会按控制台 OEM 代码页（GBK/936）解码 node 的 UTF-8
+ * 输出，中文全变成"鎴睆/鎺ㄩ€"这类乱码，写盘时再转一次 UTF-16 —— 读日志
+ * 得反解两层编码。而且脚本本身若丢了 UTF-8 BOM，PowerShell 连脚本都
+ * **解析失败**（中文字符串被拆坏）。
+ *
+ * 这里由 Node 直接以 UTF-8 写文件：编码完全可控，与 PowerShell 无关。
+ * 未设置 `HEXBOX_LOG_FILE` 时不写文件（默认行为不变）。
+ */
+function teeConsoleToFile(path: string): void {
+  const orig = {
+    log: console.log.bind(console),
+    warn: console.warn.bind(console),
+    error: console.error.bind(console),
+  };
+  const fmt = (args: unknown[]): string =>
+    args.map((a) => (typeof a === 'string' ? a : inspect(a))).join(' ');
+  const write = (line: string): void => {
+    try {
+      appendFileSync(path, line + '\n', 'utf8');
+    } catch {
+      // 日志写入失败绝不影响功能
+    }
+  };
+  console.log = (...a: unknown[]): void => {
+    write(fmt(a));
+    orig.log(...a);
+  };
+  console.warn = (...a: unknown[]): void => {
+    write(fmt(a));
+    orig.warn(...a);
+  };
+  console.error = (...a: unknown[]): void => {
+    write(fmt(a));
+    orig.error(...a);
+  };
+}
+
+const logFile = process.env['HEXBOX_LOG_FILE'];
+if (logFile) teeConsoleToFile(logFile);
 
 import {
   LcuClient,
