@@ -8,7 +8,97 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { captureScale, makeScreenGeometry, snapshotKind, isPlausibleGameWindow } from './win-geometry.ts';
+import {
+  captureScale,
+  makeScreenGeometry,
+  snapshotKind,
+  isPlausibleGameWindow,
+  createWindowRectCache,
+  type PhysicalRect,
+} from './win-geometry.ts';
+
+/* ------------------------------------------------------------------ */
+/* 窗口矩形缓存（性能：单次探测 ~1.2s，不能每轮都探）                    */
+/* ------------------------------------------------------------------ */
+
+/** 构造一个可计数的假探测函数。 */
+function countingProbe(results: Array<PhysicalRect | null>): {
+  probe: () => Promise<PhysicalRect | null>;
+  calls: () => number;
+} {
+  let n = 0;
+  return {
+    probe: async () => {
+      const r = results[Math.min(n, results.length - 1)] ?? null;
+      n++;
+      return r;
+    },
+    calls: () => n,
+  };
+}
+
+test('窗口缓存：TTL 内复用结果，不重复探测', async () => {
+  const { probe, calls } = countingProbe([{ x: 1, y: 2, width: 1920, height: 1080 }]);
+  const cached = createWindowRectCache(probe);
+  const a = await cached();
+  const b = await cached();
+  assert.deepEqual(a, b);
+  assert.equal(calls(), 1, 'TTL 内应只探测一次');
+});
+
+test('窗口缓存：force 强制重新探测（截屏失败后的调用方行为）', async () => {
+  const { probe, calls } = countingProbe([
+    { x: 1, y: 2, width: 1920, height: 1080 },
+    { x: 9, y: 9, width: 1920, height: 1080 },
+  ]);
+  const cached = createWindowRectCache(probe);
+  await cached();
+  const forced = await cached({ force: true });
+  assert.equal(forced?.x, 9);
+  assert.equal(calls(), 2);
+});
+
+test('窗口缓存：**不缓存 null** —— 游戏可能下一秒就起来', async () => {
+  const { probe, calls } = countingProbe([null, { x: 0, y: 0, width: 1920, height: 1080 }]);
+  const cached = createWindowRectCache(probe);
+  assert.equal(await cached(), null);
+  // 第二次必须重新探测，否则游戏刚启动就会被永久判定为"没有窗口"
+  assert.deepEqual(await cached(), { x: 0, y: 0, width: 1920, height: 1080 });
+  assert.equal(calls(), 2);
+});
+
+test('窗口缓存：TTL 过期后重新探测', async () => {
+  const { probe, calls } = countingProbe([
+    { x: 1, y: 1, width: 1920, height: 1080 },
+    { x: 2, y: 2, width: 1920, height: 1080 },
+  ]);
+  const cached = createWindowRectCache(probe);
+  await cached({ ttlMs: 0 }); // TTL 0 = 立即过期（等价于每轮都探）
+  await cached({ ttlMs: 0 });
+  assert.equal(calls(), 2);
+});
+
+test('窗口缓存：并发调用合流为一个探测（不重复起 PowerShell）', async () => {
+  let n = 0;
+  const probe = async (): Promise<PhysicalRect | null> => {
+    n++;
+    await new Promise((r) => setTimeout(r, 20));
+    return { x: 0, y: 0, width: 1920, height: 1080 };
+  };
+  const cached = createWindowRectCache(probe);
+  const all = await Promise.all([cached(), cached(), cached()]);
+  assert.equal(n, 1, '三个并发调用应只起一个探测');
+  assert.ok(all.every((r) => r?.width === 1920));
+});
+
+test('窗口缓存：每次 createWindowRectCache 都是独立状态（不互相污染）', async () => {
+  const a = countingProbe([{ x: 1, y: 1, width: 1920, height: 1080 }]);
+  const b = countingProbe([{ x: 2, y: 2, width: 1920, height: 1080 }]);
+  const ca = createWindowRectCache(a.probe);
+  const cb = createWindowRectCache(b.probe);
+  assert.equal((await ca())?.x, 1);
+  assert.equal((await cb())?.x, 2);
+});
 
 /* ------------------------------------------------------------------ */
 /* 游戏窗口可信性判据（真机幽灵窗口回归）                               */

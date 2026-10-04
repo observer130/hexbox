@@ -33,6 +33,7 @@ import {
   decideVisible,
   denormalizeToGray,
   findGameWindowRect,
+  findGameWindowRectCached,
   prepareTemplates,
   sameVisibleState,
   type NameFingerprint,
@@ -180,7 +181,9 @@ function computeOverlayBounds(game: Rectangle | null, display: Rectangle): Recta
 
 async function positionOverlay(): Promise<void> {
   if (!win || !win.isVisible()) return;
-  const game = await findGameWindowRect();
+  // 走缓存：本函数由 3 秒定时器与 display-metrics-changed 触发，
+  // 而单次探测要 ~1.2s（PowerShell + Add-Type）——不能每次都探。
+  const game = await findGameWindowRectCached();
   const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
   win.setBounds(computeOverlayBounds(game, display.workArea));
 }

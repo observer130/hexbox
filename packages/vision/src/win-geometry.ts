@@ -87,10 +87,73 @@ export function isPlausibleGameWindow(check: GameWindowCheck): boolean {
 }
 
 /**
+ * 缓存版游戏窗口矩形查询。
+ *
+ * 为什么必须缓存：本机实测单次 `findGameWindowRect()` 的构成为
+ *   PowerShell 启动 610ms + `Add-Type` C# 编译 450ms + 进程枚举 156ms
+ *   ≈ **1.2~1.3 秒**
+ * 而它每轮识别都要用一次（1.5s 一轮）—— 探测比被测量的工作本身贵得多，
+ * 于是「找不到窗口」时耗时从 ~200ms 涨到 ~1.5s。窗口矩形在几秒内
+ * 不可能变化，因此按 TTL 复用；只有拿到 null（可能游戏刚启动）或
+ * 调用方显式要求刷新时才重新探测。
+ */
+export interface CachedWindowRect {
+  /**
+   * @param options.ttlMs 缓存有效期（默认 10s）
+   * @param options.force 强制重新探测（截屏失败后调用方应传 true）
+   */
+  (options?: { readonly ttlMs?: number; readonly force?: boolean }): Promise<PhysicalRect | null>;
+}
+
+/** 默认缓存 10 秒：一次探测 1.2s，摊薄到 6~7 次调用。 */
+export const WINDOW_RECT_TTL_MS = 10_000;
+
+/**
+ * 创建一个带缓存的窗口矩形查询器（**不是全局单例**，便于测试与多显示器场景）。
+ *
+ * 只缓存**成功**结果：null 意味着「当前没有游戏窗口」，
+ * 而游戏可能下一秒就起来，不能把 null 缓存住。
+ *
+ * @param probe 实际探测函数，默认 `findGameWindowRect`（测试注入用）
+ */
+export function createWindowRectCache(
+  probe: () => Promise<PhysicalRect | null> = findGameWindowRect,
+): CachedWindowRect {
+  let cached: PhysicalRect | null = null;
+  let at = 0;
+  let inflight: Promise<PhysicalRect | null> | null = null;
+
+  return async (options = {}) => {
+    const ttl = options.ttlMs ?? WINDOW_RECT_TTL_MS;
+    const now = Date.now();
+    if (!options.force && cached && now - at < ttl) return cached;
+    // 并发合流：同一时刻的多个调用只起一个 PowerShell 进程
+    if (!options.force && inflight) return inflight;
+
+    const p = probe();
+    inflight = p;
+    try {
+      const r = await p;
+      cached = r;
+      at = Date.now();
+      return r;
+    } finally {
+      if (inflight === p) inflight = null;
+    }
+  };
+}
+
+/** 进程内共享的默认缓存（悬浮窗主进程用）。 */
+export const findGameWindowRectCached: CachedWindowRect = createWindowRectCache();
+
+/**
  * 查询游戏客户端主窗口矩形（物理像素）。
  *
  * 返回 null 表示没有**可信的**游戏窗口（见 `isPlausibleGameWindow`）。
  * （LeagueClientUx 是客户端 UI；游戏本身是 "League of Legends"。）
+ *
+ * ⚠️ 单次调用约 1.2 秒（PowerShell + Add-Type）。常规轮询请用
+ * `findGameWindowRectCached`，只有确实需要最新值时才直接调它。
  */
 export async function findGameWindowRect(): Promise<PhysicalRect | null> {
   const windir = process.env['windir'] ?? 'C:\\Windows';

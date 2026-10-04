@@ -22,6 +22,7 @@ import {
   extractGrayRaw,
   extractNameStrip,
   findGameWindowRect,
+  findGameWindowRectCached,
   makeScreenGeometry,
   matchName,
   createLabelMemory,
@@ -83,8 +84,12 @@ function resolveDeps<T>(v: T | (() => T)): T {
  * 单轮截屏（供 vision-loop 与 debug 工具复用）。
  *
  * 同时返回窗口物理矩形 —— 它和截屏必须来自**同一次**探测：
- * `findGameWindowRect()` 会起一个 PowerShell 进程（约 200ms），
- * 调用方再查第二次就是纯粹的双倍开销（每 1.5s 一轮，真实存在过）。
+ * `findGameWindowRect()` 会起一个 PowerShell 进程（本机实测约 **1.2 秒**：
+ * 启动 610ms + `Add-Type` 编译 450ms + 进程枚举 156ms），调用方再查第二次
+ * 就是纯粹的双倍开销（每 1.5s 一轮，真实存在过）。
+ *
+ * 因此这里走 `findGameWindowRectCached`（TTL 10s）：窗口矩形在几秒内
+ * 不会变，把 1.2s 的探测摊薄到 6~7 轮一次。
  */
 async function captureGameBitmap(): Promise<{
   bmp: Bitmap;
@@ -93,7 +98,7 @@ async function captureGameBitmap(): Promise<{
 } | null> {
   // 先找游戏窗口所在显示器 —— 游戏可能不在主显示器
   // （多显示器 + 不同 DPI 时,主显示器的 scaleFactor/尺寸全是错的）
-  const windowPhysical = await findGameWindowRect();
+  const windowPhysical = await findGameWindowRectCached();
   const display = windowPhysical
     ? screen.getDisplayNearestPoint({ x: windowPhysical.x + 10, y: windowPhysical.y + 10 })
     : screen.getPrimaryDisplay();
