@@ -54,6 +54,7 @@ pnpm dev:overlay
 | 阶段 | 显示内容 |
 |---|---|
 | 英雄选择 | 所选英雄的**海斗胜率** |
+| 英雄选择（截屏覆盖层） | 每张英雄卡片下方 / 确认态顶栏每个备选头像下方显示胜率 |
 | 对局中 | 该英雄口径的**海克斯强度 S/A/B/C + 登场率** |
 | 对局中 | **出装建议**（出门装 / 优先成装 / 其余成装，含胜率） |
 
@@ -61,8 +62,11 @@ pnpm dev:overlay
 `queueId === 2300`）、我方已选英雄、数据出处与统计日期。
 
 全部数据由 `pnpm sync` 预抓到 `data/`，悬浮窗**只读本地、离线可用**。
+截屏覆盖层另需一次 `pnpm templates` 生成头像/名字模板包（`data/templates.json`），
+运行时同样只读本地。
 
-详见 [apps/overlay/README.md](apps/overlay/README.md)。
+详见 [apps/overlay/README.md](apps/overlay/README.md) 与
+[docs/SCREENSHOT-DEV.md](docs/SCREENSHOT-DEV.md)。
 
 ### 配装方案写入（packages/lcu）
 
@@ -103,8 +107,8 @@ node --experimental-strip-types packages/lcu/src/cli.ts --install-dir <安装目
 ## 常用命令
 
 ```bash
-pnpm typecheck   # 全量类型检查
-pnpm test        # 全量测试（142 项）
+pnpm typecheck   # 全量类型检查（11 个 workspace 项目）
+pnpm test        # 全量测试（274 项）
 pnpm build       # 构建所有包
 ```
 
@@ -114,16 +118,18 @@ pnpm build       # 构建所有包
 packages/
   core/                       领域模型 + Provider 接口 + 纯视图模型
                               （overlay-view 分阶段 / itemset 配装方案）
+  vision/                     截屏识别（几何/定位/头像与名字匹配/PNG/模板包
+                              /确认态顶栏逐格识别/标签记忆/可见性判定），纯函数
   provider-communitydragon/   国际服静态数据源
   provider-tencent/           国服一方数据源（图鉴 + 榜单 + 单英雄详情）
   provider-registry/          注册表（启用中的数据源集中登记）
   data-store/                 本地缓存（原子写，支持离线读取）
-  data-cli/                   sync / status CLI
+  data-cli/                   sync / status / templates CLI
   lcu/                        LCU 探测 + REST 客户端 + 配装方案写入
 apps/
   web/                        数据查询站（Vue 3 + Vite）
-  overlay/                    悬浮窗（Electron）
-data/                         sync 产物（gitignored）
+  overlay/                    悬浮窗 + S2 截屏覆盖层（Electron）
+data/                         sync / templates 产物（gitignored）
 ```
 
 数据流：
@@ -133,6 +139,7 @@ CommunityDragon ─┐
 腾讯一方图鉴     ─┼─ pnpm sync ─→ data/dataset.json    ─┐
 腾讯 101 榜单    ─┤              data/rankings.json   ─┼─→ 数据站 / 悬浮窗
 腾讯 101 英雄详情 ┘              data/builds.json     ─┘
+CDragon 头像/名字 ── pnpm templates ─→ data/templates.json ─→ 截屏覆盖层识别
 ```
 
 ## 文档索引
@@ -143,7 +150,8 @@ CommunityDragon ─┐
 | [docs/ROADMAP.md](docs/ROADMAP.md) | 现状盘点与后续路线 |
 | [docs/OVERLAY-STAGES.md](docs/OVERLAY-STAGES.md) | 悬浮窗分阶段设计的调研依据 |
 | [docs/build-slots.md](docs/build-slots.md) | 出装槽位与上游字段的对照（已核实） |
-| [docs/SCREENSHOT-DEV.md](docs/SCREENSHOT-DEV.md) | 截屏覆盖层开发文档（设计中） |
+| [docs/SCREENSHOT-DEV.md](docs/SCREENSHOT-DEV.md) | 截屏覆盖层的技术事实与实现状态 |
+| [docs/SESSION-NOTES.md](docs/SESSION-NOTES.md) | 最近一轮会话的交接备忘（真机验收 bug 记录） |
 
 ## 法律声明
 

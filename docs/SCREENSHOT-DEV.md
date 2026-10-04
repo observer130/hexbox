@@ -3,6 +3,10 @@
 > 目标：在游戏画面内**直接**绘制数据（英雄卡片下方显示胜率），
 > 替代侧边的独立悬浮窗。
 >
+> **实现状态（2026-09-28）**：S1 与 S2 均已实现并离线全绿，
+> **待真机复验**（见 §四 与 [SESSION-NOTES.md](SESSION-NOTES.md)）。
+> 本文记录技术事实与踩过的坑；最近一轮的验收 bug 记录在 SESSION-NOTES。
+>
 > 合规：截屏只读取屏幕像素，**不注入、不读内存、不解析封包**。
 > 见 [AGENTS.md](../AGENTS.md) —— 这是明确许可的做法。
 
@@ -52,22 +56,30 @@
 | `geometry.ts` | 坐标换算（截屏↔屏幕）、矩形运算 | ✅ |
 | `grid.ts` | 从截屏推断卡片网格布局 | ✅（输入像素，输出矩形）|
 | `match.ts` | 头像模板匹配打分 | ✅ |
+| `ocr.ts` | 名字区二值化 + 指纹匹配（两阶段识别的阶段 1）| ✅ |
 | `png.ts` | 零依赖 PNG 解码（模板构建期用） | ✅ |
 | `templates.ts` | 模板包编解码（构建期生成 / 运行时只读） | ✅ |
 | `win-geometry.ts` | 游戏窗口物理矩形（PowerShell，Electron 之外也可用） | ⚠️ 需真实 Windows |
+| `card-overlay.ts` | 标签布局（卡片下方 / 顶栏槽位下方 → 屏幕坐标）| ✅ |
+| `confirmed.ts` | 确认态**顶栏逐格**识别（占用检测 + 16/24 灰度 NCC）| ✅ |
+| `label-memory.ts` | 按位置记忆标签，TTL 内补齐单轮漏检 | ✅（闭包状态）|
+| `visibility.ts` | 侧边窗/覆盖层/视觉循环何时该活跃 | ✅ |
 | `types.ts` | `Rect` / `CardSlot` / `MatchResult` | — |
 
 `apps/overlay` 增加：
 
-| 文件 | 职责 |
-|---|---|
-| `src/debug-capture.ts` | 调试 CLI：截屏 → 定位 → 识别 → 标注图（S1.4）|
-| `src/main/vision-loop.ts` | 定时截屏 → 调 vision → 推送结果（S2，未开始）|
-| `src/renderer/overlay-canvas.ts` | 按坐标把文本画到对应位置（S2，未开始）|
+| 文件 | 职责 | 状态 |
+|---|---|---|
+| `src/debug-capture.ts` | 调试 CLI：截屏 → 定位 → 识别 → 标注图 | ✅ 已实现 |
+| `src/main/vision-loop.ts` | 定时截屏 → 调 vision → 推送结果 | ✅ 已实现 |
+| `src/renderer/overlay-canvas.ts` | 按坐标把标签画到对应位置（DPR 感知） | ✅ 已实现 |
+| `src/debug-overlay-test.ts` | 覆盖层渲染自测（不需要游戏/选人）| ✅ 已实现 |
 
 > **为什么放 core/vision 而不是主进程**：主进程需要 Electron + 真实桌面，
 > CI 跑不起来。只有纯函数才能被测试覆盖 —— 这是本项目一贯的做法
-> （见 `core/src/overlay-view.ts` 的先例）。
+> （见 `core/src/overlay-view.ts` 的先例）。`visibility.ts` 就是照此从
+> 主进程抽出来的：此前「窗口该不该显示」的判断写在 `pollOnce` 里，
+> 只在 `phase` 变化时生效，于是**中途掉线的诊断面板永远不出现**。
 
 ## 二点五、模板包管线（已实现）
 
@@ -194,22 +206,33 @@ S1 期间的实现要点（都来自真实教训）：
 - **窗口矩形统一**：`findGameWindowRect` 抽到 `vision/win-geometry.ts`，
   悬浮窗主进程与调试工具共用，避免两份实现漂移。
 
-**下一步（需要你）**：在选人阶段运行
+**真机迭代回路（需要你）**：在选人阶段运行
 
 ```bash
 pnpm --filter @hexbox/overlay debug:capture
 ```
 
-把 `debug/annotated.png` 发回，根据标注图迭代 `grid.ts` / `match.ts` 的阈值，
-稳定后再做 S2 覆盖层绘制。
+把 `debug/annotated.png` 发回，根据标注图迭代 `grid.ts` / `ocr.ts` 的阈值。
+（S1 的定位与识别已经真机校准过两轮，见 §3.2 / §3.3。）
 
-### S2 — 选人阶段覆盖层（未开始）
+### S2 — 选人阶段覆盖层（✅ 已实现，待真机复验）
 
-| 步骤 | 说明 |
-|---|---|
-| S2.1 | 全屏透明窗口，按检测坐标绘制 |
-| S2.2 | 显示该英雄海斗胜率（来自 `rankings.json`）|
-| S2.3 | 未识别/无数据时**不绘制**任何东西 |
+| 步骤 | 说明 | 状态 |
+|---|---|---|
+| S2.1 | 全屏透明窗口，按检测坐标绘制（DPR 感知，多显示器跟随）| ✅ |
+| S2.2 | 卡片态：卡片下方显示该英雄海斗胜率（名字 OCR → `rankings.json` join）| ✅ |
+| S2.3 | 确认态：顶栏「可用」栏**逐格**显示备选英雄胜率 | ✅ |
+| S2.4 | 未识别/无数据时**不绘制**（宁可漏不可错）| ✅ |
+| S2.5 | 单轮漏检不清空标签（`label-memory` TTL 6 轮 ≈ 9s）| ✅ |
+| S2.6 | 真机复验 3 个验收 bug 的修复效果 | ⏳ **待你复验** |
+
+复验清单见 [SESSION-NOTES.md](SESSION-NOTES.md)（发虚 / 暗头像漏检 / 第三张标签闪失）。
+覆盖层渲染本身可离线自测（不需要游戏）：
+
+```bash
+pnpm --filter @hexbox/overlay debug:overlay-test
+# 真实显示 12 秒肉眼看：加 OVERLAY_TEST_VISIBLE=1
+```
 
 ### S3 — 召唤师技能
 
@@ -230,7 +253,7 @@ pnpm --filter @hexbox/overlay debug:capture
 | 分辨率 / UI 缩放变化 | 定位失效 | 归一化坐标 + 比例定位，不硬编码 |
 | 游戏 UI 改版 | 定位失效 | 检测失败即**静默不绘制**，绝不错标 |
 | 全屏覆盖层挡操作 | 影响游戏 | `focusable:false` + 鼠标穿透（已验证）|
-| 截屏性能 | 掉帧 | 仅选人阶段截屏，约 1s 一次 |
+| 截屏性能 | 掉帧 | 仅选人阶段截屏，**1.5s** 一次（一轮约 200ms）|
 | 头像匹配误判 | 显示错误胜率 | 阈值 + 多候选校验，宁可漏不可错 |
 | 游戏更新导致布局变化 | 需重新适配 | 提供调试命令输出标注图，便于快速定位 |
 

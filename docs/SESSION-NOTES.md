@@ -1,11 +1,27 @@
-# P2-S2 会话交接备忘（2026-09-28 第二轮收工）
+# P2-S2 会话交接备忘（2026-09-28 第三轮收工）
 
 > 用途：下次会话直接续上,不重复排查。状态以本文为准。
-> 上一轮修复了「确认态无显示」;本轮修复真机验收反馈的 3 个 bug。
+> 第二轮修复了「确认态无显示」与 3 个真机验收 bug；
+> 第三轮（本轮）修了 6 项代码/文档缺陷，见下。
 
-## 当前状态：S2 功能可用,3 个验收 bug 已修（离线验证,待真机复验）
+## 当前状态：全仓 274 项测试 + typecheck 全绿；S2 待真机复验
 
-### 真机验收 bug 修复记录（2026-09-28,截图 debug/acceptance-1.png）
+### 第三轮修复（2026-09-28，代码审查发现的 6 项）
+
+| # | 缺陷 | 根因 | 修复 |
+|---|---|---|---|
+| 1 | 配装方案「其余成装」少一半且混入出门装 | `itemset.ts` 写成 `slice(1, 11)`，而 `itemone_json` 实测 **20 条**：多出第 1 名（266 的 71.19%，那是「出门装」）、丢掉第 11~20 名（2.5%~7.5%，正是官方该栏最高的几件）| 改为「全部 20 条去掉第 1 名」+ 单件去重；补 2 个回归用例（真实 20 条形制）|
+| 2 | 「成型六件套」是恒空死链路 | `parseChampionBuild` 早已硬编码 `full: []`（`itemover_rec` 停用），但类型/视图/推送/渲染/测试仍带该槽位，`overlay-view.test.ts` 还在断言一个生产环境不可能出现的六件场景 | 从 `ChampionBuild` 类型起**整条删除**（types / overlay-view / main / renderer / itemset-cli / 测试），并删掉已成死代码的 `parseItemOverRec` |
+| 3 | 连不上客户端时诊断面板只在冷启动出现一次 | 窗口可见性只在 `phase !== lastPhase` 时更新 —— **掉线时 phase 没变**，于是不会再应用 | 新增纯函数 `vision/visibility.ts`（`decideVisible` / `sameVisibleState`）+ 8 项单测；主进程改比较「已应用的可见性状态」而非 phase |
+| 4 | 每轮识别多起一个 PowerShell 进程 | `runVisionRound` 调 `findGameWindowRect()`，`captureGameBitmap()` 内部又调一次 | 截屏函数一并返回窗口矩形，调用方不再重复探测 |
+| 5 | 文档计数过期 | README/AGENTS/ROADMAP 仍写 142 项测试 / 9 个项目（实际 274 / 11）| 全部同步；两处文档互相矛盾的状态也已统一 |
+| 6 | SCREENSHOT-DEV 与 SESSION-NOTES 状态矛盾 | SCREENSHOT-DEV 仍写「S2 未开始」，且模块表缺 `ocr/confirmed/label-memory/card-overlay` | 更新为「S2 已实现待复验」，补齐模块与调试命令 |
+
+> ⚠️ **第 1 项的教训**：那个 bug 之所以没被测试发现，是因为单测喂的 `start`
+> 是**人造的 20 条**，而当时的实现恰好也能过。回归用例现在断言
+> 「除第 1 名外 19 条一条不少、且不含第 1 名」，并注明真实条数来自实测。
+
+### 真机验收 bug 修复记录（2026-09-28,第二轮；截图 debug/acceptance-1.png）
 
 | # | 现象 | 根因 | 修复 |
 |---|---|---|---|
@@ -24,14 +40,18 @@
   或后续把标签宽度加到 ≥90 再放回。
 
 ### 测试与文档状态
-- vision 112→118（label-memory 6 项）,全仓 266 项全绿
-- 上一轮记录见 git log 59fcbf8 的提交说明与本文旧版
+- 第三轮后：vision 118→126（visibility 8 项）,core 42→43（其余成装回归）,
+  provider-tencent 39→38（删掉 `parseItemOverRec` 的死测试）,
+  全仓 **274 项**全绿;typecheck 11 个项目全绿
+- 第二轮记录见 git log 59fcbf8 / 612495b 的提交说明与本文旧版
 
 ### 下一步（真机复验清单）
 1. 悬停 2~3 张卡片 → 胜率清晰（文字不虚）、第三张不消失
 2. 锁定英雄 → **暗色头像的格子也出标签**（第 2 格沃里克）
 3. 槽位标签只显示胜率百分比（无英雄名重叠）
-4. 若仍有格子不显示:跑 `pnpm --filter @hexbox/overlay debug:capture`,
+4. 掉线场景：断开客户端（或退出 WeGame）→ 侧边窗应**重新出现**并显示诊断面板
+   （第三轮修复的可见性 bug;此前只有冷启动那一次会出现）
+5. 若仍有格子不显示:跑 `pnpm --filter @hexbox/overlay debug:capture`,
    看 result.json 的 topBar 逐格诊断（std/top 值齐全）
 
 ### S2 剩余 + S3/S4
