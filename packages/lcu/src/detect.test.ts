@@ -2,8 +2,20 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-import { parseCmdline, parseLockfile, basicAuthHeader, findLcuPort } from './detect.ts';
+import {
+  parseCmdline,
+  parseLockfile,
+  basicAuthHeader,
+  findLcuPort,
+  parseExplicitCredentials,
+  resolveExplicitCredentials,
+  LCU_CREDENTIALS_ENV,
+  LCU_CREDENTIALS_FILE_ENV,
+} from './detect.ts';
 import { isBrawlSession, pickChampionIdFromGameflow, type GameflowSession } from './client.ts';
 
 test('parseCmdline 能解析标准 LCU 参数', () => {
@@ -237,4 +249,74 @@ test('pickChampionIdFromGameflow：循环引用不会死循环', () => {
 
 test('pickChampionIdFromGameflow：数组里的 championId 也能找到', () => {
   assert.equal(pickChampionIdFromGameflow({ team: [{ championId: 902 }] }), 902);
+});
+
+/* ------------------------------------------------------------------ */
+/* 显式凭证（免提权通道）                                              */
+/* ------------------------------------------------------------------ */
+
+test('parseExplicitCredentials：接受 `<端口>:<token>`', () => {
+  const c = parseExplicitCredentials('56695:s3cr3tPass');
+  assert.equal(c?.port, 56695);
+  assert.equal(c?.password, 's3cr3tPass');
+  assert.equal(c?.source, 'explicit');
+});
+
+test('parseExplicitCredentials：容忍 `riot:` 前缀（Basic 用户名）', () => {
+  const c = parseExplicitCredentials('riot:56695:s3cr3tPass');
+  assert.equal(c?.port, 56695);
+  assert.equal(c?.password, 's3cr3tPass');
+});
+
+test('parseExplicitCredentials：也接受 lockfile 整行（避免用户粘错格式）', () => {
+  const c = parseExplicitCredentials('LeagueClient:28932:56695:s3cr3tPass:https');
+  assert.equal(c?.port, 56695);
+  assert.equal(c?.password, 's3cr3tPass');
+});
+
+test('parseExplicitCredentials：密码含冒号时只切第一个（token 常含 : 与 -）', () => {
+  const c = parseExplicitCredentials('56695:ab:cd:ef');
+  assert.equal(c?.port, 56695);
+  assert.equal(c?.password, 'ab:cd:ef');
+});
+
+test('parseExplicitCredentials：非法输入一律返回 null，不抛错', () => {
+  for (const bad of ['', '   ', 'no-colon', ':token', 'abc:token', '0:token', '70000:token', '56695:', 'LeagueClient::::']) {
+    assert.equal(parseExplicitCredentials(bad), null, `应拒绝: ${JSON.stringify(bad)}`);
+  }
+  assert.equal(parseExplicitCredentials(undefined), null);
+});
+
+test('resolveExplicitCredentials：环境变量优先于凭证文件', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hexbox-lcu-'));
+  const file = join(dir, 'creds');
+  writeFileSync(file, '1111:fromFile', 'utf8');
+  const c = await resolveExplicitCredentials({
+    [LCU_CREDENTIALS_ENV]: '2222:fromEnv',
+    [LCU_CREDENTIALS_FILE_ENV]: file,
+  });
+  assert.equal(c?.port, 2222);
+  assert.equal(c?.password, 'fromEnv');
+});
+
+test('resolveExplicitCredentials：无环境变量时读凭证文件，并记下来源路径', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hexbox-lcu-'));
+  const file = join(dir, 'creds');
+  writeFileSync(file, 'LeagueClient:1:3333:fileToken:https\n', 'utf8');
+  const c = await resolveExplicitCredentials({ [LCU_CREDENTIALS_FILE_ENV]: file });
+  assert.equal(c?.port, 3333);
+  assert.equal(c?.password, 'fileToken');
+  assert.equal(c?.lockfilePath, file); // 诊断要能指出凭证来自哪个文件
+});
+
+test('resolveExplicitCredentials：文件不存在 / 内容为空 / 内容非法时返回 null', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hexbox-lcu-'));
+  const empty = join(dir, 'empty');
+  writeFileSync(empty, '   \n', 'utf8');
+  const missing = join(dir, 'nope');
+  for (const p of [missing, empty, dir]) {
+    assert.equal(await resolveExplicitCredentials({ [LCU_CREDENTIALS_FILE_ENV]: p }), null, p);
+  }
+  // 不设任何变量时不应抛错（找不到约定文件就是 null）
+  assert.equal(await resolveExplicitCredentials({}), null);
 });

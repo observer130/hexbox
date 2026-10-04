@@ -17,6 +17,7 @@
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -57,9 +58,14 @@ async function runPs(script: string): Promise<string> {
 export interface LcuCredentials {
   readonly port: number;
   readonly password: string;
-  /** 凭证来源，便于诊断。 */
-  readonly source: 'lockfile' | 'cmdline';
-  /** lockfile 路径（仅 source=lockfile 时有值）。 */
+  /**
+   * 凭证来源，便于诊断。
+   *
+   * `explicit` = 由环境变量 / 约定文件显式给出（免提权通道，
+   * 见 `LCU_CREDENTIALS_ENV`）。
+   */
+  readonly source: 'lockfile' | 'cmdline' | 'explicit';
+  /** 凭证文件路径（lockfile 或显式凭证文件来源时有值）。 */
   readonly lockfilePath?: string;
   /** 进程 PID（仅 cmdline 来源时有值）。 */
   readonly pid?: number;
@@ -334,7 +340,88 @@ export interface DetectResult {
 }
 
 /**
- * 完整探测：命令行 → lockfile（显式目录 + 自动发现）→ 端口扫描。
+ * 显式凭证的**环境变量**名：`<端口>:<token>`。
+ *
+ * 为什么需要它：国服的 `LeagueClient\lockfile` 实测为 **0 字节**，
+ * 于是**非管理员在这台机器上拿不到任何凭证**（命令行被 Windows 屏蔽、
+ * lockfile 无内容）——开发与调试每次都要以管理员重开终端。
+ * 由已提权的会话写入一次，之后的普通进程就能直接读：
+ *
+ *   ```powershell
+ *   # 提权会话里执行一次（token 不在普通进程里打印）
+ *   [Environment]::SetEnvironmentVariable('HEXBOX_LCU_CREDENTIALS', "$port`:$token", 'User')
+ *   ```
+ */
+export const LCU_CREDENTIALS_ENV = 'HEXBOX_LCU_CREDENTIALS';
+
+/** 显式凭证**文件**路径的环境变量名（内容为同一 `<端口>:<token>` 格式）。 */
+export const LCU_CREDENTIALS_FILE_ENV = 'HEXBOX_LCU_CREDENTIALS_FILE';
+
+/**
+ * 约定凭证文件（用户级，**不随仓库提交**）。
+ *
+ * 与 lockfile 同格式：`LeagueClient:<pid>:<port>:<password>:<protocol>`。
+ * 由使用者的提权会话写入一次，之后所有工具免提权可用。
+ */
+export function defaultCredentialsPath(): string {
+  try {
+    return join(homedir(), '.hexbox', 'lcu-credentials');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 解析 `<端口>:<token>` 形式的显式凭证。
+ *
+ * 接受前缀 `riot:`（Basic 用户名），也接受锁定文件格式
+ * （`LeagueClient:pid:port:password:protocol`），避免用户粘错格式。
+ */
+export function parseExplicitCredentials(raw: string | undefined): LcuCredentials | null {
+  const s = (raw ?? '').trim();
+  if (!s) return null;
+
+  if (s.startsWith('LeagueClient:')) {
+    const { port, password } = parseLockfile(s);
+    if (!port || !password) return null;
+    return { port, password, source: 'explicit' };
+  }
+
+  const body = s.startsWith('riot:') ? s.slice('riot:'.length) : s;
+  const idx = body.indexOf(':');
+  if (idx <= 0) return null;
+  const port = Number.parseInt(body.slice(0, idx), 10);
+  const password = body.slice(idx + 1).trim();
+  if (!Number.isFinite(port) || port <= 0 || port > 65535 || !password) return null;
+  return { port, password, source: 'explicit' };
+}
+
+/**
+ * 读取显式凭证：环境变量优先，其次约定文件。
+ *
+ * ⚠️ 优先级**高于**命令行与 lockfile：显式给定的应当被尊重，
+ * 否则用户在提权终端里设了值却被旧 lockfile 覆盖，会以为"设了没用"。
+ */
+export async function resolveExplicitCredentials(
+  env: Record<string, string | undefined> = process.env,
+): Promise<LcuCredentials | null> {
+  const direct = parseExplicitCredentials(env[LCU_CREDENTIALS_ENV]);
+  if (direct) return direct;
+
+  const path = env[LCU_CREDENTIALS_FILE_ENV]?.trim() || defaultCredentialsPath();
+  if (!path) return null;
+  try {
+    if (!existsSync(path)) return null;
+    const parsed = parseExplicitCredentials(await readSharedText(path));
+    if (!parsed) return null;
+    return { ...parsed, lockfilePath: path };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 完整探测：**显式凭证** → 命令行 → lockfile（显式目录 + 自动发现）→ 端口扫描。
  *
  * 返回**诊断信息**而不只是 null —— 「读不到凭证」有四种完全不同的原因
  * （客户端没开 / 命令行读不到 / lockfile 为空 / 端口不对），
@@ -346,6 +433,18 @@ export interface DetectResult {
 export async function detectCredentialsDetailed(
   installDirs: readonly string[] = [],
 ): Promise<DetectResult> {
+  // 0) 显式凭证（免提权通道，见 LCU_CREDENTIALS_ENV）
+  const explicit = await resolveExplicitCredentials();
+  if (explicit) {
+    return {
+      credentials: explicit,
+      clientRunning: true,
+      detail: explicit.lockfilePath
+        ? `来自显式凭证文件: ${explicit.lockfilePath}`
+        : `来自环境变量 ${LCU_CREDENTIALS_ENV}`,
+    };
+  }
+
   // 1) 进程命令行（最可靠，但需管理员）
   const fromCmd = await detectFromCmdline();
   if (fromCmd) {
