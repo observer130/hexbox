@@ -35,7 +35,7 @@ function cand(
   return { pid: 1, process, className, title, rect };
 }
 
-/** 真机枚举实测里的客户端窗口（标题与游戏相同，必须排除）。 */
+/** 真机枚举实测里的客户端窗口 —— **选人界面就是它画的**（见下方用例）。 */
 const CLIENT = cand('LeagueClientUx', 'RCLIENT', 'League of Legends', {
   x: 346,
   y: 6,
@@ -49,6 +49,13 @@ const OTHER = cand('chrome', 'Chrome_WidgetWin_1', '动态首页', {
   width: 2308,
   height: 927,
 });
+/** 我们自己的覆盖层窗口（必须排除，否则会选中自己）。 */
+const OURS = cand('electron', 'Chrome_WidgetWin_1', 'hexbox 覆盖层', {
+  x: 0,
+  y: 0,
+  width: 2294,
+  height: 912,
+});
 /** 游戏本体（窗口化运行，尺寸/位置都不是原点）。 */
 const GAME = cand('League of Legends', 'RiotWindowClass', 'League of Legends', {
   x: 347,
@@ -57,9 +64,22 @@ const GAME = cand('League of Legends', 'RiotWindowClass', 'League of Legends', {
   height: 900,
 });
 
-test('pickGameWindow：排除客户端族（标题与游戏相同也不误选）', () => {
-  assert.equal(pickGameWindow([CLIENT]), null, '只有客户端时必须返回 null');
-  assert.deepEqual(pickGameWindow([CLIENT, GAME]), GAME.rect, '有游戏时不能选到客户端');
+test('pickGameWindow：**选人阶段选中客户端窗口**（真机反复错位的根因）', () => {
+  // 真机实测（三方吻合）：选人界面由 LeagueClientUx/RCLIENT 绘制。
+  // 整屏截图跑 detectCards → 卡片 CSS x=893..1127；卡片在截屏内归一化
+  // x=0.341 → 反推窗口 = 1602x900@347,6；枚举结果正是 1600x900@346,6。
+  // 旧实现把客户端当"必须排除的干扰"，导致选人阶段永远 `窗口未知`。
+  assert.deepEqual(pickGameWindow([CLIENT]), CLIENT.rect);
+  assert.deepEqual(pickGameWindow([OTHER, CLIENT]), CLIENT.rect);
+});
+
+test('pickGameWindow：对局内优先游戏本体（客户端也在时不能选错）', () => {
+  assert.deepEqual(pickGameWindow([CLIENT, GAME]), GAME.rect);
+});
+
+test('pickGameWindow：排除我们自己的窗口（否则会选中覆盖层自身）', () => {
+  assert.equal(pickGameWindow([OURS]), null);
+  assert.deepEqual(pickGameWindow([OURS, CLIENT]), CLIENT.rect);
 });
 
 test('pickGameWindow：兼容带后缀的进程名（League of Legends (TM) Client）', () => {
@@ -69,7 +89,7 @@ test('pickGameWindow：兼容带后缀的进程名（League of Legends (TM) Clie
     width: 1600,
     height: 900,
   });
-  assert.deepEqual(pickGameWindow([CLIENT, OTHER, legacy]), legacy.rect);
+  assert.deepEqual(pickGameWindow([OTHER, legacy]), legacy.rect);
 });
 
 test('pickGameWindow：进程名认不出时退回标题匹配', () => {
@@ -93,19 +113,19 @@ test('pickGameWindow：多个同名候选时取面积最大者', () => {
 });
 
 test('pickGameWindow：captureAspect 用于排除比例不符的候选', () => {
-  // 截屏是 16:9（3413x1920）→ 应挑比例相符的那个（真机为 1601x900）
-  const square = cand('League of Legends', 'C', 'League of Legends', {
+  // 截屏是 16:9（3413x1920）→ 应挑比例相符的那个（真机客户端 1600x900）
+  const square = cand('LeagueClientUx', 'RCLIENT', 'League of Legends', {
     x: 0,
     y: 0,
     width: 1000,
     height: 1000,
   });
-  const picked = pickGameWindow([square, GAME], { captureAspect: 3413 / 1920 });
-  assert.deepEqual(picked, GAME.rect);
+  const picked = pickGameWindow([square, CLIENT], { captureAspect: 3413 / 1920 });
+  assert.deepEqual(picked, CLIENT.rect);
 });
 
-test('pickGameWindow：比例全都不符时仍返回面积最大者（不空手而归）', () => {
-  const square = cand('League of Legends', 'C', 'League of Legends', {
+test('pickGameWindow：比例全都不符时仍返回（不空手而归）', () => {
+  const square = cand('LeagueClientUx', 'RCLIENT', 'League of Legends', {
     x: 0,
     y: 0,
     width: 1000,

@@ -286,15 +286,25 @@ $found | ConvertTo-Json -Compress -Depth 3
 }
 
 /**
- * 从候选窗口里挑出**游戏本体**窗口。
+ * 从候选窗口里挑出**正在被截屏的那个游戏窗口**。
  *
- * 判据（按优先级）：
- *   1. 排除客户端族（进程名 `LeagueClient*`/`Riot*`，或类名 `RCLIENT`）——
- *      客户端窗口的标题同样是 "League of Legends"，纯按标题找必然误选；
- *   2. 进程名以 `League of Legends` 开头（兼容 `League of Legends (TM) Client`）；
- *   3. 否则：标题含 "League of Legends" 且不是客户端；
- *   4. 有 `captureAspect` 时，进一步要求窗口纵横比与之相符（截屏就是窗口
- *      内容，两者必然同比）—— 这条能把"标题相同但其实是别的窗口"滤掉。
+ * ⚠️⚠️ 最重要的真机教训（2026-10-04，定位反复失败的真正原因）：
+ * **选人界面不是游戏本体画的，而是 Riot 客户端（`LeagueClientUx`/类 `RCLIENT`）
+ * 画的。** 旧判据把客户端窗口当"必须排除的干扰"，于是选人阶段永远
+ * `窗口未知` → 退化到"猜窗口尺寸"的兜底 → 标签必然错位。
+ *
+ * 实测证据（用户整屏截图 + 真实检测反推 + 窗口枚举三方吻合）：
+ *   · 在整屏截图上跑 detectCards → 卡片真实 CSS x=893..1127；
+ *   · 同一卡片在截屏（客户端窗口内容 3413x1920）内归一化 x=0.341；
+ *   · 反推窗口 = 1602x900 @ 347,6；
+ *   · 枚举结果里正好有 `LeagueClientUx 1600x900 @ 346,6`；
+ *   · 用该矩形预测顶栏 10 个槽位 → 与截图实测边缘**逐像素吻合**。
+ *
+ * 因此判据改为**按优先级分层**（同层取面积最大）：
+ *   1. 游戏本体（进程 `League of Legends*`）—— 对局内的正确目标；
+ *   2. 选人客户端 UI（`LeagueClientUx` / 类 `RCLIENT`）—— 对局前的正确目标；
+ *   3. 标题含 "League of Legends" —— 最后兜底。
+ * 始终排除**我们自己的窗口**（标题含 `hexbox`）：否则覆盖层会把自己当成游戏。
  */
 export function pickGameWindow(
   candidates: readonly WindowCandidate[],
@@ -307,37 +317,43 @@ export function pickGameWindow(
     };
   } = {},
 ): PhysicalRect | null {
-  const isClient = (c: WindowCandidate): boolean =>
-    // 显式白名单/黑名单（见本文件顶部的 `GAME_PROCESS_NAMES` /
-    // `RIOT_CLIENT_PROCESS_NAMES`）——两者保持单一事实来源
-    RIOT_CLIENT_PROCESS_NAMES.some((n) => c.process.toLowerCase() === n.toLowerCase()) ||
-    /^LeagueClient/i.test(c.process) ||
-    /^Riot/i.test(c.process) ||
-    /RCLIENT/i.test(c.className);
+  /** 我们自己的窗口（覆盖层/侧边窗）—— 必须排除，否则会选中自己。 */
+  const isOurs = (c: WindowCandidate): boolean =>
+    /hexbox/i.test(c.title) || /hexbox/i.test(c.process);
 
   const plausible = candidates.filter(
     (c) =>
-      !isClient(c) &&
+      !isOurs(c) &&
       isPlausibleGameWindow({ rect: c.rect, visible: true, screen: options.screen }),
   );
 
-  const byProcess = plausible.filter((c) => /^League of Legends/i.test(c.process));
-  const byTitle = plausible.filter((c) => /League of Legends/i.test(c.title));
-  const pool = byProcess.length > 0 ? byProcess : byTitle.length > 0 ? byTitle : [];
-
-  if (pool.length === 0) return null;
-
+  /** 有截屏比例时优先取同比的窗口（截屏就是窗口内容，必然同比）。 */
   const aspectOk = (c: WindowCandidate): boolean => {
     if (options.captureAspect === undefined) return true;
     const a = c.rect.width / Math.max(1, c.rect.height);
     return Math.abs(a - options.captureAspect) / options.captureAspect <= 0.02;
   };
-  const matching = pool.filter(aspectOk);
-  const finalPool = matching.length > 0 ? matching : pool;
-  // 多个候选时取面积最大的（游戏本体通常最大）
-  return finalPool.reduce((best, c) =>
-    c.rect.width * c.rect.height > best.rect.width * best.rect.height ? c : best,
-  ).rect;
+  const sameAspect = plausible.filter(aspectOk);
+  const pool = sameAspect.length > 0 ? sameAspect : plausible;
+
+  const tiers: ReadonlyArray<(c: WindowCandidate) => boolean> = [
+    // 1) 游戏本体（对局内）
+    (c) => /^League of Legends/i.test(c.process),
+    // 2) 选人客户端 UI（对局前）—— 见上方教训
+    (c) => /^LeagueClientUx/i.test(c.process) || /RCLIENT/i.test(c.className),
+    // 3) 兜底：标题匹配
+    (c) => /League of Legends/i.test(c.title),
+  ];
+  for (const tier of tiers) {
+    const hit = pool.filter(tier);
+    if (hit.length > 0) {
+      // 同层多个时取面积最大的（游戏/客户端主窗口通常最大）
+      return hit.reduce((best, c) =>
+        c.rect.width * c.rect.height > best.rect.width * best.rect.height ? c : best,
+      ).rect;
+    }
+  }
+  return null;
 }
 
 /**
