@@ -32,6 +32,7 @@ import {
   type Bitmap,
   type CardLabel,
   type NameFingerprint,
+  type PhysicalRect,
   type PreparedTemplate,
 } from '@hexbox/vision';
 import type { ChampSelectInfo, RankingSnapshot } from '@hexbox/core';
@@ -78,10 +79,17 @@ function resolveDeps<T>(v: T | (() => T)): T {
   return typeof v === 'function' ? (v as () => T)() : v;
 }
 
-/** 单轮识别（供 vision-loop 与 debug 工具复用）。 */
+/**
+ * 单轮截屏（供 vision-loop 与 debug 工具复用）。
+ *
+ * 同时返回窗口物理矩形 —— 它和截屏必须来自**同一次**探测：
+ * `findGameWindowRect()` 会起一个 PowerShell 进程（约 200ms），
+ * 调用方再查第二次就是纯粹的双倍开销（每 1.5s 一轮，真实存在过）。
+ */
 async function captureGameBitmap(): Promise<{
   bmp: Bitmap;
   display: Electron.Display;
+  windowPhysical: PhysicalRect | null;
 } | null> {
   // 先找游戏窗口所在显示器 —— 游戏可能不在主显示器
   // （多显示器 + 不同 DPI 时,主显示器的 scaleFactor/尺寸全是错的）
@@ -89,7 +97,6 @@ async function captureGameBitmap(): Promise<{
   const display = windowPhysical
     ? screen.getDisplayNearestPoint({ x: windowPhysical.x + 10, y: windowPhysical.y + 10 })
     : screen.getPrimaryDisplay();
-
   const sources = await desktopCapturer.getSources({
     types: ['window'],
     thumbnailSize: { width: display.size.width * 2, height: display.size.height * 2 },
@@ -109,19 +116,19 @@ async function captureGameBitmap(): Promise<{
     data[i + 2] = raw[i]!;
     data[i + 3] = raw[i + 3]!;
   }
-  return { bmp: { width: size.width, height: size.height, data }, display };
+  return { bmp: { width: size.width, height: size.height, data }, display, windowPhysical };
 }
 
 /** 一轮识别：返回 null 表示「本轮无可信结果,应清空」。 */
 export async function runVisionRound(
   deps: VisionLoopDeps,
 ): Promise<{ msg: VisionOverlayMsg | null; display: Electron.Display }> {
-  const windowPhysical = await findGameWindowRect();
+  // 窗口矩形来自 createGameBitmap 的同一次探测（勿在此再查一遍）
   const grabbed = await captureGameBitmap();
   if (!grabbed) {
     return { msg: null, display: screen.getPrimaryDisplay() };
   }
-  const { bmp, display } = grabbed;
+  const { bmp, display, windowPhysical } = grabbed;
 
   // 统一换算：自动区分「显示器快照」与「窗口快照」两种形态
   // （S2 真机验收教训：二者混淆导致标签横向错位）
