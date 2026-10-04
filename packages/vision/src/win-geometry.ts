@@ -36,17 +36,68 @@ export interface PhysicalRect {
   readonly height: number;
 }
 
+/** 游戏窗口的最小可信尺寸（物理像素）。 */
+export const MIN_GAME_WINDOW_WIDTH = 320;
+export const MIN_GAME_WINDOW_HEIGHT = 240;
+
+export interface GameWindowCheck {
+  readonly rect: PhysicalRect;
+  /** `IsWindowVisible` 的结果（最小化/隐藏时为 false）。 */
+  readonly visible: boolean;
+  /** 桌面/虚拟屏范围（物理像素）；不传则跳过该判据。 */
+  readonly screen?: {
+    readonly width: number;
+    readonly height: number;
+    /** 允许超出屏幕外多少（窗口可部分移出屏，但不该整体离屏）。 */
+    readonly slack?: number;
+  };
+}
+
+/**
+ * 判定一个窗口矩形是否是**可信的游戏窗口**（纯函数，可单测）。
+ *
+ * ⚠️ 真机教训：客户端与游戏的最小化/幽灵窗口是**真实存在的**。
+ * 实测拿到过 `158x26 @ (-21333,-21333)` —— 那是被移出屏幕的残留窗口，
+ * 于是 WGC 以参数错误失败（`Failed to start capture: -2147024809`），
+ * 而调用方还以为是"找到了游戏窗口"，浪费一整轮排查。
+ *
+ * 三条判据（缺一不可）：
+ *   1. `IsWindowVisible` 为真（最小化/隐藏的窗口截不到内容）；
+ *   2. 尺寸不小于 `MIN_GAME_WINDOW_*`（海斗全屏/窗口化都远大于此；
+ *      残留窗口往往是几十像素的退化尺寸）；
+ *   3. 窗口与屏幕范围有交集（允许部分移出屏，不允许整体离屏）。
+ *
+ * 宁可不返回（调用方降级到主显示器），也不要返回一个截不到内容的窗口。
+ */
+export function isPlausibleGameWindow(check: GameWindowCheck): boolean {
+  const { rect, visible, screen } = check;
+  if (!visible) return false;
+  if (rect.width < MIN_GAME_WINDOW_WIDTH || rect.height < MIN_GAME_WINDOW_HEIGHT) return false;
+  if (screen) {
+    const slack = screen.slack ?? 0;
+    const right = rect.x + rect.width;
+    const bottom = rect.y + rect.height;
+    // 与 [0,width]x[0,height] 无交集 → 整体离屏
+    const intersects =
+      right > -slack && rect.x < screen.width + slack &&
+      bottom > -slack && rect.y < screen.height + slack;
+    if (!intersects) return false;
+  }
+  return true;
+}
+
 /**
  * 查询游戏客户端主窗口矩形（物理像素）。
  *
- * 返回 null 表示没有可见的游戏客户端窗口
- * （ LeagueClientUx 是客户端 UI；游戏本身是 "League of Legends"）。
+ * 返回 null 表示没有**可信的**游戏窗口（见 `isPlausibleGameWindow`）。
+ * （LeagueClientUx 是客户端 UI；游戏本身是 "League of Legends"。）
  */
 export async function findGameWindowRect(): Promise<PhysicalRect | null> {
   const windir = process.env['windir'] ?? 'C:\\Windows';
   const ps = join(windir, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 
   // 注意：必须用 Add-Type -TypeDefinition（main/index.ts 有完整踩坑记录）。
+  // 同时报告 IsWindowVisible 与桌面范围 —— 调用方据此排除幽灵窗口。
   const script = `
 $src = @'
 using System;
@@ -55,6 +106,7 @@ using System.Runtime.InteropServices;
 public struct HEXBOX_RECT { public int Left, Top, Right, Bottom; }
 public static class HexboxWinApi {
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out HEXBOX_RECT lpRect);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
 }
 '@
 Add-Type -TypeDefinition $src -ErrorAction SilentlyContinue
@@ -63,8 +115,12 @@ $proc = Get-Process -Name 'LeagueClientUx','League of Legends' -ErrorAction Sile
 if (-not $proc) { exit 0 }
 $r = New-Object HEXBOX_RECT
 [HexboxWinApi]::GetWindowRect($proc.MainWindowHandle, [ref]$r) | Out-Null
-[PSCustomObject]@{ X=$r.Left; Y=$r.Top; W=($r.Right-$r.Left); H=($r.Bottom-$r.Top) } |
-  ConvertTo-Json -Compress
+$sm = [System.Windows.Forms.SystemInformation]::VirtualScreen
+[PSCustomObject]@{
+  X=$r.Left; Y=$r.Top; W=($r.Right-$r.Left); H=($r.Bottom-$r.Top)
+  Visible=[HexboxWinApi]::IsWindowVisible($proc.MainWindowHandle)
+  ScreenW=$sm.Width; ScreenH=$sm.Height
+} | ConvertTo-Json -Compress
 `;
 
   try {
@@ -75,10 +131,25 @@ $r = New-Object HEXBOX_RECT
     );
     const text = stdout.trim();
     if (!text) return null;
-    const o = JSON.parse(text) as { X?: number; Y?: number; W?: number; H?: number };
-    if (typeof o.X === 'number' && typeof o.W === 'number' && o.W > 0 && (o.H ?? 0) > 0) {
-      return { x: o.X, y: o.Y ?? 0, width: o.W, height: o.H ?? 0 };
-    }
+    const o = JSON.parse(text) as {
+      X?: number;
+      Y?: number;
+      W?: number;
+      H?: number;
+      Visible?: boolean;
+      ScreenW?: number;
+      ScreenH?: number;
+    };
+    if (typeof o.X !== 'number' || typeof o.W !== 'number') return null;
+    const rect: PhysicalRect = { x: o.X, y: o.Y ?? 0, width: o.W, height: o.H ?? 0 };
+    const screen =
+      typeof o.ScreenW === 'number' && typeof o.ScreenH === 'number' && o.ScreenW > 0
+        ? { width: o.ScreenW, height: o.ScreenH, slack: 0 }
+        : undefined;
+    // Visible 缺失（老版本 PowerShell 无 SystemInformation）时按可见处理，
+    // 尺寸与范围判据仍然生效。
+    const visible = o.Visible !== false;
+    return isPlausibleGameWindow({ rect, visible, screen }) ? rect : null;
   } catch {
     /* 降级到默认位置 */
   }

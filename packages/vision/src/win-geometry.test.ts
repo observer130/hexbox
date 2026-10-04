@@ -8,7 +8,85 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { captureScale, makeScreenGeometry, snapshotKind } from './win-geometry.ts';
+import { captureScale, makeScreenGeometry, snapshotKind, isPlausibleGameWindow } from './win-geometry.ts';
+
+/* ------------------------------------------------------------------ */
+/* 游戏窗口可信性判据（真机幽灵窗口回归）                               */
+/* ------------------------------------------------------------------ */
+
+const SCREEN = { width: 2400, height: 1350 };
+
+test('isPlausibleGameWindow：正常全屏游戏窗口通过', () => {
+  assert.equal(
+    isPlausibleGameWindow({
+      rect: { x: 0, y: 0, width: 2400, height: 1350 },
+      visible: true,
+      screen: SCREEN,
+    }),
+    true,
+  );
+});
+
+test('isPlausibleGameWindow：真机实测的幽灵窗口被拒绝（158x26 @ -21333,-21333）', () => {
+  // 这条来自真实日志：WGC 随后以参数错误失败，调用方却以为找到了游戏窗口。
+  assert.equal(
+    isPlausibleGameWindow({
+      rect: { x: -21333, y: -21333, width: 158, height: 26 },
+      visible: true, // 即便系统认为它"可见"，尺寸与离屏两条判据也该拦住
+      screen: SCREEN,
+    }),
+    false,
+  );
+});
+
+test('isPlausibleGameWindow：不可见（最小化/隐藏）窗口被拒绝', () => {
+  assert.equal(
+    isPlausibleGameWindow({
+      rect: { x: 0, y: 0, width: 1920, height: 1080 },
+      visible: false,
+      screen: SCREEN,
+    }),
+    false,
+  );
+});
+
+test('isPlausibleGameWindow：尺寸过小的残留窗口被拒绝', () => {
+  for (const rect of [
+    { x: 100, y: 100, width: 319, height: 1080 }, // 宽不足
+    { x: 100, y: 100, width: 1920, height: 239 }, // 高不足
+    { x: 100, y: 100, width: 0, height: 0 },
+  ]) {
+    assert.equal(isPlausibleGameWindow({ rect, visible: true, screen: SCREEN }), false, JSON.stringify(rect));
+  }
+});
+
+test('isPlausibleGameWindow：部分移出屏幕仍接受，整体离屏才拒绝', () => {
+  // 窗口跨出右边缘：仍与屏幕有交集 → 可用
+  assert.equal(
+    isPlausibleGameWindow({
+      rect: { x: 2000, y: 0, width: 1920, height: 1080 },
+      visible: true,
+      screen: SCREEN,
+    }),
+    true,
+  );
+  // 完全在屏幕右侧之外 → 拒绝
+  assert.equal(
+    isPlausibleGameWindow({
+      rect: { x: 5000, y: 0, width: 1920, height: 1080 },
+      visible: true,
+      screen: SCREEN,
+    }),
+    false,
+  );
+});
+
+test('isPlausibleGameWindow：不传屏幕范围时只按可见性与尺寸判定', () => {
+  assert.equal(
+    isPlausibleGameWindow({ rect: { x: -99999, y: 0, width: 1920, height: 1080 }, visible: true }),
+    true, // 无屏幕信息就无法判断离屏
+  );
+});
 
 test('captureScale：窗口矩形与截屏同源时自校准出真实缩放', () => {
   // 窗口物理 1706×960，截屏 3412×1920 → scale = 2.0（整除，避免浮点噪声）
