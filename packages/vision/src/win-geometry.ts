@@ -186,6 +186,14 @@ export async function findGameWindowRect(): Promise<PhysicalRect | null> {
   //
   // ⚠️ 只认游戏本体进程（'League of Legends'）：客户端 UI
   // `LeagueClientUx` 的窗口标题同样是 'League of Legends'，按名字找必然误选。
+  //
+  // ⚠️⚠️ 真机事故（2026-10-04，标签整体错位到右下角的根因）：
+  // 这里曾直接用 `[System.Windows.Forms.SystemInformation]::VirtualScreen`，
+  // 却在 Windows PowerShell 5.1 下**没有先加载该程序集** —— 该类型不存在会
+  // 抛终止性错误，整个脚本无输出 → 本函数返回 null → 调用方退化到
+  // "截屏≈显示器"的错误假设（横向刻度差 1.34 倍），标签因此右移 + 贴底。
+  // 现在：先 Add-Type 加载，并且**桌面范围只用 try/catch 取**，取不到也不能
+  // 影响窗口矩形本身的输出。
   const script = `
 $src = @'
 using System;
@@ -203,11 +211,16 @@ $proc = Get-Process -Name 'League of Legends' -ErrorAction SilentlyContinue |
 if (-not $proc) { exit 0 }
 $r = New-Object HEXBOX_RECT
 [HexboxWinApi]::GetWindowRect($proc.MainWindowHandle, [ref]$r) | Out-Null
-$sm = [System.Windows.Forms.SystemInformation]::VirtualScreen
+$sw = 0; $sh = 0
+try {
+  Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+  $sm = [System.Windows.Forms.SystemInformation]::VirtualScreen
+  $sw = $sm.Width; $sh = $sm.Height
+} catch { $sw = 0; $sh = 0 }
 [PSCustomObject]@{
   X=$r.Left; Y=$r.Top; W=($r.Right-$r.Left); H=($r.Bottom-$r.Top)
   Visible=[HexboxWinApi]::IsWindowVisible($proc.MainWindowHandle)
-  ScreenW=$sm.Width; ScreenH=$sm.Height
+  ScreenW=$sw; ScreenH=$sh
 } | ConvertTo-Json -Compress
 `;
 
@@ -393,7 +406,23 @@ export function makeScreenGeometry(
     };
   }
 
-  // 无窗口矩形兜底:假设截屏 ≈ 工作区
+  // 无窗口矩形兜底。
+  //
+  // ⚠️ 原实现假设"截屏 ≈ 工作区"，这在真机上是**错**的：截屏是**游戏窗口**
+  // 内容（实测 3413×1920 = 游戏窗口 1706×960 逻辑像素的 2 倍），而工作区是
+  // 2294×960 —— 横向刻度差 1.34 倍，于是覆盖层标签整体右移并贴底
+  // （用户报告"胜率跑到右下角"）。根因是 PowerShell 探针抛错返回 null，
+  // 已在上方修复；这里同时把兜底改成**按截屏纵横比推断窗口**，
+  // 使同类失败只产生可接受的偏移，而不是整体错位。
+  //
+  // 假设（仅兜底路径）：游戏窗口高度 = 显示器逻辑高、按截屏纵横比推宽度、
+  // 与工作区左上角对齐。窗口矩形能正常读到时就永远不走这里。
+  const winH = Math.max(1, display.bounds.height);
+  const winW = Math.max(1, Math.round(winH * (capture.width / Math.max(1, capture.height))));
+  console.warn(
+    `[vision] ⚠ 拿不到游戏窗口矩形，按截屏纵横比推断为 ${winW}x${winH} 逻辑像素` +
+      `（截屏 ${capture.width}x${capture.height}）—— 标签位置可能略有偏移`,
+  );
   return {
     kind,
     scale: capture.width / Math.max(1, dispW * display.scaleFactor),
@@ -401,10 +430,11 @@ export function makeScreenGeometry(
     geo: {
       captureWidth: capture.width,
       captureHeight: capture.height,
-      windowX: display.workArea.x,
-      windowY: display.workArea.y,
-      windowWidth: display.workArea.width,
-      windowHeight: display.workArea.height,
+      // CSS 原点 = 覆盖层窗口左上角 = 工作区左上角 → 偏移为 0
+      windowX: 0,
+      windowY: 0,
+      windowWidth: winW,
+      windowHeight: winH,
     },
   };
 }

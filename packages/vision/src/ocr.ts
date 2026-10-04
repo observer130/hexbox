@@ -213,9 +213,12 @@ export function matchName(
  * 只看"最高分"会给出 0.45~0.5 的**假命中**，于是覆盖层把错误的胜率
  * 画在屏幕中间 —— 比不显示更糟（项目原则：宁漏勿错）。
  *
- * 判定：最高分 ≥ minScore **且** 与第二名拉开 minMargin。
- * 真实卡片（实测 0.56 / 0.67）与错误名字之间差距明显；
- * 美术图上的假命中普遍"跟谁都不像"，分数聚集、分差极小。
+ * ⚠️ 阈值取舍（真机踩坑）：初版把 minMargin 设成 0.05，结果**误杀了真卡** ——
+ * 一阶段两张卡只认出一张（真卡得分 0.56~0.67，但第二名也常在 0.5 上下，
+ * 分差不足 0.05）。现在：
+ *   · minScore 0.5 —— 挡住美术图上的假命中（它们普遍低于 0.5）；
+ *   · minMargin 0.015 —— 只用于打破"几乎并列"，不再当主过滤器。
+ * 阶段判定交给调用方（LCU 选中状态 / 顶栏占用），不靠名字匹配承担。
  */
 export function matchNameCareful(
   strip: { bits: Uint8Array; width: number; height: number },
@@ -228,7 +231,7 @@ export function matchNameCareful(
   } = {},
 ): { championId: number; name: string; score: number; margin: number } | null {
   const minScore = options.minScore ?? 0.5;
-  const minMargin = options.minMargin ?? 0.05;
+  const minMargin = options.minMargin ?? 0.015;
   const gw = options.gridWidth ?? NAME_STRIP.gridWidth;
   const gh = options.gridHeight ?? NAME_STRIP.gridHeight;
   if (library.length === 0) return null;

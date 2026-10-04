@@ -36,6 +36,7 @@ import {
   type NameFingerprint,
   type PhysicalRect,
   type PreparedTemplate,
+  type Rect,
 } from '@hexbox/vision';
 import type { ChampSelectInfo, RankingSnapshot } from '@hexbox/core';
 
@@ -79,6 +80,20 @@ export interface VisionLoopDeps {
    * 而英雄表在主进程里（此处只做纯计算）。
    */
   readonly canonicalId: (id: number) => number;
+  /**
+   * 选人阶段的两个子阶段（由 LCU 选人会话判定，比像素更可靠）。
+   *
+   * 用户确认的流程：
+   *   · `picking`（第一阶段）—— 系统发出 2~3 张英雄卡，玩家还没选
+   *     → 在**卡片下方**显示胜率；
+   *   · `locked`（第二阶段）—— 玩家选中后，未选的英雄进入顶部「可用」区
+   *     → 在**顶栏每个备选下方**显示胜率，且**绝不再画卡片标签**；
+   *   · `unknown` —— 拿不到会话时退回像素占用启发式。
+   *
+   * ⚠️ 没有它时只能用"顶栏是否有头像"猜阶段：真机反馈二阶段仍画着卡片
+   * 标签（像素占用判不准就会这样），所以主进程应尽量提供本字段。
+   */
+  readonly pickState?: () => 'picking' | 'locked' | 'unknown';
   /** 识别结果的消费方（主进程推给覆盖窗口）。 */
   readonly onResult: (msg: VisionOverlayMsg, display: Electron.Display) => void;
 }
@@ -170,45 +185,49 @@ export async function runVisionRound(
   // 用"顶栏是否有头像"来区分阶段，这个歧义就消失了。
   const portraits = (resolveDeps(deps.portraits) ?? []) as readonly PreparedTemplate[];
   const rankings = resolveDeps(deps.rankings) as RankingSnapshot | null;
+  const pickState = deps.pickState?.() ?? 'unknown';
   let topBarOccupiedCount = 0;
   let cands: ReturnType<typeof detectTopBarCandidates> = [];
+  let captureSlots: Rect[] = [];
   if (portraits.length > 0) {
-    const captureSlots = topBarSlotRects().map(
+    captureSlots = topBarSlotRects().map(
       (r) => windowRectToCapture(r, bmp, windowPhysical, display),
     );
     topBarOccupiedCount = countOccupiedSlots(bmp, captureSlots);
     if (topBarOccupiedCount > 0) {
       cands = detectTopBarCandidates(bmp, captureSlots, portraits);
     }
+  }
 
-    if (topBarOccupiedCount > 0) {
-      // ── 第二阶段 ──
-      const labels: CardLabel[] = [];
-      const identified: string[] = [];
-      for (const cand of cands) {
-        // ⚠️ 识别可能给出高 ID（60000+），而排行榜只有基础 ID —— 必须归一化，
-        // 否则顶栏每个英雄都会显示「暂无数据」（真机实测过）。
-        const cid = deps.canonicalId(cand.championId);
-        const row = rankings?.heroes.find((h) => h.championId === cid);
-        const sub = deps.championName(cid);
-        identified.push(`${sub}=${cand.score.toFixed(2)}`);
-        // 标签定位用截屏空间的槽位矩形（与识别同一坐标系）
-        labels.push(
-          slotLabelFor(captureSlots[cand.slotIndex]!, geo, display.workArea, {
-            name: sub,
-            winRate: row?.winRate ?? 0,
-            hasData: row !== undefined,
-            championId: cid,
-          }),
-        );
-      }
-      const diag =
-        `第二阶段: 顶栏 ${topBarOccupiedCount} 格有头像, 识别成功 ${labels.length} 格` +
-        (identified.length > 0 ? ` [${identified.join(' ')}]` : '');
-      if (labels.length > 0) return { msg: { active: true, labels, diag }, display };
-      // 有头像但一个都没认出来：不画（宁漏勿错），但把诊断留给真机排查
-      return { msg: { active: false, labels: [], diag }, display };
+  // 阶段判定：LCU 选中状态优先；拿不到时才用"顶栏是否有头像"启发式。
+  // ⚠️ 二阶段**绝不能**再画卡片标签 —— 真机反馈卡片标签会残留到二阶段。
+  const isPhase2 = pickState === 'locked' || (pickState === 'unknown' && topBarOccupiedCount > 0);
+
+  if (isPhase2) {
+    // ── 第二阶段：顶栏备选区逐格胜率 ──
+    const labels: CardLabel[] = [];
+    const identified: string[] = [];
+    for (const cand of cands) {
+      // ⚠️ 识别可能给出高 ID（60000+），而排行榜只有基础 ID —— 必须归一化，
+      // 否则顶栏每个英雄都会显示「暂无数据」（真机实测过）。
+      const cid = deps.canonicalId(cand.championId);
+      const row = rankings?.heroes.find((h) => h.championId === cid);
+      const sub = deps.championName(cid);
+      identified.push(`${sub}=${cand.score.toFixed(2)}`);
+      labels.push(
+        slotLabelFor(captureSlots[cand.slotIndex]!, geo, display.workArea, {
+          name: sub,
+          winRate: row?.winRate ?? 0,
+          hasData: row !== undefined,
+          championId: cid,
+        }),
+      );
     }
+    const diag =
+      `第二阶段(${pickState}): 顶栏占用 ${topBarOccupiedCount} 格, 识别成功 ${labels.length} 格` +
+      (identified.length > 0 ? ` [${identified.join(' ')}]` : '');
+    // 有头像但一个都没认出来：不画（宁漏勿错），诊断留给日志
+    return { msg: { active: labels.length > 0, labels, diag }, display };
   }
 
   if (!det.confident || det.cards.length === 0) {
@@ -216,7 +235,7 @@ export async function runVisionRound(
       msg: {
         active: false,
         labels: [],
-        diag: `第一阶段但未检出卡片: ${det.reason ?? '?'}（顶栏占用 ${topBarOccupiedCount}）`,
+        diag: `第一阶段(${pickState})但未检出卡片: ${det.reason ?? '?'}（顶栏占用 ${topBarOccupiedCount}）`,
       },
       display,
     };
@@ -277,7 +296,7 @@ export async function runVisionRound(
       active: true,
       labels,
       diag:
-        `第一阶段: 卡片 ${det.cards.length} 张 → 出标签 ${labels.length} 个` +
+        `第一阶段(${pickState}): 卡片 ${det.cards.length} 张 → 出标签 ${labels.length} 个` +
         ` [得分/分差 ${perCard.join(' ')}]`,
     },
     display,
@@ -305,6 +324,8 @@ export class VisionLoop {
   private memory = createLabelMemory();
   private round = 0;
   private failCount = 0;
+  /** 上一轮所处的子阶段（用于检测切换并立刻清空记忆）。 */
+  private lastPickState: 'picking' | 'locked' | 'unknown' | null = null;
 
   constructor(deps: VisionLoopDeps, intervalMs = 1500) {
     this.deps = deps;
@@ -317,6 +338,15 @@ export class VisionLoop {
       if (this.running) return;
       this.running = true;
       try {
+        // 子阶段切换（第一阶段⇄第二阶段）时**立刻**清空标签记忆 —— 否则
+        // 卡片胜率会在选定后继续残留最多 6 轮（≈9 秒），真机反馈为
+        // "进入二阶段还不消失"。卡片与顶栏的标签位置完全不同，不能混用。
+        const pickState = this.deps.pickState?.() ?? 'unknown';
+        if (this.lastPickState !== null && pickState !== this.lastPickState) {
+          this.memory.reset();
+        }
+        this.lastPickState = pickState;
+
         const { msg, display } = await runVisionRound(this.deps);
         this.round++;
         const active = msg !== null && msg.active;

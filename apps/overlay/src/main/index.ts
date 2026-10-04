@@ -80,6 +80,13 @@ let warnedNoCreds = false;
 let credsDetail = '';
 /** 本次选人中「我」选的英雄（0 = 未知）。 */
 let myChampionId = 0;
+/**
+ * 选人子阶段（供视觉循环决定画卡片还是画顶栏）。
+ *
+ * `picking` = 卡片已发出、还没选；`locked` = 已选定（未选的英雄已进顶栏）；
+ * `unknown` = 选人会话里没有 actions 字段（版本差异）→ 视觉循环退回像素启发式。
+ */
+let champSelectPickState: 'picking' | 'locked' | 'unknown' = 'unknown';
 /** S2 视觉循环（选人阶段启用）。 */
 let visionLoop: VisionLoop | null = null;
 /** 名字指纹库（视觉循环用）。 */
@@ -456,6 +463,10 @@ async function pollOnce(): Promise<void> {
         .get<{
           myTeam?: Array<{ championId?: number; cellId?: number }>;
           localPlayerCellId?: number;
+          /** 选人动作：外层是回合，内层是本回合各玩家的动作。 */
+          actions?: Array<
+            Array<{ actorCellId?: number; type?: string; completed?: boolean }>
+          >;
         }>('/lol-champ-select/v1/session')
         .catch(() => null);
       const team = cs?.myTeam ?? [];
@@ -480,6 +491,24 @@ async function pollOnce(): Promise<void> {
       // 选人阶段的会话在进入对局后就没了，若离开选人时把 myChampionId 置 0，
       // 局内就会永远显示「未识别到你的英雄」（真实踩过）。
       if (picked > 0) myChampionId = picked;
+
+      // 两个子阶段的判据（用户确认的流程）：
+      //   第一阶段：卡片已发出、还没选 → 卡片下方显示胜率
+      //   第二阶段：选中后未选的英雄进顶栏 → 顶栏逐格显示，且不再画卡片标签
+      // 用「我方 pick 动作是否 completed」判定，比像素占用可靠得多。
+      const localCell = cs?.localPlayerCellId;
+      const acts = (cs?.actions ?? []).flat();
+      if (acts.length === 0 || typeof localCell !== 'number') {
+        champSelectPickState = 'unknown';
+      } else {
+        const done = acts.some(
+          (a) =>
+            a.type === 'pick' &&
+            a.completed === true &&
+            (typeof localCell !== 'number' || a.actorCellId === localCell),
+        );
+        champSelectPickState = done ? 'locked' : 'picking';
+      }
     } else if (phase === 'InProgress' && client && myChampionId === 0) {
       // 进对局后选人会话已消失，从游戏会话里补一次兜底。
       // 冷启动直接进对局（悬浮窗开着但没经历选人）时会走到这里。
@@ -740,6 +769,7 @@ app.whenReady().then(() => {
     championName: (id) => championName(id),
     // 识别可能给出 60000+ 的高 ID，而排行榜/LCU 用基础 ID —— 归一化后再 join
     canonicalId: (id) => canonicalChampionId(id, dataset?.champions ?? []),
+    pickState: () => champSelectPickState,
     onResult: pushOverlayVision,
   });
   void pollLoop();
