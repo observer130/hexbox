@@ -35,6 +35,8 @@ await build({
     join(here, 'src', 'debug-capture.ts'),
     // 覆盖层渲染自测（无需游戏即可验证渲染端）
     join(here, 'src', 'debug-overlay-test.ts'),
+    // 阶段探针（守望采集脚本用；纯 Node，不依赖 Electron）
+    join(here, 'src', 'phase-probe.ts'),
   ],
   outdir: out,
   outExtension: { '.js': '.cjs' },

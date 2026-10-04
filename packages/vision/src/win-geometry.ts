@@ -40,6 +40,28 @@ export interface PhysicalRect {
 export const MIN_GAME_WINDOW_WIDTH = 320;
 export const MIN_GAME_WINDOW_HEIGHT = 240;
 
+/**
+ * 游戏**本体**的进程名（白名单）。
+ *
+ * ⚠️ 为什么必须白名单而不是"找标题像 League 的窗口"：
+ * 实测 `LeagueClientUx.exe`（Riot 客户端 UI）的**窗口标题就是
+ * `League of Legends`**、窗口类为 `RCLIENT`、尺寸 1600×900 —— 与游戏
+ * 窗口在名称上完全无法区分。此前按名字匹配，于是在**没有对局**时
+ * 返回了客户端窗口：覆盖层会贴着客户端摆放，坐标换算全错。
+ *
+ * 客户端 UI、Riot Client、WeGame 一律不在白名单内。
+ */
+export const GAME_PROCESS_NAMES = ['League of Legends'] as const;
+
+/** 已知的**非**游戏进程（Riot 客户端族）——显式排除，便于诊断与日志。 */
+export const RIOT_CLIENT_PROCESS_NAMES = [
+  'LeagueClientUx',
+  'LeagueClient',
+  'RiotClientServices',
+  'Riot Client',
+  'WeGame',
+] as const;
+
 export interface GameWindowCheck {
   readonly rect: PhysicalRect;
   /** `IsWindowVisible` 的结果（最小化/隐藏时为 false）。 */
@@ -161,6 +183,9 @@ export async function findGameWindowRect(): Promise<PhysicalRect | null> {
 
   // 注意：必须用 Add-Type -TypeDefinition（main/index.ts 有完整踩坑记录）。
   // 同时报告 IsWindowVisible 与桌面范围 —— 调用方据此排除幽灵窗口。
+  //
+  // ⚠️ 只认游戏本体进程（'League of Legends'）：客户端 UI
+  // `LeagueClientUx` 的窗口标题同样是 'League of Legends'，按名字找必然误选。
   const script = `
 $src = @'
 using System;
@@ -173,7 +198,7 @@ public static class HexboxWinApi {
 }
 '@
 Add-Type -TypeDefinition $src -ErrorAction SilentlyContinue
-$proc = Get-Process -Name 'LeagueClientUx','League of Legends' -ErrorAction SilentlyContinue |
+$proc = Get-Process -Name 'League of Legends' -ErrorAction SilentlyContinue |
   Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
 if (-not $proc) { exit 0 }
 $r = New-Object HEXBOX_RECT
