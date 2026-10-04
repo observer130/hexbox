@@ -71,6 +71,13 @@ export interface VisionLoopDeps {
   readonly rankings: RankingSnapshot | null | (() => RankingSnapshot | null);
   /** 英雄名映射。 */
   readonly championName: (id: number) => string;
+  /**
+   * 把识别到的英雄 ID 归一化到排行榜口径的基础 ID。
+   *
+   * 必须注入而不是直接 import：core 的 `canonicalChampionId` 需要英雄表，
+   * 而英雄表在主进程里（此处只做纯计算）。
+   */
+  readonly canonicalId: (id: number) => number;
   /** 识别结果的消费方（主进程推给覆盖窗口）。 */
   readonly onResult: (msg: VisionOverlayMsg, display: Electron.Display) => void;
 }
@@ -170,8 +177,11 @@ export async function runVisionRound(
     const labels: CardLabel[] = [];
     const identified: string[] = [];
     for (const cand of detectTopBarCandidates(bmp, captureSlots, portraits)) {
-      const row = rankings?.heroes.find((h) => h.championId === cand.championId);
-      const sub = deps.championName(cand.championId);
+      // ⚠️ 识别可能给出高 ID（60000+），而排行榜只有基础 ID —— 必须归一化，
+      // 否则顶栏每个英雄都会显示「暂无数据」（真机实测过）。
+      const cid = deps.canonicalId(cand.championId);
+      const row = rankings?.heroes.find((h) => h.championId === cid);
+      const sub = deps.championName(cid);
       identified.push(`${sub}=${cand.score.toFixed(2)}`);
       // 标签定位用截屏空间的槽位矩形（与识别同一坐标系）
       labels.push(
@@ -179,7 +189,7 @@ export async function runVisionRound(
           name: sub,
           winRate: row?.winRate ?? 0,
           hasData: row !== undefined,
-          championId: cand.championId,
+          championId: cid,
         }),
       );
     }
@@ -229,10 +239,13 @@ export async function runVisionRound(
     // 胜率 join（core 纯函数）
     let info: ChampSelectInfo;
     if (championId > 0) {
-      const row = rankings?.heroes.find((h) => h.championId === championId);
+      // ⚠️ 同顶栏：名字指纹库含高 ID（60000+）条目，而排行榜只有基础 ID，
+      // 必须归一化，否则识别成功也会显示「暂无数据」（真机实测过）。
+      const cid = deps.canonicalId(championId);
+      const row = rankings?.heroes.find((h) => h.championId === cid);
       info = {
-        championId,
-        name: deps.championName(championId),
+        championId: cid,
+        name: deps.championName(cid),
         winRate: row?.winRate ?? 0,
         winRateChange: 0,
         hasData: row !== undefined,

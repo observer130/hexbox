@@ -68,6 +68,48 @@ export function champSelectInfo(
   };
 }
 
+/**
+ * 英雄 ID 的「同一英雄」判别键（名称归一化）。
+ *
+ * ⚠️ 真机实测（第二阶段顶栏全部显示「暂无数据」的根因）：
+ * 官方数据里**同一个英雄存在两套数字 ID**：
+ *   · 基础 ID（1..999，如 `63` 黑暗之女）—— **排行榜 / LCU / builds 用这一套**；
+ *   · 高 ID（60000+，如 `60001` 黑暗之女）—— **CDragon 图鉴与头像模板里也有**。
+ * 实测：图鉴 173 个基础 ID + 72 个高 ID；英雄榜对基础 ID 覆盖 173/173，
+ * 对高 ID 覆盖 **0/72**。因此只按数字 join 会让全部高 ID 英雄「暂无数据」。
+ *
+ * 用**名称**做键对齐两套编号：72 个高 ID 里 59 个与基础 ID 同名，
+ * 可靠命中。剩余 13 个连名称都不同（`60003 哨兵之殇` vs `3 正义巨像`
+ * —— 英雄在从高 ID 迁到基础 ID 的过程中改了名），**名称法无法对齐**，
+ * 只能诚实显示「暂无数据」，不要用 `-60000` 偏移去猜（实测会错配）。
+ */
+export function championKey(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+/**
+ * 把识别到的英雄 ID 归一化到「排行榜口径」的基础 ID。
+ *
+ * 识别（OCR / 头像模板）可能给出高 ID，而排行榜只有基础 ID；
+ * 先按数字直查，未命中再按**名称**找基础 ID，最后回退原 ID
+ * （宁可显示「暂无数据」，也不要错配成别的英雄）。
+ *
+ * 已知边界：13 个「改名英雄」无法对齐（见 `championKey` 说明），
+ * 它们的胜率会缺失 —— 这是数据层面的限制，不是 bug。
+ */
+export function canonicalChampionId(
+  championId: number,
+  champions: readonly Champion[],
+): number {
+  if (championId <= 0) return championId;
+  if (championId < 60000) return championId;
+  const self = champions.find((c) => c.id === championId);
+  if (!self) return championId;
+  const key = championKey(self.name);
+  const base = champions.find((c) => c.id < 60000 && championKey(c.name) === key);
+  return base?.id ?? championId;
+}
+
 /* ------------------------------------------------------------------ */
 /* 海克斯选择阶段：该英雄口径的海克斯强度                              */
 /* ------------------------------------------------------------------ */
