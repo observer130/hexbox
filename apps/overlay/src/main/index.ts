@@ -17,6 +17,7 @@
  */
 
 import { app, BrowserWindow, ipcMain, screen, type Rectangle } from 'electron';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
@@ -42,6 +43,7 @@ import {
 } from '@hexbox/vision';
 import {
   augmentStrength,
+  canonicalChampionId,
   champSelectInfo,
   championBuild,
   findDetail,
@@ -192,10 +194,53 @@ async function positionOverlay(): Promise<void> {
 // 数据
 // ---------------------------------------------------------------------------
 
-async function loadDataset(): Promise<void> {
-  // electron . 的 cwd 是 apps/overlay，数据在仓库根的 data/
+/**
+ * 解析数据目录（仓库根的 `data/`）。
+ *
+ * ⚠️ 真机教训（覆盖层"永远是暂无数据"的根因）：原实现只用
+ * `join(app.getAppPath(), '..', '..', 'data')`。它解析成
+ * `apps/overlay/data`（不存在）→ dataset/rankings/templates 全部读不到：
+ *   · rankings = null  → 所有英雄都显示「暂无数据」
+ *   · 名字指纹 = 空    → 卡片名字永远识别不出
+ * 而 `debug:capture` 用的是另一套算法（`debug/..` = 仓库根），
+ * 于是出现"调试工具能识别、实时运行不能"的诡异现象。
+ *
+ * ⚠️ 也不要用固定的 `..\..\` 层级：打包后 `__dirname` 是 `dist/main`，
+ * 而 `process.cwd()` 取决于启动方式（`electron .` 与直接跑 bundle 不同）。
+ * 唯一稳妥的做法是**向上遍历、以 `data/dataset.json` 是否存在为准**。
+ */
+function resolveDataDir(): string {
   const envDir = process.env['HEXBOX_DATA_DIR'];
-  const dir = envDir ?? join(app.getAppPath(), '..', '..', 'data');
+  if (envDir) return envDir;
+
+  const tried: string[] = [];
+  const seen = new Set<string>();
+  const starts = [__dirname, app.getAppPath(), process.cwd()];
+  for (const start of starts) {
+    let dir = start;
+    for (let depth = 0; depth < 6; depth++) {
+      const cand = join(dir, 'data');
+      if (!seen.has(cand)) {
+        seen.add(cand);
+        tried.push(cand);
+        if (existsSync(join(cand, 'dataset.json'))) return cand;
+      }
+      const parent = join(dir, '..');
+      if (parent === dir) break; // 已到盘根
+      dir = parent;
+    }
+  }
+  console.warn(
+    `[hexbox] ⚠ 未找到 data/dataset.json（已尝试 ${tried.length} 个候选目录，例如：\n` +
+      `         ${tried.slice(0, 4).join('\n         ')}\n` +
+      '         请先运行 pnpm sync；或用 HEXBOX_DATA_DIR 显式指定数据目录）',
+  );
+  return join(process.cwd(), 'data');
+}
+
+async function loadDataset(): Promise<void> {
+  const dir = resolveDataDir();
+  console.log(`[hexbox] 数据目录: ${dir}`);
 
   try {
     dataset = await readDataset(dir);
@@ -211,6 +256,11 @@ async function loadDataset(): Promise<void> {
 
   try {
     rankings = await readRankings(dir);
+    console.log(
+      rankings
+        ? `[hexbox] 排行榜已加载: 英雄榜 ${rankings.heroes.length} / 海克斯榜 ${rankings.augments.length}  统计日期 ${rankings.meta.dataDate || '未知'}`
+        : `[hexbox] 未找到排行榜 (${dir}) —— 卡片标签会全部显示「暂无数据」`,
+    );
   } catch (e) {
     console.warn('[hexbox] 排行榜读取失败:', e instanceof Error ? e.message : e);
     rankings = null;
@@ -703,6 +753,8 @@ app.whenReady().then(() => {
     portraits: () => portraits,
     rankings: () => rankings,
     championName: (id) => championName(id),
+    // 识别可能给出 60000+ 的高 ID，而排行榜/LCU 用基础 ID —— 归一化后再 join
+    canonicalId: (id) => canonicalChampionId(id, dataset?.champions ?? []),
     onResult: pushOverlayVision,
   });
   void pollLoop();
@@ -722,10 +774,11 @@ app.whenReady().then(() => {
  */
 async function loadNameLibrary(): Promise<void> {
   try {
-    const dataDir = join(app.getAppPath(), '..', '..', 'data');
+    // 与 loadDataset 共用同一份路径解析 —— 两处各算一次正是"读错目录"的温床
+    const dataDir = resolveDataDir();
     const encoded = await readTemplates(dataDir);
     if (!encoded) {
-      console.warn('[hexbox] 无模板包（pnpm templates 生成）—— 覆盖层将无法识别英雄');
+      console.warn(`[hexbox] 无模板包 (${dataDir})，请运行 pnpm templates —— 覆盖层将无法识别英雄`);
       return;
     }
     const pack = decodePack(encoded);
@@ -736,11 +789,12 @@ async function loadNameLibrary(): Promise<void> {
       height: n.height,
       bits: base64ToBits(n.bits, n.width * n.height),
     }));
-    // 头像模板必须排除 60000+ 的「变体 ID」条目（CDragon
-    // champion-summary 的静态定义占位,如 60038 = 虚空行者的变体）：
-    // 它们与真英雄同图,匹配命中后 join 不到排行榜/详情数据,
-    // 会显示「暂无数据」—— 看起来像识别失败,实为 ID 无效。
-    const realPortraits = pack.templates.filter((t) => t.championId > 0 && t.championId < 60000);
+    // ⚠️ 曾经这里过滤掉所有 60000+ 的模板，理由是"变体 ID、join 不到数据"。
+    // 真机核实后是**错的**：模板包里 245 个 ID **全是图鉴里的真英雄**
+    // （60001 黑暗之女、60002 狂战士…），过滤一次就废掉 72 个英雄，
+    // 第二阶段顶栏对它们永远识别不出。同一位英雄的两套编号问题
+    // 应该在 **ID 归一化**（core/canonicalChampionId）里解决，而不是丢模板。
+    const realPortraits = pack.templates.filter((t) => t.championId > 0);
     const skipped = pack.templates.length - realPortraits.length;
     portraits = prepareTemplates(
       realPortraits.map((t) => ({
@@ -751,7 +805,7 @@ async function loadNameLibrary(): Promise<void> {
     );
     console.log(
       `[hexbox] 名字指纹 ${nameLibrary.length} 个 / 头像模板 ${portraits.length} 个已加载` +
-        (skipped > 0 ? `（排除 ${skipped} 个 60000+ 变体 ID）` : ''),
+        (skipped > 0 ? `（跳过 ${skipped} 个非法 ID）` : ''),
     );
   } catch (e) {
     console.warn('[hexbox] 名字指纹加载失败:', e instanceof Error ? e.message : e);
