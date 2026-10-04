@@ -169,7 +169,9 @@ export async function runVisionRound(
     `[hexbox:vision] 截屏 ${bmp.width}x${bmp.height} 窗口` +
       `${windowPhysical ? `${windowPhysical.width}x${windowPhysical.height}@${windowPhysical.x},${windowPhysical.y}` : '未知'}` +
       ` 显示器${display.bounds.width}x${display.bounds.height}@${display.scaleFactor}` +
-      ` 判定=${kind} scale=${scale.toFixed(3)}`,
+      ` 工作区${display.workArea.width}x${display.workArea.height}@${display.workArea.x},${display.workArea.y}` +
+      ` 判定=${kind} scale=${scale.toFixed(3)}` +
+      ` geo=${geo.windowWidth.toFixed(0)}x${geo.windowHeight.toFixed(0)}@${geo.windowX.toFixed(0)},${geo.windowY.toFixed(0)}`,
   );
 
   const det = detectCards(bmp);
@@ -199,9 +201,17 @@ export async function runVisionRound(
     }
   }
 
-  // 阶段判定：LCU 选中状态优先；拿不到时才用"顶栏是否有头像"启发式。
-  // ⚠️ 二阶段**绝不能**再画卡片标签 —— 真机反馈卡片标签会残留到二阶段。
-  const isPhase2 = pickState === 'locked' || (pickState === 'unknown' && topBarOccupiedCount > 0);
+  // 阶段判定：**顶栏有内容就是二阶段**（物理事实，真机两阶段都验证过：
+  // 一阶段 10 格全空 → 占用 0；二阶段有头像 → 占用 4）。
+  // LCU 的 pickState 只作为**补充**：它说 locked 就算二阶段，但它说 picking
+  // **不能**推翻占用证据。
+  //
+  // ⚠️ 真机 bug（本行曾写错）：上一版把 pickState 当权威 →
+  //   `isPhase2 = pickState==='locked' || (pickState==='unknown' && 占用>0)`
+  // 一旦 LCU 会话里的 pick 动作解析不到（字段与假设不一致），pickState 就是
+  // 'picking'，于是二阶段**仍走一阶段分支**：detectCards 在美术图上检出假卡片，
+  // 标签被画到屏幕左侧、且每轮位置几乎不变（用户报告的第 4 条）。
+  const isPhase2 = topBarOccupiedCount > 0 || pickState === 'locked';
 
   if (isPhase2) {
     // ── 第二阶段：顶栏备选区逐格胜率 ──
@@ -225,7 +235,11 @@ export async function runVisionRound(
     }
     const diag =
       `第二阶段(${pickState}): 顶栏占用 ${topBarOccupiedCount} 格, 识别成功 ${labels.length} 格` +
-      (identified.length > 0 ? ` [${identified.join(' ')}]` : '');
+      (identified.length > 0 ? ` [${identified.join(' ')}]` : '') +
+      (labels[0]
+        ? ` 标签0@(${labels[0].x.toFixed(0)},${labels[0].y.toFixed(0)}) ${labels[0].w}x${labels[0].h}` +
+          ` 槽0 x=${captureSlots[0]!.x.toFixed(3)}(归一)→CSS ${(captureSlots[0]!.x * geo.windowWidth).toFixed(0)}`
+        : '');
     // 有头像但一个都没认出来：不画（宁漏勿错），诊断留给日志
     return { msg: { active: labels.length > 0, labels, diag }, display };
   }
@@ -291,13 +305,20 @@ export async function runVisionRound(
     );
   }
 
+  // 真机核对用：把标签坐标与它对应的卡片矩形一起报出来，
+  // 这样"标签是否落在卡片下方"可以只看日志判断，不必再猜几何。
+  const firstCard = det.cards[labels.length > 0 ? 0 : 0];
   return {
     msg: {
       active: true,
       labels,
       diag:
         `第一阶段(${pickState}): 卡片 ${det.cards.length} 张 → 出标签 ${labels.length} 个` +
-        ` [得分/分差 ${perCard.join(' ')}]`,
+        ` [得分/分差 ${perCard.join(' ')}]` +
+        (labels[0] && firstCard
+          ? ` 标签0@(${labels[0].x.toFixed(0)},${labels[0].y.toFixed(0)}) ${labels[0].w}x${labels[0].h}` +
+            ` 卡0 y=${(firstCard.y + firstCard.h).toFixed(3)}(归一)→CSS ${((firstCard.y + firstCard.h) * geo.windowHeight).toFixed(0)}`
+          : ''),
     },
     display,
   };

@@ -126,14 +126,24 @@ test('topBarSlotRect：x0 与真机校准值一致（防无意改动）', () => 
 });
 
 test('2026-10-04 复核：预测槽位与真机截图像素级对齐', () => {
-  // 用 champselect-locked-152419-raw.png（3413x1920）复核过：红框正好套住
-  // 10 个槽位。这里锁定"槽位在截屏里的像素位置"，防止有人改动几何后
-  // 又出现"顶栏认不出"的排查地狱。
-  const W = 3413;
+  // 两张真机图交叉验证（同一套归一化几何）：
+  //   · champselect-locked-152419-raw.png（3413×1920，10 格全空）
+  //   · phase2.png（2397×1346，第 1 格有头像）
+  // 两张图的空格左缘都落在 0.2746（= 937/3413 与 657/2397），
+  // 而**有头像的那一格也在 0.2746** —— 曾误以为它左移了一格，
+  // 把行扩成 11 格，结果第 11 格落在"可用"**文字**上（幽灵格，
+  // 一阶段也会判为占用）。此处锁死 10 格与首格位置，防止重演。
   const rects = topBarSlotRects();
-  const px = rects.map((r) => [Math.round(r.x * W), Math.round((r.x + r.w) * W)]);
-  assert.deepEqual(px[0], [937, 1069]);
-  assert.deepEqual(px[9], [2345, 2477]);
+  assert.equal(rects.length, 10);
+  for (const W of [3413, 2397]) {
+    const px = rects.map((r) => [Math.round(r.x * W), Math.round((r.x + r.w) * W)]);
+    if (W === 3413) {
+      assert.deepEqual(px[0], [937, 1069]);
+      assert.deepEqual(px[9], [2345, 2477]);
+    } else {
+      assert.deepEqual(px[0], [658, 751], 'phase2.png 实测：头像格 px 658..751');
+    }
+  }
 });
 
 /* ------------------------------------------------------------------ */
@@ -141,7 +151,7 @@ test('2026-10-04 复核：预测槽位与真机截图像素级对齐', () => {
 /* ------------------------------------------------------------------ */
 
 test('countOccupiedSlots：真机"10 格全空"场景必须返回 0', () => {
-  // 152419 实测：第一阶段顶栏 10 格全空（灰度 std 1.0~5.2、边缘密度 ≤0.06）。
+  // phase1.png 实测：第一阶段顶栏 10 格全空（粗边缘占比 0.000）。
   // 若这里返回非 0，就会误判成第二阶段 —— 卡片胜率将永远不显示。
   const bmp = topBarBitmap(1, []);
   assert.equal(countOccupiedSlots(bmp, topBarSlotRects()), 0);
@@ -152,13 +162,55 @@ test('countOccupiedSlots：有头像的格子被计入（阶段判据）', () =>
   assert.equal(countOccupiedSlots(bmp, topBarSlotRects()), 1);
 });
 
-test('OCCUPANCY 阈值低于真机实测的"空槽"上界（防再次漏判/误判）', () => {
-  // 空槽实测：灰度 std ≤5.2 → 方差 ≤(5.2/255)²≈4.2e-4；边缘密度 ≤0.06。
-  // 阈值必须**高于**这些上界（否则空槽被判占用 → 阶段判断错乱），
-  // 但也不能高到漏掉真实内容（卡片区域边缘密度 ≈2.0）。
-  assert.ok(OCCUPANCY.grayVar > (5.2 / 255) ** 2, '灰度方差阈值应高于空槽上界');
-  assert.ok(OCCUPANCY.edgeDensity > 0.06, '边缘密度阈值应高于空槽上界');
-  assert.ok(OCCUPANCY.edgeDensity < 2.0, '边缘密度阈值应低于真实内容下界');
+test('OCCUPANCY 阈值夹在真机实测量值之间（防再次误判/漏判）', () => {
+  // 2026-10-04 真机两阶段实测（按库内真实算法：16×16 网格 + 12% 内缩）：
+  //   指标        空槽最大值   有头像
+  //   grayVar     0.00101     0.02196
+  //   chromaVar   0.00120     0.00698
+  //   粗边缘占比  0.000       0.200
+  // 阈值必须**高于空槽最大值**（否则空槽判占用 → 阶段错乱），
+  // 同时**低于有头像值**（否则漏判 → 二阶段整格不显示）。
+  const EMPTY_GRAY_VAR = 0.00101;
+  const HERO_GRAY_VAR = 0.02196;
+  const EMPTY_EDGE = 0;
+  const HERO_EDGE = 0.2;
+  assert.ok(OCCUPANCY.grayVar > EMPTY_GRAY_VAR, '灰度方差阈值应高于空槽上界');
+  assert.ok(OCCUPANCY.grayVar < HERO_GRAY_VAR, '灰度方差阈值应低于有头像值');
+  assert.ok(OCCUPANCY.edgeDensity > EMPTY_EDGE, '粗边缘阈值应高于空槽上界');
+  assert.ok(OCCUPANCY.edgeDensity < HERO_EDGE, '粗边缘阈值应低于有头像值');
+  // 主判据是"粗边缘占比"，余量应最大（空槽 0 对头像 0.2）
+  assert.ok(
+    OCCUPANCY.edgeDensity <= HERO_EDGE / 3,
+    '粗边缘阈值应留出至少 3 倍余量',
+  );
+});
+
+test('interiorStats 语义：edgeDensity 是"占比"而非"平均梯度"', () => {
+  // 回归：实现曾返回平均灰度差（0..255 量级），而阈值按占比（0..1）设定，
+  // 于是 0.25 的阈值等于"有一点梯度就算占用" → 空槽被判占用。
+  // 真实空槽并非绝对纯色（视频压缩/渐变会留下 ±3 级噪声），
+  // 用这种区域验证：新口径（粗边缘占比）判为**空**，
+  // 旧口径（平均梯度 ≈2 > 0.25）会误判为占用。
+  const W = 64;
+  const H = 64;
+  const data = new Uint8ClampedArray(W * H * 4);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      // 灰底 20，叠加 ±3 的确定性"噪声"（相邻差最大 6 << EDGE_STEP 24）
+      const v = 20 + ((x * 7 + y * 13) % 7) - 3;
+      const i = (y * W + x) * 4;
+      data[i] = v;
+      data[i + 1] = v;
+      data[i + 2] = v;
+      data[i + 3] = 255;
+    }
+  }
+  const bmp = { width: W, height: H, data };
+  assert.equal(
+    isSlotOccupied(bmp, { x: 0.1, y: 0.1, w: 0.5, h: 0.5 }),
+    false,
+    '带轻微噪声的空槽必须判为空（占比口径下无粗边缘）',
+  );
 });
 
 /* ------------------------------------------------------------------ */

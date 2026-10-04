@@ -108,7 +108,7 @@ node --experimental-strip-types packages/lcu/src/cli.ts --install-dir <安装目
 
 ```bash
 pnpm typecheck   # 全量类型检查（11 个 workspace 项目）
-pnpm test        # 全量测试（274 项）
+pnpm test        # 全量测试（327 项）
 pnpm build       # 构建所有包
 ```
 

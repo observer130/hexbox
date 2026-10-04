@@ -332,3 +332,49 @@ test('makeScreenGeometry：窗口快照形态下无偏移直通', () => {
   // nw = 2560/2560 = 1 → windowWidth = 2560（窗口逻辑宽）
   assert.ok(Math.abs(geo.windowWidth - 2560) < 1e-6, `windowWidth=${geo.windowWidth}`);
 });
+
+test('makeScreenGeometry：窗口矩形与截屏不同比时**弃用该矩形**（真机错位回归）', () => {
+  // 真机实测：探针在 DPI 虚拟化下把全屏游戏窗口报成显示器逻辑尺寸
+  // 2294×960（比例 2.389），而截屏是 3413×1920（比例 1.777）——
+  // 「窗口快照」下两者必然同比，不同比说明该矩形不代表截屏内容。
+  // 旧实现照用该矩形 → 标签整体错位（用户报告"位置不正确"，
+  // 且每轮取到同一错值而"几乎没变化"）。
+  const display = {
+    bounds: { x: 0, y: 0, width: 2294, height: 960 },
+    scaleFactor: 1.5,
+    workArea: { x: 0, y: 0, width: 2294, height: 912 },
+  };
+  const bogus = { x: 0, y: 0, width: 2294, height: 960 }; // 比例 2.389 ≠ 1.777
+  const capture = { width: 3413, height: 1920 };
+  const { geo } = makeScreenGeometry(capture, bogus, display);
+
+  // 应改为按截屏比例推断：高度取显示器逻辑高 960、宽度 = 960 × 1.777 ≈ 1707
+  assert.ok(
+    Math.abs(geo.windowHeight - 960) < 1e-6,
+    `windowHeight 应为 960，实际 ${geo.windowHeight}`,
+  );
+  assert.ok(
+    Math.abs(geo.windowWidth - 1707) <= 1,
+    `windowWidth 应为 1707（按截屏比例），实际 ${geo.windowWidth}`,
+  );
+
+  // 关键性质：卡片检测框下缘（归一化 0.6609）映射到的 CSS y 必须
+  // 与真机截图一致（真机实测卡片下缘 ≈ 634 CSS = 890 截图 px）
+  const cardBottom = 0.6609;
+  const cssY = geo.windowY + cardBottom * geo.windowHeight;
+  assert.ok(Math.abs(cssY - 634.5) < 1, `卡片下缘 CSS y=${cssY}（应 ≈634.5）`);
+});
+
+test('makeScreenGeometry：窗口矩形与截屏同比时照常采用（不误伤正常路径）', () => {
+  const display = {
+    bounds: { x: 0, y: 0, width: 2294, height: 960 },
+    scaleFactor: 1.5,
+    workArea: { x: 0, y: 0, width: 2294, height: 912 },
+  };
+  // 真机正常值：游戏窗口 1706×960（比例 1.777 = 截屏比例）
+  const win = { x: 0, y: 0, width: 1706, height: 960 };
+  const { geo, estimated } = makeScreenGeometry({ width: 3413, height: 1920 }, win, display);
+  assert.equal(estimated, false);
+  assert.equal(geo.windowWidth, 1706);
+  assert.equal(geo.windowHeight, 960);
+});

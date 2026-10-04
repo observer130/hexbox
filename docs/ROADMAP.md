@@ -14,7 +14,7 @@
 | 截屏覆盖层 | ⚠️ 可用待复验 | S2 已实现（卡片下方 / 确认态顶栏逐格胜率），离线全绿，**待真机复验** |
 | 配装方案 | ✅ 可用 | 出装写入客户端「配装方案」，游戏内查看 |
 | LCU | ✅ 可用 | 探测 + REST + 模式识别 + 配装方案写入 |
-| 工程基线 | ✅ 全绿 | **274 项测试** + typecheck（11 个项目）+ build，CI 已接入 |
+| 工程基线 | ✅ 全绿 | **327 项测试** + typecheck（11 个项目）+ build，CI 已接入 |
 
 ### 数据集实测规模（`data/*.json`）
 
@@ -112,7 +112,7 @@ pnpm --filter @hexbox/overlay debug:overlay-test   # 覆盖层渲染自测（不
 ## 四、常用验证命令
 
 ```bash
-pnpm test        # 274 项，应全绿
+pnpm test        # 327 项，应全绿
 pnpm typecheck   # 11 个 workspace 项目
 pnpm build       # web + overlay
 pnpm sync        # 重新拉取数据（联网）

@@ -363,7 +363,17 @@ export function makeScreenGeometry(
       height: windowRect.height,
     };
 
-    if (kind === 'window') {
+    // ⚠️⚠️ 纵横比一致性校验（真机事故修复）：
+    // 「窗口快照」形态下**截屏就是窗口内容**，两者纵横比必然一致。
+    // 真机实测却出现 win=2294×960（比例 2.389）而截屏=3413×1920（1.777）：
+    // 探针在 DPI 虚拟化下把全屏游戏窗口报成了显示器逻辑尺寸，**与截屏内容
+    // 无关**。此时若照用该矩形当几何基准，标签会整体错位
+    // （用户报告"位置不正确"，且因每轮取到同一错值而"几乎没变化"）。
+    // 判据：比例差 > 2% 即认为该矩形不代表截屏 → 退回按截屏比例推断。
+    const capAspect = capture.width / Math.max(1, capture.height);
+    const winAspect = win.width / Math.max(1, win.height);
+    const aspectMismatch = Math.abs(winAspect - capAspect) / capAspect > 0.02;
+    if (kind === 'window' && !aspectMismatch) {
       // 窗口快照：截屏就是窗口内容（等比缩放），无偏移直通
       return {
         kind,
@@ -379,31 +389,39 @@ export function makeScreenGeometry(
         },
       };
     }
-
-    // 显示器快照：截屏≈显示器等比缩放，窗口是其中的子矩形。
-    // nx0 = win.x/dispW, nw = win.width/dispW（截屏与显示器同比）
-    const nx0 = win.x / dispW;
-    const ny0 = win.y / dispH;
-    const nw = win.width / dispW;
-    const nh = win.height / dispH;
-    return {
-      kind,
-      scale: capture.width / Math.max(1, dispW * display.scaleFactor),
-      estimated: false,
-      geo: {
-        captureWidth: capture.width,
-        captureHeight: capture.height,
-        // normalizedRectToScreen: screen = windowX + n.x * windowWidth
-        // 目标: screen = win.x + ((n.x - nx0)/nw) * win.width
-        //   → windowX     = win.x - (nx0/nw) * win.width
-        //     windowWidth = win.width / nw = 显示器逻辑宽（把截屏内归一化
-        //     换算成窗口内归一化的系数）
-        windowX: win.x - (nx0 / nw) * win.width,
-        windowY: win.y - (ny0 / nh) * win.height,
-        windowWidth: win.width / nw,
-        windowHeight: win.height / nh,
-      },
-    };
+    if (kind === 'window' && aspectMismatch) {
+      console.warn(
+        `[vision] ⚠ 窗口矩形 ${win.width}x${win.height}(比例 ${winAspect.toFixed(2)})` +
+          ` 与截屏 ${capture.width}x${capture.height}(比例 ${capAspect.toFixed(2)}) 不同比，` +
+          `判定该矩形不代表截屏内容，改按截屏比例推断`,
+      );
+    }
+    if (kind === 'display') {
+      // nx0 = win.x/dispW, nw = win.width/dispW（截屏与显示器同比）
+      const nx0 = win.x / dispW;
+      const ny0 = win.y / dispH;
+      const nw = win.width / dispW;
+      const nh = win.height / dispH;
+      return {
+        kind,
+        scale: capture.width / Math.max(1, dispW * display.scaleFactor),
+        estimated: false,
+        geo: {
+          captureWidth: capture.width,
+          captureHeight: capture.height,
+          // normalizedRectToScreen: screen = windowX + n.x * windowWidth
+          // 目标: screen = win.x + ((n.x - nx0)/nw) * win.width
+          //   → windowX     = win.x - (nx0/nw) * win.width
+          //     windowWidth = win.width / nw = 显示器逻辑宽（把截屏内归一化
+          //     换算成窗口内归一化的系数）
+          windowX: win.x - (nx0 / nw) * win.width,
+          windowY: win.y - (ny0 / nh) * win.height,
+          windowWidth: win.width / nw,
+          windowHeight: win.height / nh,
+        },
+      };
+    }
+    // kind==='window' 但纵横比不一致 → 落到下面"按截屏比例推断"的兜底
   }
 
   // 无窗口矩形兜底。
@@ -420,8 +438,8 @@ export function makeScreenGeometry(
   const winH = Math.max(1, display.bounds.height);
   const winW = Math.max(1, Math.round(winH * (capture.width / Math.max(1, capture.height))));
   console.warn(
-    `[vision] ⚠ 拿不到游戏窗口矩形，按截屏纵横比推断为 ${winW}x${winH} 逻辑像素` +
-      `（截屏 ${capture.width}x${capture.height}）—— 标签位置可能略有偏移`,
+    `[vision] ⚠ 按截屏纵横比推断游戏窗口为 ${winW}x${winH} 逻辑像素` +
+      `（截屏 ${capture.width}x${capture.height}）—— 标签位置可能有偏移`,
   );
   return {
     kind,

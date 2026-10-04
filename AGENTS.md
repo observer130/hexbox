@@ -98,7 +98,7 @@ From the repo root:
 
 ```bash
 pnpm typecheck     # pnpm -r typecheck (full project)
-pnpm test          # pnpm -r test     (274 tests across 7 packages)
+pnpm test          # pnpm -r test     (327 tests across 7 packages)
 pnpm build         # pnpm -r build
 pnpm dev:web       # web dev server
 pnpm dev:overlay   # overlay (admin + desktop required)
@@ -114,7 +114,7 @@ pnpm --filter @hexbox/web typecheck
 Tests use Node's built-in runner: `node --experimental-strip-types --test ...`.
 **Make the suite green before committing.** New behavior should include tests.
 
-Current coverage: 274 tests — `core` 43 / `vision` 126 / `lcu` 28 /
+Current coverage: 327 tests — `core` 51 / `vision` 162 / `lcu` 37 /
 `provider-communitydragon` 12 / `provider-tencent` 38 / `data-store` 17 /
 `data-cli` 10. `provider-registry` has no tests (pure registry wiring).
 CI (`.github/workflows/ci.yml`) runs `typecheck` → `test` → `build` on every push/PR.

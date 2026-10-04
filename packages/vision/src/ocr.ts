@@ -218,7 +218,14 @@ export function matchName(
  * 分差不足 0.05）。现在：
  *   · minScore 0.5 —— 挡住美术图上的假命中（它们普遍低于 0.5）；
  *   · minMargin 0.015 —— 只用于打破"几乎并列"，不再当主过滤器。
- * 阶段判定交给调用方（LCU 选中状态 / 顶栏占用），不靠名字匹配承担。
+ *
+ * ⚠️⚠️ 但**同名重复条目**会让 margin 恒为 0（真机实测的第二个坑）：
+ * 指纹库同时收录了基础 ID 与 60000+ 变体 ID，它们是**同一个英雄**、
+ * 同图同名 → 最高分与次高分完全相同 → margin = 0 → 整张卡被"区分度不足"
+ * 拒绝。用户报告"一阶段两张卡只显示一个胜率"即由此而来
+ * （实测：卡2 top2 = 殇之木乃伊 0.625 / 殇之木乃伊 0.625）。
+ * 因此**计算次高分时跳过与最高分同名的条目** —— 区分度衡量的是
+ * "不同英雄之间"的差距，同一英雄的不同 ID 不构成竞争。
  */
 export function matchNameCareful(
   strip: { bits: Uint8Array; width: number; height: number },
@@ -243,18 +250,20 @@ export function matchNameCareful(
   );
 
   let first: { championId: number; name: string; score: number } | null = null;
-  let secondScore = 0;
+  /** 次高分（**排除与最高分同名者**，见上方注释）。 */
+  let runnerUp = 0;
   for (const fp of library) {
     const score = fingerprintSimilarity(query, stretchBitsToGrid(fp, gw, gh));
     if (!first || score > first.score) {
-      secondScore = first?.score ?? 0;
+      // 旧最高分只有在"不同名"时才算次高
+      if (first && first.name !== fp.name) runnerUp = Math.max(runnerUp, first.score);
       first = { championId: fp.championId, name: fp.name, score };
-    } else if (score > secondScore) {
-      secondScore = score;
+    } else if (score > runnerUp && fp.name !== first.name) {
+      runnerUp = score;
     }
   }
   if (!first || first.score < minScore) return null;
-  const margin = first.score - secondScore;
+  const margin = first.score - runnerUp;
   if (margin < minMargin) return null; // 区分度不足：不猜
   return { ...first, margin };
 }
