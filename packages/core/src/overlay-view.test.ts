@@ -77,7 +77,7 @@ function detail(partial: Partial<ChampionDetail> = {}): ChampionDetail {
   return {
     championId: 157,
     augments: [],
-    build: { start: [], startCombo: [], shoes: [], core: [], full: [] },
+    build: { start: [], startCombo: [], shoes: [], core: [] },
     skills: [],
     partners: [],
     dataDate: '20260925',
@@ -199,16 +199,13 @@ test('augmentStrength：detail 为 null 时返回空数组', () => {
 /* 对局中：出装                                                        */
 /* ------------------------------------------------------------------ */
 
-test('championBuild：各槽位取自正确的上游字段（出门装 ≠ 六件套）', () => {
+test('championBuild：各槽位取自正确的上游字段', () => {
   const d = detail({
     build: {
       start: [{ itemIds: [1055], pickRate: 0.67, winRate: 0.6 }],
       startCombo: [],
       shoes: [{ itemIds: [3006], pickRate: 0.56, winRate: 0.57 }],
       core: [{ itemIds: [6672, 6673, 3031], pickRate: 0.07, winRate: 0.61 }],
-      full: [
-        { itemIds: [1055, 3006, 6672, 6673, 3031, 1055], pickRate: 0.017, winRate: 0.56 },
-      ],
     },
   });
   const v = championBuild({ detail: d, items: ITEMS });
@@ -216,8 +213,9 @@ test('championBuild：各槽位取自正确的上游字段（出门装 ≠ 六�
   assert.deepEqual(v.start[0]!.names, ['多兰之刃']); // 单件
   assert.deepEqual(v.shoes[0]!.names, ['狂战士胫甲']);
   assert.deepEqual(v.core[0]!.names, ['海妖杀手', '不朽盾弓', '无尽之刃']); // 三件
-  assert.equal(v.full[0]!.names.length, 6); // 六件，未与出门装混用
   assert.equal(v.core[0]!.winRate, 0.61);
+  // 官方页面不展示的 itemover_rec 不采集 —— 视图里也不该有「六件套」槽位
+  assert.deepEqual(Object.keys(v).sort(), ['core', 'shoes', 'start']);
 });
 
 test('championBuild：装备表查不到时回落为「装备#id」，不丢项', () => {
@@ -227,7 +225,6 @@ test('championBuild：装备表查不到时回落为「装备#id」，不丢项'
       startCombo: [],
       shoes: [],
       core: [{ itemIds: [99999], pickRate: 0.1, winRate: 0.5 }],
-      full: [],
     },
   });
   const v = championBuild({ detail: d, items: ITEMS });
@@ -242,14 +239,14 @@ test('championBuild：遵守 limit', () => {
     winRate: 0.5,
   }));
   const d = detail({
-    build: { start: [], startCombo: [], shoes: [], core: many, full: [] },
+    build: { start: [], startCombo: [], shoes: [], core: many },
   });
   assert.equal(championBuild({ detail: d, items: ITEMS, limit: 3 }).core.length, 3);
 });
 
 test('championBuild：detail 为 null 时返回空结构（不抛错）', () => {
   const v = championBuild({ detail: null, items: ITEMS });
-  assert.deepEqual(v, { start: [], shoes: [], core: [], full: [] });
+  assert.deepEqual(v, { start: [], shoes: [], core: [] });
 });
 
 /* ------------------------------------------------------------------ */

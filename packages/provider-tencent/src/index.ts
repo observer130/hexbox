@@ -478,6 +478,7 @@ export function parseItemStatJson(
     const idStr = String(rec[key] ?? '');
     if (!idStr) continue;
     const itemIds = idStr
+      // itemone 是单件；itemcore 用 & 分隔多件。逗号一并接受以抗上游换分隔符。
       .split(/[&,]/)
       .map((x) => toInt(x, -1))
       .filter((x) => x > 0);
@@ -495,7 +496,7 @@ export function parseItemStatJson(
 /** 解析出装（口径与 101 站「出装」页签一致，见 docs/build-slots.md）。 */
 export function parseChampionBuild(raw: RawHeroDetail): ChampionBuild {
   return {
-    // 出门装：单件（官方展示前 5），另有 combo 组合
+    // 出门装：单件（官方页面展示前 5，成交付前 5 与「其余成装」共用这 20 条）
     start: parseItemStatJson(raw.itemone_json, 'itemone'),
     shoes: parseItemStatList(raw.itemshoes),
     // 优先成装（三件套）
@@ -503,32 +504,8 @@ export function parseChampionBuild(raw: RawHeroDetail): ChampionBuild {
     // 出门组合（官方与出门装同源展示，保留以备后用）
     startCombo: parseItemStatList(raw.itemout),
     // ⚠️ itemover_rec（六件组合）**官方页面不展示**，此前误当作
-    // 「成型六件套」写进配装方案，属擅自扩大数据用途。现不再采集。
-    full: [],
+    // 「成型六件套」写进配装方案，属擅自扩大数据用途。现不采集。
   };
-}
-
-/**
- * 解析完整六件套（`itemover_rec`）。
- *
- * 格式：`排名_装备1,装备2,…,装备6_登场率_胜率`，条目以 `;` 分隔。
- * 与 `itemout` 的区别：`itemout` 是**出门装**组合，本字段是**成型六件套**。
- */
-export function parseItemOverRec(raw: string | undefined): BuildItemStat[] {
-  if (!raw) return [];
-  const out: BuildItemStat[] = [];
-  for (const block of raw.split(';')) {
-    if (!block) continue;
-    const f = block.split('_');
-    if (f.length < 4) continue;
-    const itemIds = (f[1] ?? '')
-      .split(',')
-      .map((x) => toInt(x, -1))
-      .filter((x) => x > 0);
-    if (itemIds.length === 0) continue;
-    out.push({ itemIds, pickRate: toNum(f[2]), winRate: toNum(f[3]) });
-  }
-  return out.sort((a, b) => b.pickRate - a.pickRate);
 }
 
 /** 解析最佳拍档（`英雄ID|胜率|登场率|排名`，`#` 分隔）。 */

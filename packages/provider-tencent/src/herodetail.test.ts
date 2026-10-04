@@ -8,8 +8,8 @@
  *      按 `#` 直接切会得到 249 条（含跨组重复），正确结果 126 条。
  *   2. `sk_s` / `sk_w` 是**原始计数**，不是 0..1 比率。
  *      直接当比率会算出 131200% 这种荒谬登场率。
- *   3. `itemout` 是**出门装组合**，`itemover_rec` 才是**成型六件套**。
- *      两者混用会让"完整出装"显示出出门装。
+ *   3. `itemout` 是**出门装组合**，与 `itemone_json`（单件）不是一回事；
+ *      `itemover_rec`（成型六件套）官方页面不展示，已彻底不采集。
  */
 
 import assert from 'node:assert/strict';
@@ -20,7 +20,6 @@ import {
   parseChampionBuild,
   parseChampionDetail,
   parseChampionPartners,
-  parseItemOverRec,
   parseItemStatJson,
   parseItemStatList,
   parseSkillOrders,
@@ -147,16 +146,6 @@ test('parseItemStatJson：脏 JSON 返回空数组而非抛错', () => {
   assert.deepEqual(parseItemStatJson(undefined, 'itemone'), []);
 });
 
-test('parseItemOverRec：解析成型六件套（`;` 分隔）', () => {
-  const out = parseItemOverRec(
-    '1_123430,3006,3031,3032,3153,6333_0.0177_0.5622;2_1,2,3_0.01_0.5',
-  );
-  assert.equal(out.length, 2);
-  assert.equal(out[0]!.itemIds.length, 6); // 六件
-  assert.equal(out[0]!.pickRate, 0.0177);
-  assert.equal(out[0]!.winRate, 0.5622);
-});
-
 test('parseChampionBuild：各槽位取自正确字段；不采集官方未展示的 itemover_rec', () => {
   const raw: RawHeroDetail = {
     itemone_json: '{"1":{"itemone":"1055","winrate":5000,"showrate":8000}}',
@@ -170,8 +159,9 @@ test('parseChampionBuild：各槽位取自正确字段；不采集官方未展�
   assert.deepEqual(b.startCombo[0]!.itemIds, [1018, 1052]); // 出门组合
   assert.deepEqual(b.shoes[0]!.itemIds, [3006]);
   assert.deepEqual(b.core[0]!.itemIds, [1, 2, 3]); // 优先成装（三件套）
-  // itemover_rec 官方页面不展示，不应被采集为「成型六件套」
-  assert.deepEqual(b.full, []);
+  // itemover_rec 官方页面不展示，类型里已无对应字段 ——
+  // 整个 build 对象只有这 4 个槽位，多采集任何字段都会在这里暴露。
+  assert.deepEqual(Object.keys(b).sort(), ['core', 'shoes', 'start', 'startCombo']);
 });
 
 /* ------------------------------------------------------------------ */

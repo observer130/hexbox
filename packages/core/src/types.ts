@@ -219,23 +219,24 @@ export interface BuildItemStat {
  * 出装建议（上游多个字段汇总）。
  *
  * 上游各字段格式不一，统一归一化为 BuildItemStat：
- *   - `itemone_json`  : JSON，winrate/showrate 为**万分比**；单件出门装
- *   - `itemcore_json` : JSON，itemcore 用 `&` 分隔；核心三件套
+ *   - `itemone_json`  : JSON，winrate/showrate 为**万分比**；单件（20 条）
+ *   - `itemcore_json` : JSON，itemcore 用 `&` 分隔；核心三件套（10 条）
  *   - `itemshoes`     : `itemId$登场率$胜率`；鞋子
  *   - `itemout`       : `itemIds$登场率$胜率`；**出门装组合**
- *   - `itemover_rec`  : `排名_六件_登场率_胜率`（`;` 分隔）；**成型六件套**
+ *
+ * ⚠️ 上游还有 `itemover_rec`（成型六件套），但**官方页面不展示它**，
+ * 因此本项目不采集、类型里也没有对应字段 —— 此前误把它当「成型六件套」
+ * 写进配装方案，属擅自扩大数据用途（见 docs/build-slots.md §已废弃）。
  */
 export interface ChampionBuild {
-  /** 出门装单件（按登场率降序）。 */
+  /** 出门装单件（按登场率降序，实测 20 条）。 */
   readonly start: readonly BuildItemStat[];
   /** 出门装组合（如「灵巧披风+增幅典籍」）。 */
   readonly startCombo: readonly BuildItemStat[];
   /** 鞋子。 */
   readonly shoes: readonly BuildItemStat[];
-  /** 核心三件套组合。 */
+  /** 核心三件套组合（按登场率降序，实测 10 条）。 */
   readonly core: readonly BuildItemStat[];
-  /** 成型六件套。 */
-  readonly full: readonly BuildItemStat[];
 }
 
 /** 技能加点方案（上游 `skill_json`，暂只保留加点序列与统计）。 */

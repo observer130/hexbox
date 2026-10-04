@@ -153,8 +153,6 @@ export interface ChampionBuildView {
   readonly shoes: BuildSlotRow[];
   /** 核心三件套。 */
   readonly core: BuildSlotRow[];
-  /** 成型六件套。 */
-  readonly full: BuildSlotRow[];
 }
 
 export interface BuildViewOptions {
@@ -172,13 +170,16 @@ export interface BuildViewOptions {
  *   - `startCombo` 出门装组合（`itemout`）
  *   - `shoes`     鞋（`itemshoes`）
  *   - `core`      核心三件套（`itemcore_json`）
- *   - `full`      成型六件套（`itemover_rec`）
+ *
+ * ⚠️ 上游的 `itemover_rec`（成型六件套）**官方页面不展示**，
+ * 本项目不采集、视图里也没有该槽位 —— 曾把它当「六神装」展示，
+ * 用户找不到出处（见 docs/build-slots.md）。
  *
  * 出门装两路数据合并展示：单件与组合对玩家是同一件事的不同粒度。
  */
 export function championBuild(options: BuildViewOptions): ChampionBuildView {
   const { detail, items, limit = 3 } = options;
-  const empty: ChampionBuildView = { start: [], shoes: [], core: [], full: [] };
+  const empty: ChampionBuildView = { start: [], shoes: [], core: [] };
   if (!detail) return empty;
 
   const nameById = new Map<number, string>();
@@ -196,7 +197,6 @@ export function championBuild(options: BuildViewOptions): ChampionBuildView {
     start: toRows(detail.build.start),
     shoes: toRows(detail.build.shoes),
     core: toRows(detail.build.core),
-    full: toRows(detail.build.full),
   };
 }
 

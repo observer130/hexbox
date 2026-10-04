@@ -29,7 +29,7 @@ import {
 /* 夹具                                                                */
 /* ------------------------------------------------------------------ */
 
-const EMPTY: ChampionBuild = { start: [], startCombo: [], shoes: [], core: [], full: [] };
+const EMPTY: ChampionBuild = { start: [], startCombo: [], shoes: [], core: [] };
 
 function build(partial: Partial<ChampionBuild>): ChampionBuild {
   return { ...EMPTY, ...partial };
@@ -148,7 +148,13 @@ test('buildBlocks：优先成装最多 3 套', () => {
   assert.equal(blocks.filter((b) => b.type.startsWith('优先成装')).length, 3);
 });
 
-test('buildBlocks：其余成装把单件合并进**一个**栏位', () => {
+test('buildBlocks：其余成装 = itemone 全部条目去掉第 1 名（真实回归）', () => {
+  // 真实数据：parseItemStatJson 产出的 start 恰好 **20 条**（实测 173/173 英雄），
+  // 官方页面把同一份 itemone_json 展示两次：前 5 作「出门装」、**其余全部**
+  // 作「其余成装」（见 docs/build-slots.md 的核实表）：
+  //   其余成装 = 7.51 / 5.95 / 5.68 / 71.19 / 59.84 / 58.02
+  // 曾经的 bug：写成 slice(1, 11) → 多出第 1 名（71.19，属「出门装」）
+  // 且丢掉第 11~20 名（2.5%~7.5%，正是官方该栏里最高的几件）。
   const start = Array.from({ length: 20 }, (_, i) => ({
     itemIds: [1000 + i],
     pickRate: 0.7 - i / 100,
@@ -157,9 +163,34 @@ test('buildBlocks：其余成装把单件合并进**一个**栏位', () => {
   const blocks = buildBlocks(build({ start }));
   const rest = blocks.filter((b) => b.type === '其余成装');
   assert.equal(rest.length, 1, '其余成装应只有一栏');
-  assert.ok(rest[0]!.items.length > 1, '该栏应包含多个单件');
-  // 不含第 1 名（那是「出门装」）
-  assert.equal(rest[0]!.items.some((i) => i.id === '1000'), false);
+
+  const ids = rest[0]!.items.map((i) => i.id);
+  // 第 1 名是「出门装」，不得重复出现在「其余成装」里
+  assert.equal(ids.includes('1000'), false, '不得包含出门装第 1 名');
+  // 其余 19 条一条都不能少（第 11~20 名曾被 slice 上界丢掉）
+  assert.equal(ids.length, 19, '应包含除第 1 名外的全部 19 条');
+  for (let i = 1; i < 20; i++) {
+    assert.ok(ids.includes(String(1000 + i)), `缺少第 ${i + 1} 名 (${1000 + i})`);
+  }
+  // 上游可能给出重复单件，配装方案里不应出现重复条目
+  assert.equal(new Set(ids).size, ids.length, '其余成装内不得有重复装备');
+});
+
+test('buildBlocks：其余成装对上游重复单件去重', () => {
+  // 上游偶尔把同一件装备给成两个条目（不同登场率）：
+  // 配装方案同一栏里出现两次同一件装备纯属噪声。
+  const blocks = buildBlocks(
+    build({
+      start: [
+        { itemIds: [1055], pickRate: 0.7, winRate: 0.5 }, // 出门装（第 1 名）
+        { itemIds: [3031], pickRate: 0.2, winRate: 0.5 },
+        { itemIds: [3031], pickRate: 0.1, winRate: 0.5 }, // 重复
+        { itemIds: [6333], pickRate: 0.05, winRate: 0.5 },
+      ],
+    }),
+  );
+  const ids = blocks.find((b) => b.type === '其余成装')!.items.map((i) => i.id);
+  assert.deepEqual(ids, ['3031', '6333']);
 });
 
 test('buildBlocks：块标题带胜率（游戏内也能看到依据）', () => {
@@ -181,7 +212,6 @@ const FULL_BUILD = build({
   start: [{ itemIds: [3177], pickRate: 0.5, winRate: 0.55 }],
   shoes: [{ itemIds: [3008], pickRate: 0.4, winRate: 0.56 }],
   core: [{ itemIds: [6697, 6333, 2517], pickRate: 0.06, winRate: 0.6 }],
-  full: [{ itemIds: [6697, 3008, 6333, 2517, 3033, 3143], pickRate: 0.01, winRate: 0.58 }],
 });
 
 test('makeItemSet：关联地图 ID 是海斗的 12（填错会静默失效）', () => {

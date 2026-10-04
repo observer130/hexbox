@@ -110,7 +110,6 @@ async function cmdWrite(client: LcuClient, championIds: number[]): Promise<void>
         startCombo: [...detail.build.startCombo],
         shoes: [...detail.build.shoes],
         core: [...detail.build.core],
-        full: [...detail.build.full],
       },
       dataDate: builds.meta.dataDate,
     });

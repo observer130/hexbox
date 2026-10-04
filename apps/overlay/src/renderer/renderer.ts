@@ -38,7 +38,6 @@ interface OverlayStateMsg {
     start: BuildSlot[];
     shoes: BuildSlot[];
     core: BuildSlot[];
-    full: BuildSlot[];
   };
   meta: { dataDate: string; hasBuilds: boolean };
   credsDetail: string;
@@ -245,7 +244,6 @@ function render(s: OverlayStateMsg): void {
           slotHtml('出门装', b.start, true),
           slotHtml('鞋子', b.shoes, true),
           slotHtml('核心装备', b.core),
-          slotHtml('成型六件套', b.full),
         ]
           .filter(Boolean)
           .join('') || '<div class="li dim">· 该英雄暂无出装统计</div>';
