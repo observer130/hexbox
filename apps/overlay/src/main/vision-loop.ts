@@ -27,6 +27,7 @@ import {
   makeScreenGeometry,
   matchNameCareful,
   createLabelMemory,
+  probeTopLevelWindows,
   slotLabelFor,
   topBarSlotRects,
   windowRectToCapture,
@@ -104,6 +105,38 @@ function resolveDeps<T>(v: T | (() => T)): T {
 }
 
 /**
+ * 拿不到游戏窗口时，把当前可见顶层窗口打进日志（限流 15 秒一次）。
+ *
+ * 为什么需要：真机上曾长期只看到 `窗口未知`，无从判断是探针坏了、进程名
+ * 不匹配、还是游戏确实没开。枚举一次就能看清（进程名/类名/标题/尺寸都在），
+ * 而不是再靠猜。额外开销一次约 1.5 秒，且只在失败路径上发生。
+ */
+let lastCandidateLogAt = 0;
+async function logWindowCandidatesOnce(): Promise<void> {
+  const now = Date.now();
+  if (now - lastCandidateLogAt < 15_000) return;
+  lastCandidateLogAt = now;
+  try {
+    const cands = await probeTopLevelWindows();
+    const top = [...cands]
+      .sort((a, b) => b.rect.width * b.rect.height - a.rect.width * a.rect.height)
+      .slice(0, 10);
+    console.log(
+      `[hexbox:vision] ⚠ 没找到游戏窗口，可见顶层窗口 ${cands.length} 个（按面积前 10）： ` +
+        top
+          .map(
+            (c) =>
+              `${c.process || '?'}/${c.className} ${c.rect.width}x${c.rect.height}@${c.rect.x},${c.rect.y}` +
+              ` "${c.title.slice(0, 24)}"`,
+          )
+          .join(' | '),
+    );
+  } catch {
+    console.log('[hexbox:vision] ⚠ 枚举顶层窗口失败');
+  }
+}
+
+/**
  * 单轮截屏（供 vision-loop 与 debug 工具复用）。
  *
  * 同时返回窗口物理矩形 —— 它和截屏必须来自**同一次**探测：
@@ -173,6 +206,7 @@ export async function runVisionRound(
       ` 判定=${kind} scale=${scale.toFixed(3)}` +
       ` geo=${geo.windowWidth.toFixed(0)}x${geo.windowHeight.toFixed(0)}@${geo.windowX.toFixed(0)},${geo.windowY.toFixed(0)}`,
   );
+  if (!windowPhysical) void logWindowCandidatesOnce();
 
   const det = detectCards(bmp);
 
@@ -272,8 +306,13 @@ export async function runVisionRound(
     let championId = 0;
     let score = 0;
     let margin = 0;
-    if (raw) {
+    /** 诊断：区分「取样失败」「无文字」「分数不够」三种拒绝原因。 */
+    let why = '';
+    if (!raw) {
+      why = '取样越界';
+    } else {
       const strip = extractNameStrip(raw.gray, raw.width, raw.height);
+      const ink = strip.bits.reduce((s, v) => s + v, 0) / Math.max(1, strip.bits.length);
       // ⚠️ 用带区分度的匹配：第二阶段/对局内会在美术图上误检出矩形，
       // 只看最高分会给出 0.45~0.5 的假命中，于是把错误胜率画到屏幕中间。
       const m = matchNameCareful(strip, nameLibrary);
@@ -281,9 +320,11 @@ export async function runVisionRound(
         championId = m.championId;
         score = m.score;
         margin = m.margin;
+      } else {
+        why = ink < 0.05 ? '无文字' : `分数不够(墨迹${(ink * 100).toFixed(0)}%)`;
       }
     }
-    perCard.push(championId > 0 ? `${score.toFixed(2)}/${margin.toFixed(2)}` : '拒绝');
+    perCard.push(championId > 0 ? `${score.toFixed(2)}/${margin.toFixed(2)}` : `拒绝:${why}`);
 
     if (championId <= 0) {
       // 识别不出就不画（宁漏勿错）—— 用户已确认不要「未识别」占位框

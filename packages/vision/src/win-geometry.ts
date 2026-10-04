@@ -177,7 +177,191 @@ export const findGameWindowRectCached: CachedWindowRect = createWindowRectCache(
  * ⚠️ 单次调用约 1.2 秒（PowerShell + Add-Type）。常规轮询请用
  * `findGameWindowRectCached`，只有确实需要最新值时才直接调它。
  */
-export async function findGameWindowRect(): Promise<PhysicalRect | null> {
+/**
+ * 枚举出来的一个顶层窗口（诊断 + 选游戏窗口用）。
+ */
+export interface WindowCandidate {
+  readonly pid: number;
+  readonly process: string;
+  readonly className: string;
+  readonly title: string;
+  readonly rect: PhysicalRect;
+}
+
+/**
+ * 枚举所有**可见的顶层窗口**（含进程名/类名/标题/矩形）。
+ *
+ * ⚠️ 为什么不用 `Get-Process -Name 'League of Legends'`（真机事故）：
+ * 原实现依赖「进程名精确匹配 + `MainWindowHandle -ne 0`」。真机上游戏进程
+ * 匹配不到（不同发行版/启动器的进程名不同，且游戏窗口的 `MainWindowHandle`
+ * 常为 0），于是永远返回 null → 调用方退化到"猜窗口尺寸"的兜底 →
+ * **窗口化运行时标签必然错位**（用户报告"二阶段标签一直停在左上角"）。
+ * 现在改为枚举全部可见顶层窗口，把**进程名/类名/标题/矩形一并返回**，
+ * 由调用方按多重判据挑选，并在失败时把候选打进日志 —— 一次运行即可定位。
+ */
+export async function probeTopLevelWindows(): Promise<WindowCandidate[]> {
+  const windir = process.env['windir'] ?? 'C:\\Windows';
+  const ps = join(windir, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+
+  const script = `
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$src = @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+[StructLayout(LayoutKind.Sequential)]
+public struct HEXBOX_RECT { public int Left, Top, Right, Bottom; }
+public static class HexboxWinApi {
+  public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr p);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out HEXBOX_RECT r);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, StringBuilder s, int n);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder s, int n);
+}
+'@
+Add-Type -TypeDefinition $src -ErrorAction SilentlyContinue
+$found = New-Object System.Collections.ArrayList
+$cb = [HexboxWinApi+EnumProc]{
+  param([IntPtr]$hWnd, [IntPtr]$lParam)
+  if (-not [HexboxWinApi]::IsWindowVisible($hWnd)) { return $true }
+  $r = New-Object HEXBOX_RECT
+  if (-not [HexboxWinApi]::GetWindowRect($hWnd, [ref]$r)) { return $true }
+  $w = $r.Right - $r.Left; $h = $r.Bottom - $r.Top
+  if ($w -lt 200 -or $h -lt 150) { return $true }
+  $pid2 = [uint32]0
+  [HexboxWinApi]::GetWindowThreadProcessId($hWnd, [ref]$pid2) | Out-Null
+  $pname = ''
+  try { $pname = (Get-Process -Id $pid2 -ErrorAction Stop).ProcessName } catch { $pname = '' }
+  $cls = New-Object System.Text.StringBuilder 256
+  [HexboxWinApi]::GetClassName($hWnd, $cls, 256) | Out-Null
+  $ttl = New-Object System.Text.StringBuilder 512
+  [HexboxWinApi]::GetWindowText($hWnd, $ttl, 512) | Out-Null
+  [void]$found.Add([PSCustomObject]@{
+    Pid=[int]$pid2; Process=$pname; Class=$cls.ToString(); Title=$ttl.ToString()
+    X=$r.Left; Y=$r.Top; W=$w; H=$h
+  })
+  return $true
+}
+[HexboxWinApi]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null
+$found | ConvertTo-Json -Compress -Depth 3
+`;
+
+  try {
+    const { stdout } = await execFileAsync(
+      existsSync(ps) ? ps : 'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', script],
+      { windowsHide: true, timeout: 15000, maxBuffer: 4 * 1024 * 1024 },
+    );
+    const text = stdout.trim();
+    if (!text) return [];
+    const parsed = JSON.parse(text) as unknown;
+    const arr = Array.isArray(parsed) ? parsed : [parsed];
+    const out: WindowCandidate[] = [];
+    for (const it of arr) {
+      const o = it as {
+        Pid?: number;
+        Process?: string;
+        Class?: string;
+        Title?: string;
+        X?: number;
+        Y?: number;
+        W?: number;
+        H?: number;
+      };
+      if (typeof o.X !== 'number' || typeof o.W !== 'number' || o.W <= 0) continue;
+      out.push({
+        pid: o.Pid ?? 0,
+        process: o.Process ?? '',
+        className: o.Class ?? '',
+        title: o.Title ?? '',
+        rect: { x: o.X, y: o.Y ?? 0, width: o.W, height: o.H ?? 0 },
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 从候选窗口里挑出**游戏本体**窗口。
+ *
+ * 判据（按优先级）：
+ *   1. 排除客户端族（进程名 `LeagueClient*`/`Riot*`，或类名 `RCLIENT`）——
+ *      客户端窗口的标题同样是 "League of Legends"，纯按标题找必然误选；
+ *   2. 进程名以 `League of Legends` 开头（兼容 `League of Legends (TM) Client`）；
+ *   3. 否则：标题含 "League of Legends" 且不是客户端；
+ *   4. 有 `captureAspect` 时，进一步要求窗口纵横比与之相符（截屏就是窗口
+ *      内容，两者必然同比）—— 这条能把"标题相同但其实是别的窗口"滤掉。
+ */
+export function pickGameWindow(
+  candidates: readonly WindowCandidate[],
+  options: {
+    readonly captureAspect?: number;
+    readonly screen?: {
+      readonly width: number;
+      readonly height: number;
+      readonly slack?: number;
+    };
+  } = {},
+): PhysicalRect | null {
+  const isClient = (c: WindowCandidate): boolean =>
+    // 显式白名单/黑名单（见本文件顶部的 `GAME_PROCESS_NAMES` /
+    // `RIOT_CLIENT_PROCESS_NAMES`）——两者保持单一事实来源
+    RIOT_CLIENT_PROCESS_NAMES.some((n) => c.process.toLowerCase() === n.toLowerCase()) ||
+    /^LeagueClient/i.test(c.process) ||
+    /^Riot/i.test(c.process) ||
+    /RCLIENT/i.test(c.className);
+
+  const plausible = candidates.filter(
+    (c) =>
+      !isClient(c) &&
+      isPlausibleGameWindow({ rect: c.rect, visible: true, screen: options.screen }),
+  );
+
+  const byProcess = plausible.filter((c) => /^League of Legends/i.test(c.process));
+  const byTitle = plausible.filter((c) => /League of Legends/i.test(c.title));
+  const pool = byProcess.length > 0 ? byProcess : byTitle.length > 0 ? byTitle : [];
+
+  if (pool.length === 0) return null;
+
+  const aspectOk = (c: WindowCandidate): boolean => {
+    if (options.captureAspect === undefined) return true;
+    const a = c.rect.width / Math.max(1, c.rect.height);
+    return Math.abs(a - options.captureAspect) / options.captureAspect <= 0.02;
+  };
+  const matching = pool.filter(aspectOk);
+  const finalPool = matching.length > 0 ? matching : pool;
+  // 多个候选时取面积最大的（游戏本体通常最大）
+  return finalPool.reduce((best, c) =>
+    c.rect.width * c.rect.height > best.rect.width * best.rect.height ? c : best,
+  ).rect;
+}
+
+/**
+ * 查询游戏客户端主窗口矩形（物理像素）。
+ *
+ * 返回 null 表示没有**可信的**游戏窗口（见 `pickGameWindow`）。
+ *
+ * ⚠️ 单次调用约 1.5 秒（PowerShell + Add-Type + 枚举）。常规轮询请用
+ * `findGameWindowRectCached`，只有确实需要最新值时才直接调它。
+ */
+export async function findGameWindowRect(options: {
+  readonly captureAspect?: number;
+  readonly screen?: {
+    readonly width: number;
+    readonly height: number;
+    readonly slack?: number;
+  };
+} = {}): Promise<PhysicalRect | null> {
+  const candidates = await probeTopLevelWindows();
+  return pickGameWindow(candidates, options);
+}
+
+/** 陈旧的精确进程名探针（保留给测试/极端场景；常规路径用 `probeTopLevelWindows`）。 */
+async function findGameWindowRectByProcessName(): Promise<PhysicalRect | null> {
   const windir = process.env['windir'] ?? 'C:\\Windows';
   const ps = join(windir, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 

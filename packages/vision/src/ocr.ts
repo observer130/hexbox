@@ -213,19 +213,14 @@ export function matchName(
  * 只看"最高分"会给出 0.45~0.5 的**假命中**，于是覆盖层把错误的胜率
  * 画在屏幕中间 —— 比不显示更糟（项目原则：宁漏勿错）。
  *
- * ⚠️ 阈值取舍（真机踩坑）：初版把 minMargin 设成 0.05，结果**误杀了真卡** ——
- * 一阶段两张卡只认出一张（真卡得分 0.56~0.67，但第二名也常在 0.5 上下，
- * 分差不足 0.05）。现在：
- *   · minScore 0.5 —— 挡住美术图上的假命中（它们普遍低于 0.5）；
- *   · minMargin 0.015 —— 只用于打破"几乎并列"，不再当主过滤器。
- *
- * ⚠️⚠️ 但**同名重复条目**会让 margin 恒为 0（真机实测的第二个坑）：
- * 指纹库同时收录了基础 ID 与 60000+ 变体 ID，它们是**同一个英雄**、
- * 同图同名 → 最高分与次高分完全相同 → margin = 0 → 整张卡被"区分度不足"
- * 拒绝。用户报告"一阶段两张卡只显示一个胜率"即由此而来
- * （实测：卡2 top2 = 殇之木乃伊 0.625 / 殇之木乃伊 0.625）。
- * 因此**计算次高分时跳过与最高分同名的条目** —— 区分度衡量的是
- * "不同英雄之间"的差距，同一英雄的不同 ID 不构成竞争。
+ * ⚠️ 阈值取舍（真机踩坑，改过三次）：
+ *   · minScore 0.5（初值）→ **真机上一阶段两张卡全被拒**。实测同一张真机图，
+ *     在我的重采样上得分 0.540~0.649，而真机截屏（3413×1920，渲染细节不同）
+ *     刚好掉到 0.5 以下 → 一个标签都不出。0.5 太贴边，**降到 0.4**。
+ *     假阳性不必靠这个阈值挡：阶段判定（顶栏占用 / LCU）已经在二阶段
+ *     完全不走卡片分支了（见 vision-loop 的 isPhase2）。
+ *   · minMargin 0.05（初值）→ 误杀真卡；降到 0.015 只用于打破并列，
+ *     并且**跳过同名条目**（同名 = 同一英雄的 60000+ 变体 ID）。
  */
 export function matchNameCareful(
   strip: { bits: Uint8Array; width: number; height: number },
@@ -237,7 +232,7 @@ export function matchNameCareful(
     readonly gridHeight?: number;
   } = {},
 ): { championId: number; name: string; score: number; margin: number } | null {
-  const minScore = options.minScore ?? 0.5;
+  const minScore = options.minScore ?? 0.4;
   const minMargin = options.minMargin ?? 0.015;
   const gw = options.gridWidth ?? NAME_STRIP.gridWidth;
   const gh = options.gridHeight ?? NAME_STRIP.gridHeight;

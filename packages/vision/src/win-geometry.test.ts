@@ -14,10 +14,109 @@ import {
   snapshotKind,
   isPlausibleGameWindow,
   createWindowRectCache,
+  pickGameWindow,
   GAME_PROCESS_NAMES,
   RIOT_CLIENT_PROCESS_NAMES,
   type PhysicalRect,
+  type WindowCandidate,
 } from './win-geometry.ts';
+
+/* ------------------------------------------------------------------ */
+/* pickGameWindow：从枚举候选里挑游戏本体（真机事故回归）                 */
+/* ------------------------------------------------------------------ */
+
+/** 造一个候选窗口。 */
+function cand(
+  process: string,
+  className: string,
+  title: string,
+  rect: PhysicalRect,
+): WindowCandidate {
+  return { pid: 1, process, className, title, rect };
+}
+
+/** 真机枚举实测里的客户端窗口（标题与游戏相同，必须排除）。 */
+const CLIENT = cand('LeagueClientUx', 'RCLIENT', 'League of Legends', {
+  x: 346,
+  y: 6,
+  width: 1600,
+  height: 900,
+});
+/** 真机枚举里的其它窗口。 */
+const OTHER = cand('chrome', 'Chrome_WidgetWin_1', '动态首页', {
+  x: -7,
+  y: -7,
+  width: 2308,
+  height: 927,
+});
+/** 游戏本体（窗口化运行，尺寸/位置都不是原点）。 */
+const GAME = cand('League of Legends', 'RiotWindowClass', 'League of Legends', {
+  x: 347,
+  y: 8,
+  width: 1601,
+  height: 900,
+});
+
+test('pickGameWindow：排除客户端族（标题与游戏相同也不误选）', () => {
+  assert.equal(pickGameWindow([CLIENT]), null, '只有客户端时必须返回 null');
+  assert.deepEqual(pickGameWindow([CLIENT, GAME]), GAME.rect, '有游戏时不能选到客户端');
+});
+
+test('pickGameWindow：兼容带后缀的进程名（League of Legends (TM) Client）', () => {
+  const legacy = cand('League of Legends (TM) Client', 'RiotWindowClass', '', {
+    x: 100,
+    y: 50,
+    width: 1600,
+    height: 900,
+  });
+  assert.deepEqual(pickGameWindow([CLIENT, OTHER, legacy]), legacy.rect);
+});
+
+test('pickGameWindow：进程名认不出时退回标题匹配', () => {
+  const byTitle = cand('unknown-launcher', 'SomeClass', 'League of Legends', {
+    x: 10,
+    y: 10,
+    width: 1600,
+    height: 900,
+  });
+  assert.deepEqual(pickGameWindow([OTHER, byTitle]), byTitle.rect);
+});
+
+test('pickGameWindow：多个同名候选时取面积最大者', () => {
+  const small = cand('League of Legends', 'C', 'League of Legends', {
+    x: 0,
+    y: 0,
+    width: 800,
+    height: 600,
+  });
+  assert.deepEqual(pickGameWindow([small, GAME]), GAME.rect);
+});
+
+test('pickGameWindow：captureAspect 用于排除比例不符的候选', () => {
+  // 截屏是 16:9（3413x1920）→ 应挑比例相符的那个（真机为 1601x900）
+  const square = cand('League of Legends', 'C', 'League of Legends', {
+    x: 0,
+    y: 0,
+    width: 1000,
+    height: 1000,
+  });
+  const picked = pickGameWindow([square, GAME], { captureAspect: 3413 / 1920 });
+  assert.deepEqual(picked, GAME.rect);
+});
+
+test('pickGameWindow：比例全都不符时仍返回面积最大者（不空手而归）', () => {
+  const square = cand('League of Legends', 'C', 'League of Legends', {
+    x: 0,
+    y: 0,
+    width: 1000,
+    height: 1000,
+  });
+  assert.deepEqual(pickGameWindow([square], { captureAspect: 3413 / 1920 }), square.rect);
+});
+
+test('pickGameWindow：候选为空返回 null', () => {
+  assert.equal(pickGameWindow([]), null);
+});
 
 /* ------------------------------------------------------------------ */
 /* 窗口矩形缓存（性能：单次探测 ~1.2s，不能每轮都探）                    */
