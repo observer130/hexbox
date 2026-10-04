@@ -90,12 +90,30 @@ export function buildBlocks(build: ChampionBuild): ItemSetBlock[] {
     );
   }
 
-  // 其余成装：单件合并成一栏（官方展示全部，这里保留前 10 以免过长）
-  const rest = byPick(build.start)
-    .slice(1, 11)
-    .flatMap((s) => s.itemIds);
-  if (rest.length > 0) {
-    blocks.push(mk('其余成装', toEntries(rest)));
+  // 其余成装：单件合并成一栏。
+  //
+  // ⚠️ 必须取**全部** `itemone_json`（实测每英雄 20 条）**并排除第 1 名**。
+  // 官方页面把同一份 itemone_json 展示了两次：按登场率前 5 作「出门装」，
+  // **其余全部**作「其余成装」—— 所以两栏的数字本来就会重叠。
+  // 此前写成 `slice(1, 11)` 是错的（真实 bug）：
+  //   - 多出了第 1 名（如 266 的 71.19% 多兰盾，它是「出门装」）；
+  //   - 丢掉了第 11~20 名（登场率 2.5%~7.5%），而它们才是官方
+  //     「其余成装」里登场率最高的几件（7.51 / 5.95 / 5.68 …）。
+  // 排序已由 parseItemStatJson 按登场率降序保证，这里不重复排。
+  //
+  // 再去一次重：上游偶尔为两件相同装备给出两个条目，而配装方案里
+  // 同栏出现同一件装备纯属噪声（官方页面按件展示，不会重复）。
+  const restIds: number[] = [];
+  const restSeen = new Set<number>();
+  for (const s of byPick(build.start).slice(1)) {
+    for (const id of s.itemIds) {
+      if (restSeen.has(id)) continue;
+      restSeen.add(id);
+      restIds.push(id);
+    }
+  }
+  if (restIds.length > 0) {
+    blocks.push(mk('其余成装', toEntries(restIds)));
   }
 
   return blocks;
