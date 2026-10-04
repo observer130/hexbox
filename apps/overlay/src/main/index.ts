@@ -19,12 +19,10 @@
 import { app, BrowserWindow, ipcMain, screen, type Rectangle } from 'electron';
 import { join } from 'node:path';
 
-import { findGameWindowRect } from '@hexbox/vision';
 import {
   LcuClient,
   LcuHttpError,
   detectCredentialsDetailed,
-  detectPortByListener,
   isBrawlSession,
   pickChampionIdFromGameflow,
 } from '@hexbox/lcu';
@@ -32,10 +30,14 @@ import { readBuilds, readDataset, readRankings, readTemplates } from '@hexbox/da
 import {
   base64ToBits,
   decodePack,
+  decideVisible,
   denormalizeToGray,
+  findGameWindowRect,
   prepareTemplates,
+  sameVisibleState,
   type NameFingerprint,
   type PreparedTemplate,
+  type VisibleState,
 } from '@hexbox/vision';
 import {
   augmentStrength,
@@ -61,7 +63,14 @@ let client: LcuClient | null = null;
 let dataset: Dataset | null = null;
 let rankings: RankingSnapshot | null = null;
 let builds: ChampionDetailSet | null = null;
-let lastPhase: string | null = null;
+/**
+ * 上一次**已应用**的可见性判定（null = 还没应用过）。
+ *
+ * ⚠️ 不能只比较 phase：中途掉线时 phase 可能不变而 connected 变了，
+ * 那就不会再应用一次，诊断面板永远不出现（真实 bug）。
+ * 判定本身在 `@hexbox/vision` 的 decideVisible（纯函数、有单测）。
+ */
+let lastVisible: VisibleState | null = null;
 let clickThrough = true;
 let warnedNoCreds = false;
 let credsDetail = '';
@@ -131,14 +140,13 @@ interface OverlayStateMsg {
     start: BuildSlotMsg[];
     shoes: BuildSlotMsg[];
     core: BuildSlotMsg[];
-    full: BuildSlotMsg[];
   };
   /** 数据出处（来源 + 统计日期）。 */
   meta: { dataDate: string; hasBuilds: boolean };
   credsDetail: string;
 }
 
-const EMPTY_BUILD = { start: [], shoes: [], core: [], full: [] };
+const EMPTY_BUILD = { start: [], shoes: [], core: [] };
 
 /* ------------------------------------------------------------------ */
 // 游戏窗口定位（只读窗口几何信息）
@@ -314,7 +322,6 @@ function buildBuildMsg(championId: number): OverlayStateMsg['build'] {
     start: slotMsg(v.start),
     shoes: slotMsg(v.shoes),
     core: slotMsg(v.core),
-    full: slotMsg(v.full),
   };
 }
 
@@ -448,14 +455,20 @@ async function pollOnce(): Promise<void> {
     }
   }
 
-  // 可见性随阶段自动切换（不抢焦点）
-  // 注意：连不上时必须也把窗口显示出来，否则用户看到的是「什么都没有」，
-  // 无法区分「没在对局」和「根本连不上客户端」。连不上时显示诊断面板。
-  const show = phase === 'ChampSelect' || phase === 'InProgress' || !connected;
-  if (phase !== lastPhase) {
-    lastPhase = phase;
+  // 可见性随「阶段 + 连接状态」自动切换（不抢焦点）
+  //
+  // ⚠️ 必须比较**两份判定结果**而不是只比较 phase：
+  //   注释一直写着「连不上时必须也把窗口显示出来」（否则用户看到的是
+  //   「什么都没有」，无法区分「没在对局」和「根本连不上客户端」），
+  //   但原实现写成 `if (phase !== lastPhase)`，于是**中途掉线**时
+  //   （connected 由 true→false、phase 可能仍停在非对局值）不会再应用一次，
+  //   诊断面板只在冷启动时出现过一次 —— 真实 bug，已由 visibility.ts 的
+  //   单测锁住。判定逻辑本身是纯函数，放在 CI 覆盖得到的包里。
+  const want = decideVisible(phase, connected);
+  if (!sameVisibleState(lastVisible, want)) {
+    lastVisible = want;
     if (win) {
-      if (show) {
+      if (want.showPanel) {
         win.showInactive();
         await positionOverlay();
       } else {
@@ -463,7 +476,7 @@ async function pollOnce(): Promise<void> {
       }
     }
     // S2 覆盖层与视觉循环：仅选人阶段启用
-    if (phase === 'ChampSelect') {
+    if (want.visionActive) {
       overlayWin?.showInactive();
       visionLoop?.start();
     } else {
