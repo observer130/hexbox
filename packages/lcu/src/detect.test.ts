@@ -292,8 +292,10 @@ test('resolveExplicitCredentials：环境变量优先于凭证文件', async () 
   const file = join(dir, 'creds');
   writeFileSync(file, '1111:fromFile', 'utf8');
   const c = await resolveExplicitCredentials({
-    [LCU_CREDENTIALS_ENV]: '2222:fromEnv',
-    [LCU_CREDENTIALS_FILE_ENV]: file,
+    env: {
+      [LCU_CREDENTIALS_ENV]: '2222:fromEnv',
+      [LCU_CREDENTIALS_FILE_ENV]: file,
+    },
   });
   assert.equal(c?.port, 2222);
   assert.equal(c?.password, 'fromEnv');
@@ -303,7 +305,7 @@ test('resolveExplicitCredentials：无环境变量时读凭证文件，并记下
   const dir = mkdtempSync(join(tmpdir(), 'hexbox-lcu-'));
   const file = join(dir, 'creds');
   writeFileSync(file, 'LeagueClient:1:3333:fileToken:https\n', 'utf8');
-  const c = await resolveExplicitCredentials({ [LCU_CREDENTIALS_FILE_ENV]: file });
+  const c = await resolveExplicitCredentials({ env: { [LCU_CREDENTIALS_FILE_ENV]: file } });
   assert.equal(c?.port, 3333);
   assert.equal(c?.password, 'fileToken');
   assert.equal(c?.lockfilePath, file); // 诊断要能指出凭证来自哪个文件
@@ -315,8 +317,19 @@ test('resolveExplicitCredentials：文件不存在 / 内容为空 / 内容非法
   writeFileSync(empty, '   \n', 'utf8');
   const missing = join(dir, 'nope');
   for (const p of [missing, empty, dir]) {
-    assert.equal(await resolveExplicitCredentials({ [LCU_CREDENTIALS_FILE_ENV]: p }), null, p);
+    assert.equal(
+      await resolveExplicitCredentials({ env: { [LCU_CREDENTIALS_FILE_ENV]: p } }),
+      null,
+      p,
+    );
   }
-  // 不设任何变量时不应抛错（找不到约定文件就是 null）
-  assert.equal(await resolveExplicitCredentials({}), null);
+});
+
+test('resolveExplicitCredentials：不设任何变量时只看默认路径（测试必须注入不存在的路径）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hexbox-lcu-'));
+  // ⚠️ 必须显式注入 defaultPath：否则会回落到**真实机器**上的
+  // ~/.hexbox/lcu-credentials —— 测试将依赖开发者本机状态，
+  // 且断言失败会把真实 token 打进日志（真实发生过）。
+  const c = await resolveExplicitCredentials({ env: {}, defaultPath: join(dir, 'absent') });
+  assert.equal(c, null);
 });

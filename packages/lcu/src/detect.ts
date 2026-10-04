@@ -396,6 +396,19 @@ export function parseExplicitCredentials(raw: string | undefined): LcuCredential
   return { port, password, source: 'explicit' };
 }
 
+export interface ResolveExplicitOptions {
+  /** 环境变量来源，默认 `process.env`（测试注入用）。 */
+  readonly env?: Record<string, string | undefined>;
+  /**
+   * 约定凭证文件路径，默认 `defaultCredentialsPath()`。
+   *
+   * ⚠️ 测试**必须**显式传入一个不存在的路径：否则会回落到真实机器上的
+   * `~/.hexbox/lcu-credentials`，于是测试依赖开发者本机状态，
+   * 并且断言失败时会把真实 token 打进日志（真实发生过）。
+   */
+  readonly defaultPath?: string;
+}
+
 /**
  * 读取显式凭证：环境变量优先，其次约定文件。
  *
@@ -403,12 +416,14 @@ export function parseExplicitCredentials(raw: string | undefined): LcuCredential
  * 否则用户在提权终端里设了值却被旧 lockfile 覆盖，会以为"设了没用"。
  */
 export async function resolveExplicitCredentials(
-  env: Record<string, string | undefined> = process.env,
+  options: ResolveExplicitOptions = {},
 ): Promise<LcuCredentials | null> {
+  const env = options.env ?? process.env;
   const direct = parseExplicitCredentials(env[LCU_CREDENTIALS_ENV]);
   if (direct) return direct;
 
-  const path = env[LCU_CREDENTIALS_FILE_ENV]?.trim() || defaultCredentialsPath();
+  const path =
+    env[LCU_CREDENTIALS_FILE_ENV]?.trim() || options.defaultPath || defaultCredentialsPath();
   if (!path) return null;
   try {
     if (!existsSync(path)) return null;
