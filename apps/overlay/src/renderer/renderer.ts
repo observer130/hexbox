@@ -237,17 +237,9 @@ function render(s: OverlayStateMsg): void {
         ? '<div class="li dim">· 该英雄暂无海克斯强度统计</div>'
         : s.augments.map((a) => augRowHtml(a)).join('');
 
-    const b = s.build;
-    const buildBlock = noChampion
-      ? ''
-      : [
-          slotHtml('出门装', b.start, true),
-          slotHtml('鞋子', b.shoes, true),
-          slotHtml('核心装备', b.core),
-        ]
-          .filter(Boolean)
-          .join('') || '<div class="li dim">· 该英雄暂无出装统计</div>';
-
+    // ⚠️ 出装**不在悬浮窗显示**（用户决策）：出装已通过
+    // `itemset-cli write` 写进客户端「配装方案」，游戏内直接查即可；
+    // 在这里再显示一遍是重复信息，还占地方。
     app.innerHTML = panel(
       phaseLabel,
       isBrawlTag,
@@ -261,12 +253,9 @@ function render(s: OverlayStateMsg): void {
         <div class="k">海克斯强度 <span class="dim">（以该英雄为准）</span></div>
         ${augBlock}
         <div class="sep"></div>
-        <div class="k">出装建议</div>
-        ${buildBlock}
-        <div class="sep"></div>
         <div class="li dim note">
           依据官方统计排序，供参考。不识别你当前被提供的 3 个海克斯，
-          也不替你做选择。
+          也不替你做选择。出装见客户端「配装方案」。
         </div>
       `,
       sourceFoot(s.meta),

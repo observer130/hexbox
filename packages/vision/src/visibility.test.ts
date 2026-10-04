@@ -11,9 +11,11 @@ import { test } from 'node:test';
 
 import { decideVisible, sameVisibleState } from './visibility.ts';
 
-test('decideVisible：选人阶段显示侧边窗 + 覆盖层 + 视觉循环', () => {
+test('decideVisible：选人阶段**只**显示覆盖层，不弹侧边窗', () => {
+  // 2026-10-04 用户决策：选人阶段的信息由覆盖层画在游戏画面内
+  // （卡片下方 / 顶栏逐格），侧边窗与它重复且会叠在英雄立绘上抢地方。
   assert.deepEqual(decideVisible('ChampSelect', true), {
-    showPanel: true,
+    showPanel: false,
     showVision: true,
     visionActive: true,
   });
@@ -37,14 +39,12 @@ test('decideVisible：大厅等非对局阶段隐藏侧边窗（已连上，不�
   }
 });
 
-test('decideVisible：连不上客户端时必须显示侧边窗（诊断面板）', () => {
-  // 这是回归重点：无论阶段是什么，连不上都要显示，否则用户看到「什么都没有」
-  for (const phase of ['None', 'Lobby', 'ChampSelect', 'InProgress', '']) {
-    assert.equal(
-      decideVisible(phase, false).showPanel,
-      true,
-      `阶段 ${phase} 未连接时应显示诊断面板`,
-    );
+test('decideVisible：连不上客户端也不再弹窗（用户选择"只写日志"）', () => {
+  // 回归：此处曾是「未连接必须显示诊断面板」。用户 2026-10-04 明确改为
+  // 不弹窗、只写日志 —— 排查信息在终端输出与 overlay-live.log 里。
+  for (const phase of ['None', 'Lobby', 'ChampSelect', '', 'InProgress']) {
+    const v = decideVisible(phase, false);
+    assert.equal(v.showPanel, phase === 'InProgress', `阶段 ${phase} 的侧边窗显隐`);
   }
 });
 
@@ -66,18 +66,24 @@ test('sameVisibleState：内容相同的两个对象等价（避免每轮 show/h
 });
 
 test('sameVisibleState：任一字段变化都要重新应用', () => {
-  const base = decideVisible('InProgress', true);
-  assert.equal(sameVisibleState(base, decideVisible('ChampSelect', true)), false); // 进入选人
-
-  // ⚠️ 真实 bug 的场景：阶段完全没变（都停在大厅），只有连接状态翻转。
-  // 原实现只比较 phase，因此不会重新应用 → 诊断面板永远不出现。
-  const lobby = decideVisible('Lobby', true); // 已连、不在对局 → 隐藏
-  const offline = decideVisible('Lobby', false); // 掉线 → 必须显示诊断面板
-  assert.equal(lobby.showPanel, false);
-  assert.equal(offline.showPanel, true);
-  assert.equal(sameVisibleState(lobby, offline), false);
-
-  // 两个都不显示的不同阶段 → 等价，不必重复 show/hide
+  // 进/出选人：showVision 与 visionActive 都要翻转
+  const lobby = decideVisible('Lobby', true);
+  assert.equal(sameVisibleState(lobby, decideVisible('ChampSelect', true)), false);
+  // 进出对局：showPanel 翻转
+  assert.equal(sameVisibleState(lobby, decideVisible('InProgress', true)), false);
+  // 同阶段重复：等价，不必重复 show/hide
   assert.equal(sameVisibleState(lobby, decideVisible('ReadyCheck', true)), true);
   assert.equal(sameVisibleState(lobby, decideVisible('None', true)), true);
+});
+
+test('sameVisibleState：连接状态翻转**不**改变可见性（用户要求不再弹窗）', () => {
+  // 2026-10-04 起"连不上"不再影响窗口显隐，因此这两份判定等价；
+  // 保留用例是为了锁住这个语义（曾经它会翻转，并引出"诊断面板不出现"的 bug）。
+  for (const phase of ['None', 'Lobby', 'ChampSelect', 'InProgress']) {
+    assert.equal(
+      sameVisibleState(decideVisible(phase, true), decideVisible(phase, false)),
+      true,
+      `阶段 ${phase}：连接状态不该改变可见性`,
+    );
+  }
 });

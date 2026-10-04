@@ -16,7 +16,7 @@
  *   - 局内：在**选海克斯 / 出装** → 给该英雄口径的海克斯强度与出装建议
  */
 
-import { app, BrowserWindow, ipcMain, screen, type Rectangle } from 'electron';
+import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -30,6 +30,7 @@ import {
 import { readBuilds, readDataset, readRankings, readTemplates } from '@hexbox/data-store';
 import {
   base64ToBits,
+  computePanelBounds,
   decodePack,
   decideVisible,
   denormalizeToGray,
@@ -159,35 +160,19 @@ const EMPTY_BUILD = { start: [], shoes: [], core: [] };
 // 与 debug-capture 共用同一份实现 —— 两处各写一份必然漂移。
 // 它同样只调用 user32!GetWindowRect 读取几何信息，不触碰进程内存。
 
-function computeOverlayBounds(game: Rectangle | null, display: Rectangle): Rectangle {
-  // 高度按内容量加大：局内要放强度榜 + 出装
-  const WIDTH = 340;
-  const HEIGHT = 560;
-  const MARGIN = 16;
-
-  if (!game) {
-    return {
-      x: display.x + display.width - WIDTH - MARGIN,
-      y: display.y + Math.round((display.height - HEIGHT) / 2),
-      width: WIDTH,
-      height: HEIGHT,
-    };
-  }
-  return {
-    x: Math.min(game.x + game.width - WIDTH - MARGIN, display.x + display.width - WIDTH),
-    y: Math.max(game.y + MARGIN, display.y),
-    width: WIDTH,
-    height: HEIGHT,
-  };
-}
-
 async function positionOverlay(): Promise<void> {
   if (!win || !win.isVisible()) return;
   // 走缓存：本函数由 3 秒定时器与 display-metrics-changed 触发，
   // 而单次探测要 ~1.2s（PowerShell + Add-Type）——不能每次都探。
   const game = await findGameWindowRectCached();
-  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
-  win.setBounds(computeOverlayBounds(game, display.workArea));
+  // ⚠️ 用**游戏窗口所在**显示器，而不是光标所在显示器：
+  // 玩家把鼠标移到副屏时，原实现会把面板摆到副屏去（游戏在另一块屏上）。
+  const display = game
+    ? screen.getDisplayNearestPoint({ x: game.x + 10, y: game.y + 10 })
+    : screen.getPrimaryDisplay();
+  // 定位算式抽到 @hexbox/vision/panel-geometry.ts（纯函数 + 单测）：
+  // 全屏游戏时"外侧右边"没有空间，必须退到内侧/工作区右缘，否则面板跑到屏幕外。
+  win.setBounds(computePanelBounds(game, display.workArea));
 }
 
 // ---------------------------------------------------------------------------
