@@ -204,3 +204,54 @@ export function matchName(
   if (!best || best.score < minScore) return null;
   return best;
 }
+
+/**
+ * 带**区分度**校验的名字匹配（对照 `matchChampionCareful` 的思路）。
+ *
+ * 为什么需要：真机实测里 `detectCards` 会在**非卡片画面**（选人确认态、
+ * 局内的技能/装饰元素）上误检出 2~3 个矩形。此时名字带落在美术图上，
+ * 只看"最高分"会给出 0.45~0.5 的**假命中**，于是覆盖层把错误的胜率
+ * 画在屏幕中间 —— 比不显示更糟（项目原则：宁漏勿错）。
+ *
+ * 判定：最高分 ≥ minScore **且** 与第二名拉开 minMargin。
+ * 真实卡片（实测 0.56 / 0.67）与错误名字之间差距明显；
+ * 美术图上的假命中普遍"跟谁都不像"，分数聚集、分差极小。
+ */
+export function matchNameCareful(
+  strip: { bits: Uint8Array; width: number; height: number },
+  library: readonly NameFingerprint[],
+  options: {
+    readonly minScore?: number;
+    readonly minMargin?: number;
+    readonly gridWidth?: number;
+    readonly gridHeight?: number;
+  } = {},
+): { championId: number; name: string; score: number; margin: number } | null {
+  const minScore = options.minScore ?? 0.5;
+  const minMargin = options.minMargin ?? 0.05;
+  const gw = options.gridWidth ?? NAME_STRIP.gridWidth;
+  const gh = options.gridHeight ?? NAME_STRIP.gridHeight;
+  if (library.length === 0) return null;
+
+  const query = stretchBitsToGrid(
+    { championId: 0, name: '', width: strip.width, height: strip.height, bits: strip.bits },
+    gw,
+    gh,
+  );
+
+  let first: { championId: number; name: string; score: number } | null = null;
+  let secondScore = 0;
+  for (const fp of library) {
+    const score = fingerprintSimilarity(query, stretchBitsToGrid(fp, gw, gh));
+    if (!first || score > first.score) {
+      secondScore = first?.score ?? 0;
+      first = { championId: fp.championId, name: fp.name, score };
+    } else if (score > secondScore) {
+      secondScore = score;
+    }
+  }
+  if (!first || first.score < minScore) return null;
+  const margin = first.score - secondScore;
+  if (margin < minMargin) return null; // 区分度不足：不猜
+  return { ...first, margin };
+}

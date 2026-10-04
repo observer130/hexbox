@@ -64,8 +64,7 @@ export function extractGray(
   bmp: Bitmap,
   rect: Rect,
   outSize: number,
-): Uint8Array | null {
-  // 归一化矩形 → 像素范围
+): Uint8Array | null {  // 归一化矩形 → 像素范围
   const x0 = Math.round(rect.x * bmp.width);
   const y0 = Math.round(rect.y * bmp.height);
   const w = Math.round(rect.w * bmp.width);
@@ -96,6 +95,57 @@ export function extractGray(
         }
       }
       out[oy * outSize + ox] = n > 0 ? Math.round(sum / n) : 0;
+    }
+  }
+  return out;
+}
+
+/**
+ * 从位图取子矩形 → RGBA 数组（面积平均降采样）。
+ *
+ * 与 `extractGray` 同一套降采样逻辑，额外保留颜色通道 ——
+ * 占用检测需要**色度**信息（空槽是纯色、头像有颜色变化），
+ * 而灰度会把彩色内容压平（真机实测：暗色头像的灰度 std 可能很低）。
+ */
+export function extractRgb(
+  bmp: Bitmap,
+  rect: Rect,
+  outSize: number,
+): Uint8ClampedArray | null {
+  const x0 = Math.round(rect.x * bmp.width);
+  const y0 = Math.round(rect.y * bmp.height);
+  const w = Math.round(rect.w * bmp.width);
+  const h = Math.round(rect.h * bmp.height);
+  if (w <= 0 || h <= 0 || x0 < 0 || y0 < 0) return null;
+  if (x0 + w > bmp.width || y0 + h > bmp.height) return null;
+
+  const out = new Uint8ClampedArray(outSize * outSize * 4);
+  for (let oy = 0; oy < outSize; oy++) {
+    const sy0 = y0 + Math.floor((oy * h) / outSize);
+    const sy1 = Math.max(sy0 + 1, y0 + Math.floor(((oy + 1) * h) / outSize));
+    for (let ox = 0; ox < outSize; ox++) {
+      const sx0 = x0 + Math.floor((ox * w) / outSize);
+      const sx1 = Math.max(sx0 + 1, x0 + Math.floor(((ox + 1) * w) / outSize));
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let n = 0;
+      for (let sy = sy0; sy < sy1 && sy < bmp.height; sy++) {
+        for (let sx = sx0; sx < sx1 && sx < bmp.width; sx++) {
+          const i = (sy * bmp.width + sx) * 4;
+          r += bmp.data[i]!;
+          g += bmp.data[i + 1]!;
+          b += bmp.data[i + 2]!;
+          n++;
+        }
+      }
+      const di = (oy * outSize + ox) * 4;
+      if (n > 0) {
+        out[di] = Math.round(r / n);
+        out[di + 1] = Math.round(g / n);
+        out[di + 2] = Math.round(b / n);
+      }
+      out[di + 3] = 255;
     }
   }
   return out;

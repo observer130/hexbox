@@ -38,13 +38,20 @@ export interface CardLabelOptions {
   readonly gap?: number;
   /** 标签高度（DIP）。 */
   readonly labelHeight?: number;
+  /** 标签宽度（DIP）。默认 `LABEL_WIDTH`（紧凑定宽）。 */
+  readonly labelWidth?: number;
 }
+
+/** 卡片标签的默认宽度（DIP）：够放下「100.0%」，且不横贯整张卡片。 */
+export const LABEL_WIDTH = 132;
 
 /**
  * 卡片矩形（归一化）→ 下方标签（屏幕逻辑坐标）。
  *
- * 标签宽度 = 卡片宽度（视觉上与卡片对齐）；位置在卡片下缘 + gap。
- * 若标签超出所在显示器底部（窗口贴边）,改画在卡片**上方**。
+ * ⚠️ 标签**不与卡片同宽**：真机反馈"标签宽度太大"（卡片宽约 333 DIP，
+ * 整条横贯卡片下方非常突兀）。改为**紧凑定宽**并相对卡片水平居中；
+ * 仅当卡片本身比它更窄时才收缩到卡宽。
+ * 位置仍在卡片下缘 + gap；底部放不下时翻到卡片上方。
  */
 export function cardLabelFor(
   cardRect: Rect,
@@ -60,6 +67,8 @@ export function cardLabelFor(
     ? `${(options.winRate * 100).toFixed(1)}%`
     : '暂无数据';
 
+  const w = Math.min(card.w, options.labelWidth ?? LABEL_WIDTH);
+
   let y = card.y + card.h + gap;
   // 底部放不下 → 画到卡片上方
   if (y + h > workArea.y + workArea.height) {
@@ -71,9 +80,9 @@ export function cardLabelFor(
   }
 
   return {
-    x: card.x,
+    x: card.x + (card.w - w) / 2,
     y,
-    w: card.w,
+    w,
     h,
     text: pct,
     sub: options.name,

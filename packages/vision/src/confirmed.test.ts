@@ -6,8 +6,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  countOccupiedSlots,
   detectTopBarCandidates,
   isSlotOccupied,
+  OCCUPANCY,
   topBarSlotRect,
   topBarSlotRects,
   TOP_BAR_ROW,
@@ -121,6 +123,42 @@ test('topBarSlotRect：x0 与真机校准值一致（防无意改动）', () => 
   // 2026-09-28 实测:第 1 格左缘 x=659/2400
   assert.ok(Math.abs(TOP_BAR_ROW.x0 - 659 / 2400) < 1e-9);
   assert.ok(Math.abs(TOP_BAR_ROW.y - 19 / 1350) < 1e-9);
+});
+
+test('2026-10-04 复核：预测槽位与真机截图像素级对齐', () => {
+  // 用 champselect-locked-152419-raw.png（3413x1920）复核过：红框正好套住
+  // 10 个槽位。这里锁定"槽位在截屏里的像素位置"，防止有人改动几何后
+  // 又出现"顶栏认不出"的排查地狱。
+  const W = 3413;
+  const rects = topBarSlotRects();
+  const px = rects.map((r) => [Math.round(r.x * W), Math.round((r.x + r.w) * W)]);
+  assert.deepEqual(px[0], [937, 1069]);
+  assert.deepEqual(px[9], [2345, 2477]);
+});
+
+/* ------------------------------------------------------------------ */
+/* 占用判定（多指标：真机实测阈值）                                     */
+/* ------------------------------------------------------------------ */
+
+test('countOccupiedSlots：真机"10 格全空"场景必须返回 0', () => {
+  // 152419 实测：第一阶段顶栏 10 格全空（灰度 std 1.0~5.2、边缘密度 ≤0.06）。
+  // 若这里返回非 0，就会误判成第二阶段 —— 卡片胜率将永远不显示。
+  const bmp = topBarBitmap(1, []);
+  assert.equal(countOccupiedSlots(bmp, topBarSlotRects()), 0);
+});
+
+test('countOccupiedSlots：有头像的格子被计入（阶段判据）', () => {
+  const bmp = topBarBitmap(1, [{ slot: 1, gray: 150 }]);
+  assert.equal(countOccupiedSlots(bmp, topBarSlotRects()), 1);
+});
+
+test('OCCUPANCY 阈值低于真机实测的"空槽"上界（防再次漏判/误判）', () => {
+  // 空槽实测：灰度 std ≤5.2 → 方差 ≤(5.2/255)²≈4.2e-4；边缘密度 ≤0.06。
+  // 阈值必须**高于**这些上界（否则空槽被判占用 → 阶段判断错乱），
+  // 但也不能高到漏掉真实内容（卡片区域边缘密度 ≈2.0）。
+  assert.ok(OCCUPANCY.grayVar > (5.2 / 255) ** 2, '灰度方差阈值应高于空槽上界');
+  assert.ok(OCCUPANCY.edgeDensity > 0.06, '边缘密度阈值应高于空槽上界');
+  assert.ok(OCCUPANCY.edgeDensity < 2.0, '边缘密度阈值应低于真实内容下界');
 });
 
 /* ------------------------------------------------------------------ */

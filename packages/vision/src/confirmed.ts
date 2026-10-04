@@ -27,7 +27,7 @@
  */
 
 import type { Bitmap, PreparedTemplate, Rect } from './index.ts';
-import { extractGray, extractGrayRaw, normalizeGray, similarity } from './match.ts';
+import { extractGray, extractGrayRaw, extractRgb, normalizeGray, similarity } from './match.ts';
 
 /* ------------------------------------------------------------------ */
 /* 顶栏几何（归一化,真机实测）                                           */
@@ -74,38 +74,119 @@ export function topBarSlotRects(): Rect[] {
 /** 内部统计（用于占用判定）。 */
 interface InteriorStats {
   readonly mean: number;
-  readonly std: number;
+  /** 灰度方差（0..1，已按 255² 归一化）。 */
+  readonly grayVar: number;
+  /** 色度（通道间最大差）方差（0..1）。 */
+  readonly chromaVar: number;
+  /** 水平相邻像素平均灰度差（0..255）。 */
+  readonly edgeDensity: number;
 }
 
-function interiorStats(gray: Uint8Array): InteriorStats {
-  let mean = 0;
-  for (const v of gray) mean += v;
-  mean /= gray.length;
-  let variance = 0;
-  for (const v of gray) variance += (v - mean) * (v - mean);
-  return { mean, std: Math.sqrt(variance / gray.length) };
+/** 在内部区域上一次性算出三个指标（单次遍历 + 一次色度均值修正）。 */
+function interiorStats(gray: Uint8Array, rgb: Uint8ClampedArray, side: number): InteriorStats {
+  const n = gray.length;
+  let m = 0;
+  for (const v of gray) m += v;
+  m /= n;
+
+  let gv = 0;
+  const chromas = new Float64Array(n);
+  let cm = 0;
+  for (let i = 0; i < n; i++) {
+    const d = gray[i]! - m;
+    gv += d * d;
+    const p = i * 4;
+    const r = rgb[p]!;
+    const g = rgb[p + 1]!;
+    const b = rgb[p + 2]!;
+    const c = Math.max(r, g, b) - Math.min(r, g, b);
+    chromas[i] = c;
+    cm += c;
+  }
+  cm /= n;
+  let cv = 0;
+  for (let i = 0; i < n; i++) {
+    const d = chromas[i]! - cm;
+    cv += d * d;
+  }
+
+  // 边缘密度：水平相邻像素的灰度差（按行，跳过每行首像素）
+  let edge = 0;
+  let edgeN = 0;
+  for (let y = 0; y < side; y++) {
+    for (let x = 1; x < side; x++) {
+      edge += Math.abs(gray[y * side + x]! - gray[y * side + x - 1]!);
+      edgeN++;
+    }
+  }
+
+  return {
+    mean: m,
+    grayVar: gv / n / (255 * 255),
+    chromaVar: cv / n / (255 * 255),
+    edgeDensity: edge / Math.max(1, edgeN),
+  };
 }
 
 /**
- * 槽位是否被头像占用。
+ * 占用判定阈值。
  *
- * 真机数据（12% 内缩 16×16 灰度 std）：
- *   空格 1.8~8.7;占用格亮色头像 60+,**暗色头像可低至 42**
- *   （2026-09-28 验收截图:沃里克暗底发光,std=42,曾因阈值 0.18
- *   被误判为空格 → 不显示标签 —— 真实 bug）。
- *   阈值 0.12×255≈30.6:空格上限的 3.5 倍,暗头像下限的 1.4 倍。
+ * ⚠️ 依据（2026-10-04 实测 `debug/shots/champselect-locked-152419-raw.png`）：
+ *   · **空槽**（第一阶段 10 格全空）：灰度 std 1.0~5.2、色度 std 1.7~7.4、
+ *     边缘密度 **≤0.06**；
+ *   · **有内容的英雄卡片区域**（同图对照）：灰度 std 39.3、色度 std 27.7、
+ *     边缘密度 **1.99**。
+ *   两者差 30 倍以上，因此三指标取**宽松下限**即可：宁可误判为"占用"
+ *   （多跑一次 0.6ms 的模板匹配，无副作用），也不要漏判导致第二阶段
+ *   整格不显示。
  */
+export const OCCUPANCY = {
+  /** 灰度方差下限（空槽 ≤(5.2/255)²≈4.2e-4）。 */
+  grayVar: 0.002,
+  /** 色度方差下限（空槽 ≤(7.4/255)²≈8.4e-4）。 */
+  chromaVar: 0.002,
+  /** 边缘密度下限（空槽 ≤0.06，有内容 ≈2.0）。 */
+  edgeDensity: 0.25,
+} as const;
+
 export function isSlotOccupied(bmp: Bitmap, rect: Rect): boolean {
-  // 内缩 12%：避开边框亮线（边框会抬高 std 造成误判）
+  // 内缩 12%：避开边框亮线（边框会抬高各指标造成误判）
   const inner: Rect = {
     x: rect.x + rect.w * 0.12,
     y: rect.y + rect.h * 0.12,
     w: rect.w * 0.76,
     h: rect.h * 0.76,
   };
-  const gray = extractGray(bmp, inner, 16);
-  if (!gray) return false;
-  return interiorStats(gray).std >= 0.12 * 255;
+  return isRegionOccupied(bmp, inner);
+}
+
+/** 在给定矩形（归一化）上做占用判定；`side` 为采样网格边长。 */
+export function isRegionOccupied(bmp: Bitmap, rect: Rect, side = 16): boolean {
+  const g = extractGray(bmp, rect, side);
+  const rgb = extractRgb(bmp, rect, side);
+  if (!g || !rgb) return false;
+  const st = interiorStats(g, rgb, side);
+  return (
+    st.edgeDensity >= OCCUPANCY.edgeDensity ||
+    st.grayVar >= OCCUPANCY.grayVar ||
+    st.chromaVar >= OCCUPANCY.chromaVar
+  );
+}
+
+/**
+ * 统计顶栏有多少格被头像占用。
+ *
+ * 这个数是**「当前处于哪个阶段」的判据**（用户确认的流程）：
+ *   · 第一阶段（卡片刚发出来、还没人选）→ 0 格 → 显示卡片胜率；
+ *   · 第二阶段（选定后未选的进「可用」区）→ ≥1 格 → 显示顶栏逐格胜率。
+ *
+ * ⚠️ 真机 bug：第二阶段卡片已消失，但 `detectCards` 仍会在美术图上误检
+ * 出 2 张矩形；没有阶段判据时屏幕上会冒出两个**错误的**胜率框。
+ */
+export function countOccupiedSlots(bmp: Bitmap, slots: readonly Rect[]): number {
+  let n = 0;
+  for (const s of slots) if (isSlotOccupied(bmp, s)) n++;
+  return n;
 }
 
 /* ------------------------------------------------------------------ */
@@ -124,7 +205,10 @@ export interface TopBarCandidate {
 }
 
 export interface TopBarScanOptions {
-  /** 占用判定阈值（0..1,占 255 灰度比例）。默认 0.12。 */
+  /**
+   * @deprecated 占用判定已改为多指标联合（见 `OCCUPANCY`），
+   * 不再接受单一灰度阈值。保留字段仅为兼容既有调用，**不再生效**。
+   */
   readonly occupiedStd?: number;
   /** 匹配最低得分。默认 0.80（方头像同源,真机 0.93+）。 */
   readonly minScore?: number;
@@ -153,7 +237,6 @@ export function detectTopBarCandidates(
   templates: readonly PreparedTemplate[],
   options: TopBarScanOptions = {},
 ): TopBarCandidate[] {
-  const occupiedStd = (options.occupiedStd ?? 0.12) * 255;
   const minScore = options.minScore ?? 0.8;
   const minMargin = options.minMargin ?? 0.05;
   const out: TopBarCandidate[] = [];
@@ -161,15 +244,8 @@ export function detectTopBarCandidates(
 
   for (let k = 0; k < captureSlots.length && k < TOP_BAR_ROW.count; k++) {
     const rect = captureSlots[k]!;
-    // 占用检测（内部 12% 内缩,与 isSlotOccupied 一致）
-    const inner: Rect = {
-      x: rect.x + rect.w * 0.12,
-      y: rect.y + rect.h * 0.12,
-      w: rect.w * 0.76,
-      h: rect.h * 0.76,
-    };
-    const occ = extractGray(bmp, inner, 16);
-    if (!occ || interiorStats(occ).std < occupiedStd) continue;
+    // 占用检测：统一走 isSlotOccupied（多指标联合，见 OCCUPANCY 的实测依据）
+    if (!isSlotOccupied(bmp, rect)) continue;
 
     // 匹配用整个槽位盒（真机:inset=0 得分最高 0.93+;内缩反而降分）
     const gray = extractGray(bmp, rect, 24);
@@ -213,18 +289,10 @@ export function diagnoseTopBarSlots(
   templates: readonly PreparedTemplate[],
   options: TopBarScanOptions = {},
 ): TopBarSlotDiag[] {
-  const occupiedStd = (options.occupiedStd ?? 0.12) * 255;
   const out: TopBarSlotDiag[] = [];
   for (let k = 0; k < captureSlots.length && k < TOP_BAR_ROW.count; k++) {
     const rect = captureSlots[k]!;
-    const inner: Rect = {
-      x: rect.x + rect.w * 0.12,
-      y: rect.y + rect.h * 0.12,
-      w: rect.w * 0.76,
-      h: rect.h * 0.76,
-    };
-    const occ = extractGray(bmp, inner, 16);
-    const occupied = occ !== null && interiorStats(occ).std >= occupiedStd;
+    const occupied = isSlotOccupied(bmp, rect);
     if (!occupied) {
       out.push({ slotIndex: k, occupied: false });
       continue;

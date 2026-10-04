@@ -17,6 +17,7 @@ import { desktopCapturer, screen } from 'electron';
 
 import {
   cardLabelFor,
+  countOccupiedSlots,
   detectCards,
   detectTopBarCandidates,
   extractGrayRaw,
@@ -24,7 +25,7 @@ import {
   findGameWindowRect,
   findGameWindowRectCached,
   makeScreenGeometry,
-  matchName,
+  matchNameCareful,
   createLabelMemory,
   slotLabelFor,
   topBarSlotRects,
@@ -157,115 +158,128 @@ export async function runVisionRound(
   );
 
   const det = detectCards(bmp);
-  if (!det.confident || det.cards.length === 0) {
-    // 选人**确认态**（已锁定英雄）：顶栏「可用」列出未选的备选英雄,
-    // 逐格识别并显示每个备选英雄的胜率（需求语义,2026-09-28 用户确认）。
-    const portraits = (resolveDeps(deps.portraits) ?? []) as readonly PreparedTemplate[];
-    const rankings = resolveDeps(deps.rankings) as RankingSnapshot | null;
-    if (portraits.length === 0) {
-      return {
-        msg: { active: false, labels: [], diag: `未检出卡片: ${det.reason ?? '?'}` },
-        display,
-      };
-    }
 
-    // 槽位几何按窗口归一化存储 → 先变换到截屏空间再识别
-    // （display 形态截屏里窗口只是子矩形,不变换会整体错位）
+  // ── 先扫顶栏：它是"处于哪个阶段"的判据 ───────────────────────────
+  //
+  // 第一阶段：卡片刚发出来、**还没人选** → 顶栏 10 格全空 → 显示卡片胜率；
+  // 第二阶段：玩家选定后，未选的英雄进顶栏「可用」区 → 顶栏有头像
+  //           → 显示顶栏逐格胜率，并且**绝不再画卡片标签**。
+  //
+  // ⚠️ 真机 bug：第二阶段卡片已经消失，但 `detectCards` 仍会在美术图上
+  // 误检出 2 张矩形，于是屏幕中间冒出两个（错误的）胜率框。
+  // 用"顶栏是否有头像"来区分阶段，这个歧义就消失了。
+  const portraits = (resolveDeps(deps.portraits) ?? []) as readonly PreparedTemplate[];
+  const rankings = resolveDeps(deps.rankings) as RankingSnapshot | null;
+  let topBarOccupiedCount = 0;
+  let cands: ReturnType<typeof detectTopBarCandidates> = [];
+  if (portraits.length > 0) {
     const captureSlots = topBarSlotRects().map(
       (r) => windowRectToCapture(r, bmp, windowPhysical, display),
     );
-    const labels: CardLabel[] = [];
-    const identified: string[] = [];
-    for (const cand of detectTopBarCandidates(bmp, captureSlots, portraits)) {
-      // ⚠️ 识别可能给出高 ID（60000+），而排行榜只有基础 ID —— 必须归一化，
-      // 否则顶栏每个英雄都会显示「暂无数据」（真机实测过）。
-      const cid = deps.canonicalId(cand.championId);
-      const row = rankings?.heroes.find((h) => h.championId === cid);
-      const sub = deps.championName(cid);
-      identified.push(`${sub}=${cand.score.toFixed(2)}`);
-      // 标签定位用截屏空间的槽位矩形（与识别同一坐标系）
-      labels.push(
-        slotLabelFor(captureSlots[cand.slotIndex]!, geo, display.workArea, {
-          name: sub,
-          winRate: row?.winRate ?? 0,
-          hasData: row !== undefined,
-          championId: cid,
-        }),
-      );
+    topBarOccupiedCount = countOccupiedSlots(bmp, captureSlots);
+    if (topBarOccupiedCount > 0) {
+      cands = detectTopBarCandidates(bmp, captureSlots, portraits);
     }
 
-    // 逐格识别全部失败时降级提示（而不是无显示 —— 便于真机排查）
-    if (labels.length === 0) {
-      return {
-        msg: {
-          active: false,
-          labels: [],
-          diag: `确认态: 顶栏无识别成功的格子（模板 ${portraits.length}）`,
-        },
-        display,
-      };
+    if (topBarOccupiedCount > 0) {
+      // ── 第二阶段 ──
+      const labels: CardLabel[] = [];
+      const identified: string[] = [];
+      for (const cand of cands) {
+        // ⚠️ 识别可能给出高 ID（60000+），而排行榜只有基础 ID —— 必须归一化，
+        // 否则顶栏每个英雄都会显示「暂无数据」（真机实测过）。
+        const cid = deps.canonicalId(cand.championId);
+        const row = rankings?.heroes.find((h) => h.championId === cid);
+        const sub = deps.championName(cid);
+        identified.push(`${sub}=${cand.score.toFixed(2)}`);
+        // 标签定位用截屏空间的槽位矩形（与识别同一坐标系）
+        labels.push(
+          slotLabelFor(captureSlots[cand.slotIndex]!, geo, display.workArea, {
+            name: sub,
+            winRate: row?.winRate ?? 0,
+            hasData: row !== undefined,
+            championId: cid,
+          }),
+        );
+      }
+      const diag =
+        `第二阶段: 顶栏 ${topBarOccupiedCount} 格有头像, 识别成功 ${labels.length} 格` +
+        (identified.length > 0 ? ` [${identified.join(' ')}]` : '');
+      if (labels.length > 0) return { msg: { active: true, labels, diag }, display };
+      // 有头像但一个都没认出来：不画（宁漏勿错），但把诊断留给真机排查
+      return { msg: { active: false, labels: [], diag }, display };
     }
+  }
 
+  if (!det.confident || det.cards.length === 0) {
     return {
       msg: {
-        active: true,
-        labels,
-        diag: `确认态顶栏: ${identified.join(' ')}`,
+        active: false,
+        labels: [],
+        diag: `第一阶段但未检出卡片: ${det.reason ?? '?'}（顶栏占用 ${topBarOccupiedCount}）`,
       },
       display,
     };
   }
 
+  // ── 第一阶段：卡片下方显示胜率 ──
   const workArea = display.workArea;
-  const labels = [];
+  const labels: CardLabel[] = [];
   const nameLibrary = resolveDeps(deps.nameLibrary);
-  const rankings = resolveDeps(deps.rankings) as RankingSnapshot | null;
+  const perCard: string[] = [];
   for (const rect of det.cards) {
     // 名字带 OCR
     const stripRect = {
       x: rect.x + (rect.w * (1 - NAME_STRIP.width)) / 2,
-      y: rect.y + rect.h * (NAME_STRIP.yCenter - NAME_STRIP.height / 2),
+      y: rect.y + (rect.h * NAME_STRIP.yCenter - (rect.h * NAME_STRIP.height) / 2),
       w: rect.w * NAME_STRIP.width,
       h: rect.h * NAME_STRIP.height,
     };
     const raw = extractGrayRaw(bmp, stripRect);
     let championId = 0;
+    let score = 0;
+    let margin = 0;
     if (raw) {
       const strip = extractNameStrip(raw.gray, raw.width, raw.height);
-      const m = matchName(strip, nameLibrary, { minScore: 0.45 });
-      if (m) championId = m.championId;
+      // ⚠️ 用带区分度的匹配：第二阶段/对局内会在美术图上误检出矩形，
+      // 只看最高分会给出 0.45~0.5 的假命中，于是把错误胜率画到屏幕中间。
+      const m = matchNameCareful(strip, nameLibrary);
+      if (m) {
+        championId = m.championId;
+        score = m.score;
+        margin = m.margin;
+      }
+    }
+    perCard.push(championId > 0 ? `${score.toFixed(2)}/${margin.toFixed(2)}` : '拒绝');
+
+    if (championId <= 0) {
+      // 识别不出就不画（宁漏勿错）—— 用户已确认不要「未识别」占位框
+      continue;
     }
 
     // 胜率 join（core 纯函数）
-    let info: ChampSelectInfo;
-    if (championId > 0) {
-      // ⚠️ 同顶栏：名字指纹库含高 ID（60000+）条目，而排行榜只有基础 ID，
-      // 必须归一化，否则识别成功也会显示「暂无数据」（真机实测过）。
-      const cid = deps.canonicalId(championId);
-      const row = rankings?.heroes.find((h) => h.championId === cid);
-      info = {
-        championId: cid,
-        name: deps.championName(cid),
-        winRate: row?.winRate ?? 0,
-        winRateChange: 0,
-        hasData: row !== undefined,
-      };
-    } else {
-      info = { championId: 0, name: '未识别', winRate: 0, winRateChange: 0, hasData: false };
-    }
-
+    // ⚠️ 同顶栏：名字指纹库含高 ID（60000+）条目，而排行榜只有基础 ID，
+    // 必须归一化，否则识别成功也会显示「暂无数据」（真机实测过）。
+    const cid = deps.canonicalId(championId);
+    const row = rankings?.heroes.find((h) => h.championId === cid);
     labels.push(
       cardLabelFor(rect, geo, workArea, {
-        name: info.name,
-        winRate: info.winRate,
-        hasData: info.hasData,
-        championId: info.championId,
+        name: deps.championName(cid),
+        winRate: row?.winRate ?? 0,
+        hasData: row !== undefined,
+        championId: cid,
       }),
     );
   }
 
   return {
-    msg: { active: true, labels, diag: `卡片 ${det.cards.length} 张` },
+    msg: {
+      active: true,
+      labels,
+      diag:
+        `第一阶段: 卡片 ${det.cards.length} 张 → 出标签 ${labels.length} 个` +
+        ` [得分/分差 ${perCard.join(' ')}]`,
+    },
     display,
   };
 }
