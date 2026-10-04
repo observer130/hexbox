@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { cardLabelFor, slotLabelFor, CARD_LABEL_GAP, LABEL_WIDTH } from './card-overlay.ts';
+import { cardLabelFor, slotLabelFor, CARD_LABEL_GAP } from './card-overlay.ts';
 import { normalizedRectToScreen } from './geometry.ts';
 
 /** 与真机一致的几何：窗口 1600x900 @ (313,1),截屏 3413x1920。 */
@@ -23,40 +23,48 @@ const CARD = { x: 0.3416349252856724, y: 0.2484375, w: 0.14591268678581892, h: 0
 
 const WORK = { x: 0, y: 0, width: 1920, height: 1080 };
 
-test('cardLabelFor：标签在卡片正下方，紧凑定宽并水平居中', () => {
+test('cardLabelFor：标签在卡片正下方、**与卡片同宽**且水平居中', () => {
   const label = cardLabelFor(CARD, GEO, WORK, {
     name: '不屈之枪',
     winRate: 0.572,
     hasData: true,
     championId: 80,
   });
-  // 真机反馈"标签宽度太大"：不再与卡片同宽（卡片约 233 DIP），改为紧凑定宽
+  // 用户 2026-10-04 明确要求：宽度与英雄卡片一致
+  // （此前为"紧凑定宽 132"，那是因为标签**位置**压在卡片内容上被误判成"太宽"）
   const cardW = CARD.w * GEO.windowWidth;
-  assert.equal(label.w, LABEL_WIDTH);
-  assert.ok(label.w < cardW, '标签必须比卡片窄');
+  assert.ok(Math.abs(label.w - cardW) < 1e-6, `标签应与卡片同宽，实际 ${label.w} vs ${cardW}`);
   // 相对卡片居中
   const cardX = GEO.windowX + CARD.x * GEO.windowWidth;
-  assert.ok(Math.abs(label.x - (cardX + (cardW - LABEL_WIDTH) / 2)) < 1e-6);
-  // 标签上缘 = 检测框下缘 + CARD_LABEL_GAP（36 DIP：名字条约 30 DIP 高，
-  // 用 6 会压住职业图标与英雄名 —— 真机合成核对发现的问题）
+  assert.ok(Math.abs(label.x - cardX) < 1e-6, '同宽时左缘应与卡片对齐');
+  // 标签上缘 = 检测框下缘 + CARD_LABEL_GAP
   const cardBottom = GEO.windowY + (CARD.y + CARD.h) * GEO.windowHeight;
   assert.ok(Math.abs(label.y - (cardBottom + CARD_LABEL_GAP)) < 1e-6);
   assert.equal(label.text, '57.2%');
   assert.equal(label.sub, '不屈之枪');
   assert.equal(label.hasData, true);
-  // 标签必须完全落在检测框之外（不再与名字条重叠）
+  // 标签必须完全落在检测框之外（不压住职业图标与英雄名）
   assert.ok(label.y >= cardBottom, '标签不应压进卡片检测框内');
 });
 
-test('cardLabelFor：卡片比标签更窄时收缩到卡宽（不溢出卡片）', () => {
-  const narrow = { x: 0.4, y: 0.3, w: 0.02, h: 0.4 }; // 32 DIP 宽
-  const label = cardLabelFor(narrow, GEO, WORK, {
-    name: '窄卡',
+test('cardLabelFor：显式传入 labelWidth 时按它收缩，但不超卡宽', () => {
+  const cardW = CARD.w * GEO.windowWidth;
+  const narrow = cardLabelFor(CARD, GEO, WORK, {
+    name: 'x',
     winRate: 0.5,
     hasData: true,
     championId: 1,
+    labelWidth: 100,
   });
-  assert.equal(label.w, narrow.w * GEO.windowWidth);
+  assert.equal(narrow.w, 100);
+  const tooWide = cardLabelFor(CARD, GEO, WORK, {
+    name: 'x',
+    winRate: 0.5,
+    hasData: true,
+    championId: 1,
+    labelWidth: 9999,
+  });
+  assert.equal(tooWide.w, cardW, '显式宽度也不能超过卡片宽度');
 });
 
 test('cardLabelFor：无数据显示「暂无数据」且 hasData=false', () => {

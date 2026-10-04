@@ -138,10 +138,9 @@ function draw(msg: VisionMsg): void {
       ctx.fillText(l.sub, l.x + l.w - 10, l.y + l.h * 0.42, Math.max(24, l.w - 90));
       ctx.textAlign = 'left';
 
-      // 脚注:数据出处
-      ctx.fillStyle = 'rgba(139, 150, 173, 0.75)';
-      ctx.font = `400 ${Math.round(l.h * 0.2)}px "Microsoft YaHei", sans-serif`;
-      ctx.fillText('101 官方统计', l.x + 10, l.y + l.h * 0.82);
+      // ⚠️ 曾在此画左下角脚注「101 官方统计」。用户 2026-10-04 明确要求去掉
+      // （标签已与卡片同宽，脚注显得杂；数据出处不需要每张标签都重复）。
+      // 出处仍在侧边窗与数据站展示（见 docs/OVERLAY-STAGES.md 的来源标注要求）。
     }
   }
 }

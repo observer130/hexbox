@@ -42,7 +42,16 @@ export interface CardLabelOptions {
   readonly labelWidth?: number;
 }
 
-/** 卡片标签的默认宽度（DIP）：够放下「100.0%」，且不横贯整张卡片。 */
+/**
+ * 卡片标签宽度的**可选上限**（DIP）。
+ *
+ * ⚠️ 默认**不**使用它：卡片标签默认与卡片**同宽**（用户 2026-10-04 明确要求：
+ * "显示宽度太窄了，最好和英雄卡片的宽度一致"）。保留此常量只是给调用方一个
+ * 可显式传入的上限（见 `CardLabelOptions.labelWidth`）。
+ *
+ * 历史：默认值曾从"卡宽"改成 132（当时反馈"太宽"）—— 但那次真正的问题是
+ * 标签**位置**压在卡片内容上；位置修好后用户确认希望与卡片同宽。
+ */
 export const LABEL_WIDTH = 132;
 
 /**
@@ -62,18 +71,17 @@ export const LABEL_WIDTH = 132;
  *   3. 真正的根因不在这个常数，而是 `findGameWindowRect` 因 PowerShell
  *      抛错返回 null（见 win-geometry.ts 的 Add-Type 修复）。
  *
- * 现在几何正确（窗口 1706×960 逻辑像素、截屏为其 2 倍），本值 14 使标签上缘
- * 落在卡片圆角底边下方约 8 像素。
+ * 现在几何基准正确（见 win-geometry.ts：选人界面由**客户端窗口**绘制），
+ * 本值 14 使标签上缘落在卡片圆角底边下方约 8 像素。
  */
 export const CARD_LABEL_GAP = 14;
 
 /**
  * 卡片矩形（归一化）→ 下方标签（屏幕逻辑坐标）。
  *
- * ⚠️ 标签宽度**不与卡片同宽**：真机反馈"标签宽度太大"（卡片宽约 233 DIP，
- * 整条横贯卡片下方非常突兀）。改为**紧凑定宽**并相对卡片水平居中；
- * 仅当卡片本身比它更窄时才收缩到卡宽。
- * 位置在检测框下缘 + `CARD_LABEL_GAP`；底部放不下时翻到卡片上方。
+ * 宽度**默认与卡片同宽**（用户要求）；显式传入 `labelWidth` 时按它收缩，
+ * 但不超过卡宽。位置在检测框下缘 + `CARD_LABEL_GAP`；
+ * 底部放不下时翻到卡片上方，并保证始终完整落在工作区内。
  */
 export function cardLabelFor(
   cardRect: Rect,
@@ -89,7 +97,9 @@ export function cardLabelFor(
     ? `${(options.winRate * 100).toFixed(1)}%`
     : '暂无数据';
 
-  const w = Math.min(card.w, options.labelWidth ?? LABEL_WIDTH);
+  // 默认与卡片同宽；显式给了 labelWidth 就按它收缩（不超卡宽）
+  const w =
+    options.labelWidth === undefined ? card.w : Math.min(card.w, options.labelWidth);
   const bottom = workArea.y + workArea.height;
 
   let y = card.y + card.h + gap;
