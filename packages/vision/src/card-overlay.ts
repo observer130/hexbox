@@ -46,12 +46,31 @@ export interface CardLabelOptions {
 export const LABEL_WIDTH = 132;
 
 /**
+ * 卡片标签与**检测框**下缘的默认间距（DIP）。
+ *
+ * ⚠️ 真机实测（把标签合成回原始截图 + 局部放大核对，2026-10-04）。
+ * 检测框（3413×1920 截图下 y=477..1269）包住整张卡片，框内自上而下为
+ * 「立绘 → 职业图标 → 英雄名（y≈1065..1100px）→ 圆角底边」。
+ * 标签必须整块落在**英雄名之下**，故上缘取 y≈1120px。
+ *
+ * ⚠️ 为什么不能靠算术推这个值（真实踩过，连续改错四次方向）：
+ * 截屏与窗口矩形**不同比**（实测窗口 2293×960、截屏 3413×1920），
+ * 于是 `makeScreenGeometry` 给出的坐标在纵横两个方向上刻度不一致
+ *   · 横向：498px ÷ 334.7DIP = 1.488
+ *   · 纵向：792px ÷ 396DIP   = 2.0
+ * 用其中任何一个比例去"算"另一个方向的间距都会得出错误结论。
+ * 本值 82 是按**纵向实测比例**解方程（(238.5+396+gap)×1.488 ≈ 1120）得到的，
+ * 并已用合成图复核；换分辨率/UI 缩放后必须重新核对。
+ */
+export const CARD_LABEL_GAP = 233;
+
+/**
  * 卡片矩形（归一化）→ 下方标签（屏幕逻辑坐标）。
  *
- * ⚠️ 标签**不与卡片同宽**：真机反馈"标签宽度太大"（卡片宽约 333 DIP，
+ * ⚠️ 标签宽度**不与卡片同宽**：真机反馈"标签宽度太大"（卡片宽约 233 DIP，
  * 整条横贯卡片下方非常突兀）。改为**紧凑定宽**并相对卡片水平居中；
  * 仅当卡片本身比它更窄时才收缩到卡宽。
- * 位置仍在卡片下缘 + gap；底部放不下时翻到卡片上方。
+ * 位置在检测框下缘 + `CARD_LABEL_GAP`；底部放不下时翻到卡片上方。
  */
 export function cardLabelFor(
   cardRect: Rect,
@@ -59,7 +78,7 @@ export function cardLabelFor(
   workArea: { x: number; y: number; width: number; height: number },
   options: CardLabelOptions,
 ): CardLabel {
-  const gap = options.gap ?? 6;
+  const gap = options.gap ?? CARD_LABEL_GAP;
   const h = options.labelHeight ?? 34;
   const card = normalizedRectToScreen(cardRect, geo);
 
@@ -68,16 +87,20 @@ export function cardLabelFor(
     : '暂无数据';
 
   const w = Math.min(card.w, options.labelWidth ?? LABEL_WIDTH);
+  const bottom = workArea.y + workArea.height;
 
   let y = card.y + card.h + gap;
   // 底部放不下 → 画到卡片上方
-  if (y + h > workArea.y + workArea.height) {
+  if (y + h > bottom) {
     y = card.y - gap - h;
   }
-  // 仍越界（理论上不会）→ 贴显示器底部
-  if (y + h > workArea.y + workArea.height) {
-    y = workArea.y + workArea.height - h;
+  // 上下都放不下（卡片极高 / 间距很大 / 工作区很小）→ 贴底部，保证可见。
+  // ⚠️ 这里必须同时夹住**上缘**：间距调到 233 DIP 后，翻转分支会算出
+  // 负 y（标签被推到屏幕上边缘之外），真机上表现为"标签消失"。
+  if (y < workArea.y || y + h > bottom) {
+    y = bottom - h;
   }
+  if (y < workArea.y) y = workArea.y;
 
   return {
     x: card.x + (card.w - w) / 2,

@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { cardLabelFor, slotLabelFor, LABEL_WIDTH } from './card-overlay.ts';
+import { cardLabelFor, slotLabelFor, CARD_LABEL_GAP, LABEL_WIDTH } from './card-overlay.ts';
 import { normalizedRectToScreen } from './geometry.ts';
 
 /** 与真机一致的几何：窗口 1600x900 @ (313,1),截屏 3413x1920。 */
@@ -37,12 +37,15 @@ test('cardLabelFor：标签在卡片正下方，紧凑定宽并水平居中', ()
   // 相对卡片居中
   const cardX = GEO.windowX + CARD.x * GEO.windowWidth;
   assert.ok(Math.abs(label.x - (cardX + (cardW - LABEL_WIDTH) / 2)) < 1e-6);
-  // 标签上缘 = 卡片下缘 + gap
+  // 标签上缘 = 检测框下缘 + CARD_LABEL_GAP（36 DIP：名字条约 30 DIP 高，
+  // 用 6 会压住职业图标与英雄名 —— 真机合成核对发现的问题）
   const cardBottom = GEO.windowY + (CARD.y + CARD.h) * GEO.windowHeight;
-  assert.ok(Math.abs(label.y - (cardBottom + 6)) < 1e-6);
+  assert.ok(Math.abs(label.y - (cardBottom + CARD_LABEL_GAP)) < 1e-6);
   assert.equal(label.text, '57.2%');
   assert.equal(label.sub, '不屈之枪');
   assert.equal(label.hasData, true);
+  // 标签必须完全落在检测框之外（不再与名字条重叠）
+  assert.ok(label.y >= cardBottom, '标签不应压进卡片检测框内');
 });
 
 test('cardLabelFor：卡片比标签更窄时收缩到卡宽（不溢出卡片）', () => {
@@ -78,7 +81,7 @@ test('cardLabelFor：卡片贴显示器底部时标签翻到上方', () => {
   });
   // 卡片下缘 ≈ 1 + 0.6609*900 ≈ 596 > 500 → 必须翻转
   const cardBottom = GEO.windowY + (CARD.y + CARD.h) * GEO.windowHeight;
-  assert.ok(cardBottom + 6 + 34 > 500, '前提:默认位置应越界');
+  assert.ok(cardBottom + CARD_LABEL_GAP + 34 > 500, '前提:默认位置应越界');
   assert.ok(label.y + label.h <= 500, `标签底 ${label.y + label.h} 应 <= 500`);
 });
 
@@ -92,6 +95,35 @@ test('cardLabelFor：翻转仍越界时贴显示器底部', () => {
     championId: 1,
   });
   assert.ok(Math.abs(label.y + label.h - 40) < 1e-6);
+});
+
+test('cardLabelFor：任何工作区下标签都完整可见（不产生负 y）', () => {
+  // 回归：间距调到 233 DIP 后，"翻转"分支会算出负 y —— 标签被推到屏幕
+  // 上边缘之外，真机上表现为"标签消失"。这里把不变量写死：
+  // 无论工作区多小、卡片在哪儿，标签必须完整落在工作区内。
+  const sizes = [40, 120, 300, 500, 900, 1080];
+  const cards = [
+    { x: 0.2, y: 0.05, w: 0.1, h: 0.9 }, // 很高的卡片
+    CARD,
+    { x: 0.2, y: 0.8, w: 0.1, h: 0.19 }, // 贴底
+    { x: 0.2, y: 0, w: 0.1, h: 0.05 }, // 贴顶
+  ];
+  for (const height of sizes) {
+    const workArea = { x: 0, y: 0, width: 1920, height };
+    for (const card of cards) {
+      const label = cardLabelFor(card, GEO, workArea, {
+        name: 'x',
+        winRate: 0.5,
+        hasData: true,
+        championId: 1,
+      });
+      assert.ok(label.y >= 0, `工作区 h=${height} 卡片 y=${card.y}: 标签 y=${label.y} 不应为负`);
+      assert.ok(
+        label.y + label.h <= height + 1e-6,
+        `工作区 h=${height} 卡片 y=${card.y}: 标签底 ${label.y + label.h} 超出`,
+      );
+    }
+  }
 });
 
 test('slotLabelFor：标签在槽位正下方、居中对齐、最小宽 56', () => {
