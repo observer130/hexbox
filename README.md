@@ -218,7 +218,7 @@ docs/                         设计文档（路线 / 阶段 / 局内识别 / �
 data/                         sync 产物（gitignored）
 ```
 
-开发者三闸门：`pnpm test`（当前 672 项，以实际输出为准）/ `pnpm typecheck` / `pnpm build`。
+开发者三闸门：`pnpm test`（当前 718 项，以实际输出为准）/ `pnpm typecheck` / `pnpm build`。
 
 ## 进一步阅读
 

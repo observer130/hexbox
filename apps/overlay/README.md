@@ -404,6 +404,9 @@ node --experimental-strip-types scripts/preview-augment-labels.mts `
 ```
 src/main/index.ts       主进程：LCU 轮询、数据读取、窗口定位/穿透
                         + 阶段启停局内链路 + 画布归属（选人/局内）交接
+                        + **单实例锁** + 托盘接线 + 「关窗口 = 最小化到托盘」
+src/main/tray.ts        **托盘图标**（常驻覆盖层唯一的交互入口）：菜单（状态/打开日志/
+                        打开数据目录/退出）、气泡、退出标志 `quitting`、`close → hide` 拦截
 src/main/augment-controller.ts **局内海克斯链路控制器**（S5.4d）：
                         采集几何 → 常驻屏幕流 → 2999 触发 → 门控边沿 → 识别
                         → 该英雄强度表 → 标签（行基准锁）→ 单卡刷新编排
@@ -415,6 +418,8 @@ src/capture/worker.ts   截屏 worker（渲染端）：取帧 → 门控检测 �
 src/debug-augment.ts    录制/验证工具：只用控制器 + 录制专属职责（产物/取证/生命周期/兜底路径）
 src/preload/index.ts    桥接：只暴露白名单 IPC（contextIsolation=true）
 src/renderer/           渲染端：纯浏览器，只接收主进程推送的状态
+build/tray/             托盘图标（tray.ico + tray-16/20/24/32/48.png，由
+                        scripts/make-tray-icon.py 生成；打包走 electron-builder 的 extraResources）
 ```
 
 **画布归属由纯函数决定**（`packages/vision/src/visibility.ts`）：
@@ -471,6 +476,52 @@ data/builds.json   ─┘
 - **有凭证但不在对局** → 显示「已连接客户端，当前未在对局中」的待机说明，
   **不**显示诊断面板（那会让人误以为工具坏了）
 
+### 托盘图标与退出（S6）
+
+覆盖层本体**没有可见窗口**（全屏透明、点击穿透、无标题栏、无 X），
+所以**托盘是它唯一的交互入口，也是唯一的退出方式**（用户已拍板）：
+
+| 托盘菜单项 | 作用 |
+|---|---|
+| `状态：等待客户端 / 选人中 / 局内 / …`（**只读**） | 当前状态；来自**现成**阶段读数（纯函数 `vision/overlay-status.ts` 的 `trayStatus()`）|
+| `打开日志` | 资源管理器**定位**到日志文件（还没生成时打开目录）；开发模式未落日志时该项禁用 |
+| `打开数据目录` | 打开 `resolveDataDir()` 的解析结果（用户覆盖目录 / `resources/data` 快照）|
+| `退出` | **唯一的真退出**：`quitApp()` 置 `quitting` → `app.quit()` → 复用既有 `before-quit` 清理（停屏幕流 + 销毁 worker + 清标签）|
+
+- **关窗口 = 最小化到托盘**：常驻覆盖层自己的两扇窗（侧边面板、全屏标签画布）都挂了
+  `attachCloseToTrayHide()` —— 非退出状态下 `preventDefault()` + `hide()`。
+  截屏 worker 窗口**不挂**（它是故意 `destroy()` 收掉的，`destroy()` 不发 `close`）。
+- tooltip 恒含「**退出请右键托盘图标**」（Windows 的托盘提示是单行文本）。
+- **单实例锁**：`app.requestSingleInstanceLock()` 拿不到锁 → 第二个实例**什么都不建**、
+  打印原因后退出；第一个实例通过 `second-instance` **只弹一次气泡**（"hexbox 已在运行"），
+  **不抢焦点、不显示空窗口**。真机出现过两个实例各画一套标签（"多个标签和胜率重叠"），
+  且两条链路算出**不同的强度表**。
+- **一次性气泡**：连续 3 轮（≈6 秒）读不到 LCU 凭证 → 弹一次可操作提示；
+  稳定连上 6 轮后才重新武装（**每个连接会话最多一次**，抖动不会反复打扰）。
+  判定是纯函数 `vision/credential-notice.ts`（有单测）。
+- 图标：`build/tray/tray.ico`（含 16/20/24/32/48 五档）+ 同名 PNG 兜底，
+  由 `python scripts/make-tray-icon.py` 生成（**透明底**：深色任务栏上 512² 那张
+  `icon.png` 的深色底板会糊成一团黑）。打包版经 `extraResources` 落到
+  `resources/tray/`，开发版直接读 `apps/overlay/build/tray/`；
+  两者都找不到时兜底把 `icon.png` 缩到 16px（会糊，但托盘不会没有）。
+
+不需要人点托盘也能验这两条路径（机器人点不了菜单）：
+
+```powershell
+# 自测：8s 后模拟"关窗口"（应最小化到托盘、进程仍在），再过 3s 模拟"托盘菜单退出"
+# 日志里应看到：两行「已最小化到托盘」→「关窗口之后进程仍在运行 = true」→「退出清理…」
+cd apps/overlay
+node run-electron.mjs . --tray-autotest 8000 --log-file D:\hexbox-dev.log   # 开发入口（实测可用）
+# 打包版同理：hexbox.exe --tray-autotest 8000 --log-file D:\hexbox.log
+# 一次性气泡的验证注入（把"读不到凭证"喂给判据；正常用户不会设）：
+$env:HEXBOX_NOTICE_TEST='1'; pnpm dev:overlay
+```
+
+> ⚠️ Windows 11 的**新托盘图标默认进"隐藏的图标"浮出菜单**（注册表
+> `HKCU\Control Panel\NotifyIconSettings` 里 `IsPromoted` 为空）——
+> 用户需要点任务栏的 `^` 或把它拖出来。这是系统行为，不是本程序的问题；
+> 所以 tooltip 与那条气泡提示都写清了"退出/日志在托盘菜单里"，避免用户找不到它。
+
 ## 构建
 
 ```powershell
@@ -491,6 +542,42 @@ pnpm --filter @hexbox/overlay package:dir      # 只出 release/win-unpacked（�
 `%LOCALAPPDATA%\hexbox\logs\overlay.log`。
 完整事实（UAC 取舍、代码签名、数据更新、网络镜像、失败点）见
 [docs/RELEASE-WINDOWS.md](../../docs/RELEASE-WINDOWS.md)。
+
+### 启动即崩：GPU 子进程起不来（**程序内已修复，不需要用户加参数**）
+
+真机症状（普通终端里双击运行打包版）：数据全都加载成功，然后
+
+```text
+ERROR:gpu_process_host.cc(976) GPU process launch failed: error_code=18   ← 刷十余条
+FATAL:gpu_data_manager_impl_private.cc(423) GPU process isn't usable. Goodbye.
+```
+
+`FATAL` 是 Chromium **直接杀进程**（退出码 `0x80000003`），JS 侧连 catch 的机会都没有，
+所以只能在 `app ready` 之前用命令行开关**预防**。主入口（`src/main/index.ts` 开头
+`HEXBOX_GRAPHICS_SWITCHES`）现在固定追加：
+
+| 开关 | 干什么 | 为什么需要 |
+|---|---|---|
+| `--disable-gpu` | 关硬件加速 | 本程序只用 2D canvas + CPU 纯函数识别，零代价（实测自测 ✅）|
+| `--in-process-gpu` | **GPU 服务跑进主进程** | 关键一条：光关硬件加速**挡不住**上面的 FATAL（Chromium 仍要为软件合成起 GPU 子进程）；进了主进程 = "子进程起不来"这条路径结构上不存在 |
+| `--disable-gpu-sandbox` | 兜底 | 万一某版 Electron 忽略上一条，别让 GPU 沙箱成为起不来的原因（**不**放开渲染进程沙箱）|
+
+> ⚠️ **不要改成 `app.disableHardwareAcceleration()`**：实测它① 挡不住这条 FATAL；
+> ② 与 `--in-process-gpu` 同用时**退出必崩**（0xC0000005，3/3 复现）。
+> 逐条实测表见 [docs/RELEASE-WINDOWS.md §十三](../../docs/RELEASE-WINDOWS.md)。
+
+日志里每次启动都会有一行 `[hexbox] 图形引导：…（实际生效 3/3）`；子进程/渲染进程
+异常消失会打一条 `⚠ 子进程消失：type=… reason=… exitCode=…`，并在**启动 20 秒内**
+遇到 `launch-failed`/`crashed` 时自动带 `--no-sandbox` 重启**一次**（有防止重启循环的标记）。
+
+用户侧排查手段（Chromium 自己的开关，直接透传；**必须在终端里跑**才看得到 GPU 报错）：
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\hexbox\hexbox.exe" --disable-gpu     # 关硬件加速
+& "$env:LOCALAPPDATA\Programs\hexbox\hexbox.exe" --no-sandbox      # 整片沙箱起不来时
+& "$env:LOCALAPPDATA\Programs\hexbox\hexbox.exe" --in-process-gpu  # 默认已加
+```
+
 
 为什么用 esbuild 而非纯 tsc：
 主进程/preload 需要打包 workspace 依赖（`@hexbox/lcu` 等），

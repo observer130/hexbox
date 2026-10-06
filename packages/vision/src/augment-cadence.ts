@@ -155,3 +155,130 @@ export function createCadencePolicy(options: Partial<CadenceOptions> = {}): Cade
     },
   };
 }
+
+/* ------------------------------------------------------------------ */
+/* api 模式的采样间隔决策（面板状态**优先于**触发状态机）                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * **api 触发模式**下"下一段采样间隔取多少"的纯函数（真机缺陷 2026-10-11）。
+ *
+ * ── 为什么必须单独一条规则、而且要"面板状态优先" ──────────────────────────
+ *
+ * api 模式的常态是**一帧不取**（`0`）：只有"死亡 + 等级达标 + 该次未选"才开。
+ * 但面板**停留期间**必须改成 `REROLL_POLL_MS`（默认 400ms）—— 单卡刷新
+ * （reroll）检测靠这个节奏比对每张卡的指纹。于是"谁说了算"必须写死顺序：
+ *
+ *   1. **面板在屏**（`state === 'open'`）→ `rerollPollMs`
+ *      —— 这一条**优先于触发状态机**：门控亲眼看到面板在屏，比"API 认为该不该开"
+ *      权威。真机缺陷：API 那边因为记账偏位而 `capture=false`，可是面板明明开着，
+ *      结果间隔被压回 0 → 一帧不取 → 面板上的标签永远不更新（也永远关不掉）。
+ *   2. 触发状态机说在开截屏 → `activeMs`（等面板/等连选）。
+ *   3. 关闭待确认的复检窗口 → `activeMs`（没有帧就不可能有开边沿，自愈无从谈起）。
+ *   4. 其余 → `0`（严格常态零取帧）。
+ *
+ * ── 关后自愈探针（**默认关闭**，见 `API_CADENCE_DEFAULTS.healProbe`）─────────
+ *
+ * `augment-close-confirm.ts` 的头注写明了一个死锁：api 模式下"确认关闭"之后
+ * 间隔是 0（一帧不取），**若面板其实还开着**（误判关闭），没有帧 → 没有开边沿 →
+ * 永远无法自愈。录制工具默认 pixel 模式帧永不停，所以同一个误判在录制里能自愈，
+ * 在常驻路径不能。
+ *
+ * 第 4 条分支就是为这个死锁准备的**低频自愈探针**：确认关闭后的
+ * `healWindowMs`(20s) 内用 `probeMs`(6000) 采一帧（≈1 帧/6 秒），窗口过后回到 0。
+ * 代价与收益（**产品取舍**）：从"严格零取帧"变成"误判后最多 6 秒自愈，
+ * 代价是关闭后 20 秒内每 6 秒 1 帧"。
+ *
+ * ⚠️ **用户 2026-10-11 裁决：保持严格零取帧** → `healProbe: false`（默认）。
+ *    也就是说第 4 条分支**在线上是关的**：误判关闭后间隔仍然回 0、由
+ *    "修 trigger 记账 + 修幽灵标签"来降低误判概率。要重新打开只改这一个常量
+ *    （或在控制器里传 `{ healProbe: true }`），不需要动任何调用点。
+ */
+export interface ApiCadenceInput {
+  /** 门控本帧是否认定面板在屏（控制器传 `reading.state === 'open'`）。 */
+  readonly panelOpen: boolean;
+  /** API 触发状态机是否在开截屏（`trigger.capture`）。 */
+  readonly capture: boolean;
+  /** 是否处于"关闭待确认"的复检窗口（`closeConfirm.state.rechecking`）。 */
+  readonly rechecking: boolean;
+  /**
+   * 上一次"确认关闭"的时刻（ms，与 `nowMs` 同一时基）；
+   * `null` = 本局还没有确认过关闭（或已复位）。
+   */
+  readonly lastConfirmedCloseAtMs: number | null;
+  /** 当前时刻（ms，与门控同一时基）。 */
+  readonly nowMs: number;
+}
+
+export interface ApiCadenceOptions {
+  /** 面板停留期间的采样间隔（单卡刷新检测靠它）。 */
+  readonly rerollPollMs: number;
+  /** "已开截屏"期间的采样间隔。 */
+  readonly activeMs: number;
+  /** 关后自愈探针的采样间隔（低频）。 */
+  readonly probeMs: number;
+  /** 关后自愈窗口（超过它就回到 0）。 */
+  readonly healWindowMs: number;
+  /** 关后自愈探针总开关（**默认关闭**：用户选择严格零取帧）。 */
+  readonly healProbe: boolean;
+}
+
+export const API_CADENCE_DEFAULTS: ApiCadenceOptions = {
+  rerollPollMs: 400,
+  activeMs: 250,
+  probeMs: 6000,
+  healWindowMs: 20_000,
+  // ⚠️ 回退点：用户裁决"严格常态零取帧"，所以这条探针**默认不启用**。
+  //    打开它 = 误判关闭后最多 6 秒自愈（代价：关闭后 20 秒内 1 帧/6 秒）。
+  healProbe: false,
+};
+
+export interface ApiCadenceDecision {
+  readonly intervalMs: number;
+  readonly reason: string;
+  /** 本决策是否来自"关后自愈探针"（诊断/单测用）。 */
+  readonly healProbe: boolean;
+}
+
+/**
+ * 算 api 模式下下一段采样间隔（**0 = 一帧不取**）。
+ *
+ * 纯函数：不读环境变量、不碰状态 —— 控制器只负责把三个入参（`capture` /
+ * `state` / `rechecking`）喂进来，顺序规则全部由这里决定（可单测）。
+ */
+export function apiCaptureInterval(
+  input: ApiCadenceInput,
+  options: Partial<ApiCadenceOptions> = {},
+): ApiCadenceDecision {
+  const o: ApiCadenceOptions = { ...API_CADENCE_DEFAULTS, ...options };
+  if (input.panelOpen) {
+    return {
+      intervalMs: o.rerollPollMs,
+      reason: `面板在屏 → 重随轮询 ${o.rerollPollMs}ms（面板状态优先于触发状态机）`,
+      healProbe: false,
+    };
+  }
+  if (input.capture) {
+    return { intervalMs: o.activeMs, reason: `已开截屏（等面板/等连选）${o.activeMs}ms`, healProbe: false };
+  }
+  if (input.rechecking) {
+    return {
+      intervalMs: o.activeMs,
+      reason: `关闭待确认 → 复检取帧 ${o.activeMs}ms（面板若还在就会自己回来）`,
+      healProbe: false,
+    };
+  }
+  if (o.healProbe && input.lastConfirmedCloseAtMs !== null) {
+    const since = input.nowMs - input.lastConfirmedCloseAtMs;
+    if (since >= 0 && since <= o.healWindowMs) {
+      return {
+        intervalMs: o.probeMs,
+        reason:
+          `确认关闭后 ${Math.round(since / 1000)}s（≤ ${o.healWindowMs / 1000}s）：` +
+          `自愈探针 ${o.probeMs}ms（误判最多 6 秒自愈）`,
+        healProbe: true,
+      };
+    }
+  }
+  return { intervalMs: 0, reason: '常态：api 模式一帧不取', healProbe: false };
+}

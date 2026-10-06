@@ -16,7 +16,7 @@
 | 局内海克斯 | 🚧 进行中 | S5：门控**已用真机帧标定并验证**（3 正样本全中 / 8 负样本全拒，1/4 分辨率成立）；截屏已从"每次 0.9s 的一次性截屏"改为**常驻截屏流**（本地自测 ~18ms/帧）；名字 OCR（渲染端全分辨率）与**强度标签绘制**均已实现（S5.4c，录制工具能真机画）。⚠️ 真机复盘发现两个缺陷并已修（见 S5.4c-1/c-2）：**英雄身份取成了队友**（剑圣→154 Zac、酒桶→43 Karma）、**标签画了但屏幕上没有**（窗口可见性）。**S5.4d 已接线**：常驻 overlay（`pnpm dev:overlay`）与录制工具跑**同一份控制器**，选人/局内两个生产者的画布归属是纯函数（+19 项单测），并有降级开关 `HEXBOX_OVERLAY_AUGMENT=0`；**真机复验（S5.5）待做** |
 | 配装方案 | ✅ 可用 | 出装写入客户端「配装方案」，游戏内查看 |
 | LCU | ✅ 可用 | 探测 + REST + 模式识别 + 配装方案写入 |
-| 工程基线 | ✅ 全绿 | **672 项测试** + typecheck（10 个项目）+ build，CI 已接入 |
+| 工程基线 | ✅ 全绿 | **718 项测试** + typecheck（10 个项目）+ build，CI 已接入 |
 
 ### 数据集实测规模（`data/*.json`）
 
@@ -157,7 +157,7 @@ node --experimental-strip-types scripts/diag-augment-frames.mts <帧.png...>   #
 ## 四、常用验证命令
 
 ```bash
-pnpm test        # 672 项，应全绿
+pnpm test        # 718 项，应全绿
 pnpm typecheck   # 10 个 workspace 项目
 pnpm build       # web + overlay
 pnpm sync        # 重新拉取数据（联网）

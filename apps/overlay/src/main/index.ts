@@ -21,6 +21,195 @@ import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } f
 import { dirname, join, resolve } from 'node:path';
 import { inspect } from 'node:util';
 
+/* ------------------------------------------------------------------ */
+/* 启动引导：图形 / GPU（**必须早于 app ready** —— 这里就是最早的可执行点） */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 本程序**主动追加**的图形开关（唯一清单：`appendSwitch` 与日志都读它）。
+ *
+ * ⚠️ **为什么不是 `app.disableHardwareAcceleration()`**（Electron 官方那个 API）——
+ * 这是本机实测的取舍，两条都要看：
+ *   ① 它**挡不住**这次要修的那条 FATAL。关掉硬件加速之后，Chromium 仍会**为软件合成
+ *      再起一个 GPU 子进程**；子进程起不来时照样致命（实测：`--disable-gpu` +
+ *      "让 GPU 子进程创建不出来" → 同一条 FATAL、退出码 `0x80000003`）。
+ *   ② 它和真正能挡住的那一条（`--in-process-gpu`）**不能共存**：两者一起调用时程序
+ *      启动正常、自测 ✅ 通过，但**退出时 0xC0000005 访问违例**（3/3 必现；
+ *      与调用顺序无关：先 `appendSwitch` 再调 API 也一样崩）。
+ *      而 `appendSwitch('disable-gpu')` + `appendSwitch('in-process-gpu')` **退出码 0**。
+ * 所以这里改用命令行开关达到同一个目的 —— `--disable-gpu` 就是那个 API 在命令行上的
+ * 等价物，效果一样（Chromium 只认命令行），但没有那个退出崩溃。逐条理由见下。
+ */
+const HEXBOX_GRAPHICS_SWITCHES = [
+  /**
+   * ① **关掉硬件加速**（等价于 `app.disableHardwareAcceleration()` 的效果）。
+   *
+   * 【为什么本程序可以关：代价经核实为 0】
+   *   · 屏幕上那块透明画布（`src/renderer/overlay-canvas.ts`）只用 **Canvas2D**
+   *     （`fillText` / 描边 / 发光阴影 / `clearRect`），没有 WebGL、没有 3D；
+   *   · 整条识别链路（`packages/vision`：局内面板门控的 **1/4 缩放采样**、
+   *     头像模板匹配、名字与海克斯名 OCR、标签几何）全是 **CPU 纯函数**，
+   *     一帧都不提交给 GPU；
+   *   · 唯一的显示类自测（`HEXBOX_LABEL_OVERLAY_TEST=1`：画 L/C/R 三个大字母并
+   *     **读回画布像素**）在关掉硬件加速后照样通过（实测见
+   *     `docs/RELEASE-WINDOWS.md` §十三）。
+   *
+   * 【为什么必须关：不关就是 FATAL，JS 侧救不了】
+   *   某些机器/会话里 Chromium 的 GPU 子进程**根本起不来**，日志是
+   *     `ERROR:gpu_process_host.cc(976) GPU process launch failed: error_code=18`（刷十几条）
+   *     `FATAL:gpu_data_manager_impl_private.cc(423) GPU process isn't usable. Goodbye.`
+   *   `FATAL` 是 `CheckOp` **直接杀进程**：数据全部加载成功也照样启动即崩溃
+   *   （真机日志就停在"名字指纹 245 个已加载"之后的十几行 ERROR 上），
+   *   JS 侧连 `catch` / `child-process-gone` 的机会都没有 —— 所以只能**预防**。
+   *   目标场景是"双击即用"，不能指望用户去记命令行参数。
+   */
+  'disable-gpu',
+  /**
+   * ② **让 GPU 服务跑在主进程里** —— 本次修复的关键一条。
+   *
+   * 光有关掉硬件加速**挡不住**上面那条 FATAL（见 ① 的说明：Chromium 仍要为软件合成
+   * 起 GPU 子进程）。本机实测（用 `--gpu-launcher=<不存在的 exe>` 人为让 GPU 子进程
+   * 无法创建，复现用户那台机器的同一条 FATAL）：
+   *   · `--disable-gpu`                                       → FATAL，退出码 `0x80000003`
+   *   · `--disable-gpu --disable-gpu-sandbox`                 → FATAL
+   *   · `--disable-gpu --disable-software-rasterizer`         → FATAL
+   *   · `--no-sandbox --disable-gpu`                          → FATAL
+   *   · `--disable-gpu-process-crash-limit`                   → 不崩但**永不退出**（无限重试重启 GPU，实测 stderr 涨到 91 MB）
+   *   · `--disable-gpu --in-process-gpu`                      → **无 GPU 子进程、正常启动、自测 ✅、退出码 0**
+   * `in-process-gpu` 把 GPU 服务并进主进程，"子进程起不来"这条路径于是
+   * **结构上不存在**（软件合成的活由主进程自己干，而本程序那点 2D 画布不算活）。
+   */
+  'in-process-gpu',
+  /**
+   * ③ 兜底：万一哪一版 Electron **忽略** ②（或将来有人把它去掉）而仍创建 GPU 子进程，
+   * 别让**它的沙箱**成为"起不来"的原因。
+   *
+   * 依据：本机环境的开发入口正是靠 `--no-sandbox` 才起得来（见 AGENTS.md 的环境说明），
+   * 而子进程沙箱里最容易失败的就是 GPU 那一个。这里**只豁免 GPU 子进程**的沙箱；
+   * `--no-sandbox`（连渲染进程一起放开）**故意不加**：渲染端仍保持
+   * `contextIsolation` + 无 `nodeIntegration` + 只加载本地 `file://`。
+   * 真遇到"整片沙箱都起不来"的环境，由下面的一次性自动降级去补（见 `degradeNoSandbox`）。
+   */
+  'disable-gpu-sandbox',
+] as const;
+
+/**
+ * ⚠️ 顺序无关，但**必须全部在 app ready 之前**：Chromium 只在那之前读命令行；
+ * 这里的顶层代码就是最早的可执行点（比 `app.whenReady()` 早得多）。
+ */
+for (const name of HEXBOX_GRAPHICS_SWITCHES) app.commandLine.appendSwitch(name);
+
+/* ------------------------------------------------------------------ */
+/* 子进程 / 渲染进程崩溃：取证日志 + **最多一次**的自动降级                 */
+/* ------------------------------------------------------------------ */
+
+/** 本进程的启动时刻（自动降级的**时间窗**起点）。 */
+const STARTED_AT = Date.now();
+
+/**
+ * "已经降级过一次"的标记：随 `app.relaunch()` 的**命令行**带给新进程。
+ *
+ * ⚠️ 它是**防重启循环的唯一闸门**：带 `--no-sandbox` 重启之后若还是起不来，
+ * 新进程看到这个开关就只记录日志、不再重启 —— 否则用户会掉进
+ * "启动 → 崩 → 重启 → 崩"的死循环，比不重启更糟。
+ */
+const DEGRADED_FLAG = '--hexbox-degraded-no-sandbox';
+
+/** 只在"刚启动"的这段时间窗内自动降级：已经跑起来之后（尤其对局中途）重启比不重启更糟。 */
+const DEGRADE_WINDOW_MS = 20_000;
+
+/** 本次运行是否已经是"降级后的运行"（= 上一次带 `--no-sandbox` 重启了自己）。 */
+let degradedToNoSandbox = process.argv.includes(DEGRADED_FLAG);
+
+/**
+ * **兜底中的兜底**：子进程/渲染进程"起不来"时，带 `--no-sandbox` 重新拉起自己**一次**。
+ *
+ * 为什么需要它：上面第三层兜底只豁免 **GPU 子进程**的沙箱，而真机环境的沙箱问题
+ * 往往是**整片**的（本机开发入口就是要 `--no-sandbox` + `--disable-gpu` 才起得来）。
+ * 而命令行参数对"双击 exe"的用户不可用，所以程序自己补这一次。
+ *
+ * 代价（如实写在这里）：
+ *   · 多一次启动（约 1~2 s），且**仅此一次**；
+ *   · 重启后 Chromium 的**渲染进程沙箱关闭** —— 本程序只加载本地 `file://` 页面
+ *     （`contextIsolation: true`、不开 `nodeIntegration`、不访问任何远程页面），
+ *     所以这一层的实际收益很小，但确实变小了；
+ *   · 打包版是 `requireAdministrator`：由**已提权**的父进程 `relaunch`，
+ *     子进程继承提权令牌 → **不会**再弹一次 UAC。
+ *
+ * 调用方已筛过：启动 20 s 内 + `reason` 为 `launch-failed` / `crashed`。
+ */
+function degradeNoSandbox(what: string): void {
+  const elapsedS = Math.round((Date.now() - STARTED_AT) / 1000);
+  if (degradedToNoSandbox) {
+    console.error(
+      `[hexbox] ⚠ ${what}：本次已经是降级后的运行（${DEGRADED_FLAG}）→ **不再重启**，` +
+        '避免无限重启；请把这段日志发回',
+    );
+    return;
+  }
+  if (Date.now() - STARTED_AT > DEGRADE_WINDOW_MS) {
+    console.error(
+      `[hexbox] ⚠ ${what}：启动已过 ${elapsedS}s（> ${DEGRADE_WINDOW_MS / 1000}s）` +
+        '→ **不在运行中自动重启**（对局中途重启代价更大）；请把这段日志发回',
+    );
+    return;
+  }
+  degradedToNoSandbox = true;
+  console.error(
+    `[hexbox] ⚠ ${what}（启动 ${elapsedS}s 内）→ 自动降级：带 --no-sandbox 重启一次\n` +
+      '         为什么：环境阻止 Chromium 的子进程沙箱时，这是唯一"不给用户记参数也能起来"的路子\n' +
+      '         代价：本次重启后渲染进程沙箱关闭（只加载本地页面，详见 degradeNoSandbox 注释）；' +
+      '**仅重启这一次**，再失败就照常退出',
+  );
+  app.relaunch({
+    // 已有的降级标记先去重，免得反复重启后命令行越来越长
+    args: [
+      ...process.argv.slice(1).filter((a) => a !== DEGRADED_FLAG),
+      '--no-sandbox',
+      DEGRADED_FLAG,
+    ],
+  });
+  app.exit(0);
+}
+
+/**
+ * 子进程 / 渲染进程消失的**取证日志** + 上面那次降级的触发点。
+ *
+ * ⚠️ 用的是 **Electron 33 的真实 API**（查过 `node_modules/electron/electron.d.ts`）：
+ *   · `gpu-process-crashed` 在 Electron 22 已被**移除**（33 的 d.ts 里没有它）——
+ *     GPU 子进程统一走 `app.on('child-process-gone')` 的 `type === 'GPU'`；
+ *   · 渲染进程**不在** `child-process-gone` 里（那里的 `type` 只有
+ *     `GPU / Utility / Zygote / Sandbox helper / …`），它只走
+ *     `webContents.on('render-process-gone')` —— 两个都监听才不留盲区。
+ *   用一个全局的 `web-contents-created` 钩子，两扇窗（侧边面板 + 透明画布）
+ *   与截屏 worker 都自动覆盖，不必去改 `label-overlay.ts` / `augment-stream.ts`。
+ *
+ * ⚠️ 必须知道它的**边界**：文件开头那种 GPU 致命退出
+ * （`FATAL:gpu_data_manager_impl_private.cc(423) GPU process isn't usable`）是
+ * `CheckOp` **直接杀进程**，这些回调**根本来不及跑** —— 所以那条修复靠的是
+ * **预防**（`disableHardwareAcceleration()` + `in-process-gpu`）；
+ * 这两条日志是"以后再遇到别的子进程问题"时的取证入口。
+ */
+app.on('child-process-gone', (_event, details) => {
+  console.error(
+    `[hexbox] ⚠ 子进程消失：type=${details.type} reason=${details.reason} exitCode=${details.exitCode}` +
+      (details.serviceName ? ` serviceName=${details.serviceName}` : '') +
+      (details.name ? ` name=${details.name}` : ''),
+  );
+  if (details.reason === 'launch-failed' || details.reason === 'crashed') {
+    degradeNoSandbox(`子进程 ${details.type} ${details.reason}（exitCode ${details.exitCode}）`);
+  }
+});
+
+app.on('web-contents-created', (_event, contents) => {
+  contents.on('render-process-gone', (_e, details) => {
+    console.error(`[hexbox] ⚠ 渲染进程消失：reason=${details.reason} exitCode=${details.exitCode}`);
+    if (details.reason === 'launch-failed' || details.reason === 'crashed') {
+      degradeNoSandbox(`渲染进程 ${details.reason}（exitCode ${details.exitCode}）`);
+    }
+  });
+});
+
 /**
  * 命令行参数 → 环境变量（**打包后的主要开关入口**）。
  *
@@ -34,6 +223,7 @@ import { inspect } from 'node:util';
  *   hexbox.exe --data-dir D:\data            # 指定数据目录
  *   hexbox.exe --no-augment                  # 关掉局内海克斯链路（选人标签照常）
  *   hexbox.exe --no-draw                     # 只识别不画（排查用）
+ *   hexbox.exe --tray-autotest 8000          # 托盘/退出路径自测：8s 后模拟关窗口，再过 3s 模拟托盘退出
  *
  * ⚠️ 必须在**日志接管与数据解析之前**调用：`--log-file` / `--data-dir`
  * 影响的就是那两处的解析结果。
@@ -49,6 +239,8 @@ function applyCliOverrides(argv: readonly string[] = process.argv.slice(1)): voi
     '--data-dir': { env: 'HEXBOX_DATA_DIR' },
     '--no-augment': { env: 'HEXBOX_OVERLAY_AUGMENT', value: '0' },
     '--no-draw': { env: 'HEXBOX_AUGMENT_DRAW', value: '0' },
+    // 托盘/退出路径自测（机器人点不了托盘菜单，见 runTrayAutotest）
+    '--tray-autotest': { env: 'HEXBOX_TRAY_AUTOTEST_MS' },
   };
   for (let i = 0; i < argv.length; i++) {
     const raw = argv[i] ?? '';
@@ -198,6 +390,84 @@ if (logFile) {
   );
 }
 
+/* ------------------------------------------------------------------ */
+/* 单实例锁：必须在**任何窗口 / 托盘 / 屏幕流之前**（真机缺陷的直接修法）      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * ⚠️ **为什么必须有它**（真机日志，用户已拍板）：
+ * 用户遇到过**两个 `hexbox.exe` 同时运行**，同一局里出现
+ *   2×「进入对局（InProgress）→ 启动局内海克斯链路」、2×「worker ready」、
+ *   2× 屏幕流、两个「面板出现 #1」，而且两条链路算出**不同的强度表** ——
+ * 两套标签叠在一起，用户报为"多个标签和胜率重叠"。
+ * `ensureAugmentController()` 是**进程内**单例（同一进程不会建第二个控制器），
+ * 跨进程只能靠这一把锁。
+ *
+ * 拿不到锁 = 已经有实例在跑 → **立刻退出，且什么都不能建**
+ * （否则又会多出一套标签、又一条流）。重复启动的**可见反馈**由第一个实例给
+ * （见下面 `second-instance`：只弹气泡，**不抢焦点、不显示空窗**）。
+ *
+ * ⚠️ `app.quit()` 之前**不能**有任何 `preventDefault()` 的 close 拦截生效 ——
+ * 所以这里是"还没有窗口"的最早点；第二实例的 `before-quit` 也在下面的
+ * 监听器里明确跳过（免得日志里出现假的"退出清理"，见 `singleInstanceLock` 的分支）。
+ */
+const singleInstanceLock = app.requestSingleInstanceLock();
+if (!singleInstanceLock) {
+  console.error(
+    '[hexbox] ⛔ 已有 hexbox 在运行（app.requestSingleInstanceLock() 拿不到锁）→ 本次启动**直接退出**：\n' +
+      '         不建窗口、不建托盘、不建屏幕流（两个实例会各画一套标签、各起一条流，\n' +
+      '         实机出现过"多个标签和胜率重叠"，且两套强度表还可能不一致）；\n' +
+      '         要退出正在运行的那个：在**托盘图标**上右键 → 退出。',
+  );
+  app.quit();
+  // ready 之前的 app.quit() 在个别环境下不生效（官方示例同样只写 app.quit()）——
+  // 补一道兜底：第二实例里没有任何要收的东西，直接 exit 是安全的。
+  setTimeout(() => app.exit(0), 3000);
+}
+
+/**
+ * 第一个实例：第二个实例被拒时给出**可见反馈**（用户双击第二次时不会毫无反应）。
+ *
+ * ⚠️ 这里**只弹气泡**，绝不 `show()` / `focus()` 任何窗口：
+ * 本程序是游戏内常驻覆盖层，抢一次焦点就是玩家丢一次操作。
+ */
+if (singleInstanceLock) {
+  app.on('second-instance', (_event, argv, workingDirectory) => {
+    const args = argv.slice(1).filter((a) => a !== '.').join(' ');
+    console.warn(
+      `[hexbox] ⛔ 有人又启动了一次 hexbox（argv: ${args === '' ? '（无参数）' : args}；cwd=${workingDirectory}）` +
+        ' → 那一次已被单实例锁拒绝；这里**不抢焦点、不显示空窗口**（游戏内常驻程序的规矩）',
+    );
+    tray?.notify(
+      'hexbox 已在运行',
+      `无需重复启动：它正在后台运行（托盘图标可右键查看状态/退出）。${TRAY_TOOLTIP_HINT}。`,
+    );
+    // 重复启动往往意味着用户找不到它 —— 顺手刷新一下状态显示（tooltip/菜单）
+    tray?.refresh();
+  });
+}
+
+/**
+ * 图形引导结论 —— **必须打在 `teeConsoleToFile()` 之后**（放在这里才会进日志文件）。
+ *
+ * 为什么单独要有这一行：打包版没有控制台，日志文件是用户唯一的取证渠道；
+ * 而上面那段引导（关硬件加速 + 两个 GPU 开关）发生在**接管日志之前**，
+ * 不补这一行的话，"这次到底有没有关掉 GPU"在日志里查不到 ——
+ * 以后再遇到同类崩溃（`GPU process launch failed`）就只能猜。
+ *
+ * 「实际生效 x/3」用 `app.commandLine.hasSwitch()` 现场读回来（不是照抄上面那行代码）：
+ * 哪天 Electron 改了 `appendSwitch` 的语义，这一行会立刻露馅。
+ */
+console.log(
+  '[hexbox] 图形引导：已关硬件加速 + GPU 服务在主进程（命令行开关，见文件开头为什么不用 API）' +
+    `：${HEXBOX_GRAPHICS_SWITCHES.map((s) => `--${s}`).join(' ')}` +
+    `（实际生效 ${HEXBOX_GRAPHICS_SWITCHES.filter((s) => app.commandLine.hasSwitch(s)).length}` +
+    `/${HEXBOX_GRAPHICS_SWITCHES.length}）` +
+    (degradedToNoSandbox
+      ? `；⚠ 本次是**降级后的运行**（${DEGRADED_FLAG} → 渲染进程沙箱已关闭）`
+      : ''),
+);
+
 import {
   LcuClient,
   LcuHttpError,
@@ -230,6 +500,12 @@ import {
   AUGMENT_CLEAR_REASONS,
   AUGMENT_CHAIN_PHASES,
   augmentClearLogLine,
+  // 托盘：状态文案 + 「读不到凭证」的一次性气泡（都是纯函数，单测在 @hexbox/vision）
+  TRAY_TOOLTIP_HINT,
+  trayStatus,
+  credentialNoticeText,
+  decideCredentialNotice,
+  INITIAL_CREDENTIAL_NOTICE_STATE,
   type AugmentChainState,
   type LabelProducer,
   type NameFingerprint,
@@ -257,6 +533,13 @@ import {
 } from './label-overlay.ts';
 import { isLabelOverlaySelfTest, runLabelOverlaySelfTest } from './label-selftest.ts';
 import { AugmentController, type AugmentLabelSink } from './augment-controller.ts';
+import {
+  attachCloseToTrayHide,
+  createTray,
+  isQuitting,
+  quitApp,
+  type TrayHandle,
+} from './tray.ts';
 import { packagedDataDir, packagedLogFile } from './user-paths.ts';
 
 // ---------------------------------------------------------------------------
@@ -356,6 +639,22 @@ const AUGMENT_ENABLED = overlayAugmentEnabled(process.env['HEXBOX_OVERLAY_AUGMEN
  */
 const AUGMENT_DRAW = process.env['HEXBOX_AUGMENT_DRAW'] !== '0';
 /**
+ * **验证用注入**（只影响"一次性气泡"的判据输入，不影响任何真实链路）：
+ * `HEXBOX_NOTICE_TEST=1` → 每轮都把"读不到凭证"喂给气泡判据。
+ *
+ * 为什么需要它：真机上"客户端没起 / 没以管理员运行"这个前提**没法在不杀用户
+ * 客户端的前提下造出来**，而"只提示一次、不重复打扰"恰恰是必须验证的那条规则。
+ * 判定本身仍是线上同一份纯函数（`@hexbox/vision/credential-notice.ts`，有单测），
+ * 这里只换输入 —— 所以它证明的是**接线与计数**，不是判据本身。
+ */
+const NOTICE_TEST = process.env['HEXBOX_NOTICE_TEST'] === '1';
+if (NOTICE_TEST) {
+  console.warn(
+    '[hexbox] ⚠ 自测注入 HEXBOX_NOTICE_TEST=1：把"读不到 LCU 凭证"喂给一次性气泡判据' +
+      '（真实凭证状态不影响；正常用户不会设这个变量）',
+  );
+}
+/**
  * 最后一次 LCU 轮询到的阶段（`inMatch` 判定用；画布归属由本轮 `phase` 决定）。
  *
  * 为什么单独留一份：控制器的 API 轮询是**异步**的，它需要在"本轮采样时刻"
@@ -364,6 +663,33 @@ const AUGMENT_DRAW = process.env['HEXBOX_AUGMENT_DRAW'] !== '0';
  * ⚠️ 这里是**经过阶段门**的值（`stageGate.push()` 的输出），不是原始读数。
  */
 let lastPhase = 'None';
+
+/**
+ * 本轮是否读到了 LCU 凭证（= `client !== null`）；托盘状态文案用它。
+ *
+ * ⚠️ 与 `lastPhase` 分开：阶段门会在读失败时**保持**上一轮阶段，
+ * 所以"阶段还是 InProgress"并不代表"现在还能读到客户端"。
+ */
+let lastConnected = false;
+
+/**
+ * 托盘句柄（`null` = 还没建，或建失败；见 `main/tray.ts`）。
+ *
+ * 为什么常驻覆盖层必须有托盘：本体没有可见窗口（`showPanel` 恒 false），
+ * 托盘是**唯一**的交互入口与**唯一**的退出方式（用户已拍板）。
+ */
+let tray: TrayHandle | null = null;
+
+/**
+ * 「读不到 LCU 凭证」一次性气泡的**判定状态**（纯函数 `decideCredentialNotice()`）。
+ *
+ * 规则与阈值都在 `@hexbox/vision/credential-notice.ts`（有单测）：
+ * 连续 3 轮（≈6 秒）读不到 → 提示一次；稳定连上 6 轮后才重新武装。
+ */
+let credentialNotice = INITIAL_CREDENTIAL_NOTICE_STATE;
+
+/** 最近一次凭证探测里"客户端进程在不在"（只影响气泡文案）。 */
+let probeClientRunning = false;
 
 /**
  * LCU 阶段读数的**去抖门**（纯函数 `vision/visibility.ts` 的 `createStageGate()`）。
@@ -678,6 +1004,9 @@ async function pollOnce(): Promise<void> {
 
   if (!client) {
     const res = await detectCredentialsDetailed().catch(() => null);
+    // "客户端进程在不在"只用于气泡文案；每轮都记（探测本身每轮都在跑，
+    // 只有**日志**被 warnedNoCreds 去重），否则气泡里的第一句会一直是启动时的旧值。
+    probeClientRunning = res?.clientRunning ?? false;
     if (res?.credentials) {
       client = new LcuClient(res.credentials);
       console.log(`[hexbox] LCU 已连接 (port ${res.credentials.port}, ${res.detail})`);
@@ -686,7 +1015,7 @@ async function pollOnce(): Promise<void> {
       // 凭证探测失败是「悬浮窗永不出现」最常见的原因，必须显式报出来，
       // 否则表现为「程序在跑但什么都不显示」，极难排查。
       warnedNoCreds = true;
-      const running = res?.clientRunning ?? false;
+      const running = probeClientRunning;
       const detail = res?.detail ?? '探测未返回结果';
       credsDetail = detail;
       const hint = running
@@ -771,6 +1100,29 @@ async function pollOnce(): Promise<void> {
       // 有凭证但没读到会话 —— 客户端是活的（或这一轮读失败），UI 不该显示诊断面板
       connected = true;
     }
+  }
+
+  // 托盘状态文案用（"连不上客户端"必须排在阶段判断之前，见 overlay-status.ts）
+  lastConnected = connected;
+
+  // ── 一次性气泡：连续 N 轮读不到凭证 → 提示**一次**（判定是纯函数，有单测）────
+  //
+  // 为什么放在这里：用户双击之后如果客户端没起/没以管理员运行，屏幕上**什么都没有**
+  // （覆盖层没有可见窗口，连诊断侧边窗都已按用户决策关掉）—— 用户会以为程序坏了。
+  // 所以必须有**一次**可见、可操作的反馈；而"只提示一次"的规则全部在
+  // `@hexbox/vision/credential-notice.ts` 里（主进程不写第二份判断）。
+  const notice = decideCredentialNotice(credentialNotice, {
+    // `HEXBOX_NOTICE_TEST=1` 时注入"读不到"（见 NOTICE_TEST 的注释）
+    credsAvailable: NOTICE_TEST ? false : client !== null,
+    clientRunning: probeClientRunning,
+  });
+  credentialNotice = notice.state;
+  if (notice.show) {
+    const text = credentialNoticeText(probeClientRunning);
+    console.log(`[hexbox] 🔔 ${notice.reason}`);
+    tray?.notify(text.title, text.content);
+  } else if (notice.rearmed) {
+    console.log(`[hexbox] ${notice.reason}`);
   }
 
   // ── 阶段门（**两条入口都要过**：读到会话 / 读失败 / 连凭证都没有）────────
@@ -981,6 +1333,9 @@ async function pollLoop(): Promise<void> {
     } catch (e) {
       console.warn('[hexbox] poll error:', e instanceof Error ? e.message : e);
     }
+    // 托盘状态（只读菜单项 + tooltip）与本轮读数同一个节拍 ——
+    // 放在 try 之外：即使这一轮 pollOnce 抛了也要刷新（否则状态会一直停在旧值）
+    tray?.refresh();
     await new Promise((r) => setTimeout(r, POLL_MS));
   }
 }
@@ -1199,10 +1554,63 @@ function registerIpc(): void {
     applyClickThrough(Boolean(on));
     return clickThrough;
   });
-  ipcMain.handle('overlay:close', () => app.quit());
+  // ⚠️ 语义已按用户决策改成「关窗口 = 最小化到托盘」（2026-10-11）：
+  //    这是侧边面板的关闭按钮那条通道，**不再**是退出 —— 真退出只在托盘菜单里。
+  //    渲染端当前没调它（`renderer.ts` 只声明了接口），保留是为了别让
+  //    旧渲染端/旧习惯一按就退出。
+  ipcMain.handle('overlay:close', () => {
+    console.log(`[hexbox] 侧边面板：收到关闭请求（IPC overlay:close）→ 最小化到托盘（${TRAY_TOOLTIP_HINT}）`);
+    win?.hide();
+  });
+}
+
+/**
+ * 自测用的开关读数：`--tray-autotest <ms>` / `HEXBOX_TRAY_AUTOTEST_MS`。
+ *
+ * 为什么要这个开关：托盘菜单**点不了**（机器人没有鼠标），而"关窗口不退出"与
+ * "托盘退出要真的退出并跑清理"这两条恰恰是最容易写错、也最容易回归的地方
+ * （第三闸门 CI 里 Electron 根本跑不起来）。所以把两条路径做成可脚本化的自测：
+ *   `hexbox.exe --tray-autotest 8000 --log-file D:\x.log`
+ * 0/未设置 = 不跑（正常用户不受影响）。
+ */
+function trayAutotestMs(): number {
+  const raw = Number(process.env['HEXBOX_TRAY_AUTOTEST_MS'] ?? 0);
+  return Number.isFinite(raw) && raw > 0 ? raw : 0;
+}
+
+/**
+ * 托盘/退出路径自测：模拟「关窗口」→ 断言进程还活着 → 模拟「托盘菜单退出」。
+ *
+ * ⚠️ `win.close()` 走的是**与点 X 完全同一条** `close` 事件路径（Electron 对
+ * 用户点击与程序化 `close()` 发的是同一个事件），所以它能证明"非托盘退出路径
+ * 不会退出"；而 `quitApp()` 就是托盘菜单「退出」调用的**同一个函数**
+ * （含 `quitting` 置真 → 既有 `before-quit` 清理）。
+ */
+function runTrayAutotest(delayMs: number): void {
+  console.log(
+    `[hexbox] 自测（--tray-autotest）：${delayMs}ms 后模拟"关窗口"，再过 3 秒模拟"托盘菜单退出"`,
+  );
+  setTimeout(() => {
+    console.log('[hexbox] 自测：模拟关闭窗口（win.close()/overlayWin.close()，与点 X 同一条 close 事件路径）');
+    win?.close();
+    overlayWin?.close();
+    setTimeout(() => {
+      const alive = !isQuitting();
+      console.log(
+        `[hexbox] 自测：关窗口之后进程仍在运行 = ${alive}` +
+          `（期望 true —— 关窗口 = 最小化到托盘，不退出；isQuitting=${isQuitting()}）`,
+      );
+      quitApp('自测：模拟托盘菜单「退出」');
+    }, 3000);
+  }, delayMs);
 }
 
 app.whenReady().then(() => {
+  // ⚠️ 第二实例（拿不到单实例锁）：**什么都不建** —— 只在上面 app.quit() 收场。
+  // 这一条放在最前（早于自测分支）：自测也会建一块全屏透明画布，两个实例同时画
+  // 就是"两套标签叠在一起"（正是单实例锁要修的那个现象）。
+  if (!singleInstanceLock) return;
+
   // 注意：**不要**在这里全局设置 NODE_TLS_REJECT_UNAUTHORIZED。
   // LcuClient 内部已用 withInsecureTls() 按请求豁免自签证书，
   // 全局关闭会顺带让所有其它 HTTPS 请求（含外部数据源）失去校验。
@@ -1219,6 +1627,29 @@ app.whenReady().then(() => {
   registerIpc();
   createWindow();
   createOverlayWindow();
+
+  // ── 托盘：常驻覆盖层**唯一**的交互入口（本体没有可见窗口）──────────────
+  // 必须在建窗口之后、pollLoop 之前：pollLoop 每轮会刷新托盘状态。
+  tray = createTray({
+    status: () =>
+      trayStatus({
+        connected: lastConnected,
+        phase: lastPhase,
+        // 局内"面板开没开"是"为什么没标签"的第一个分叉（控制器还没建时 = unknown）
+        panel: augment?.panelState,
+      }),
+    // 日志文件：显式 --log-file/HEXBOX_LOG_FILE，或打包后默认的
+    // %LOCALAPPDATA%\hexbox\logs\overlay.log；开发时没设就是 null（菜单项禁用）
+    logFile: () => logFile,
+    // 数据目录用**现有**的解析结果（用户覆盖目录 / extraResources 快照 / 向上遍历）
+    dataDir: () => resolveDataDir(),
+  });
+  // 关窗口 = 最小化到托盘（只有托盘菜单的「退出」才真退出）。
+  // ⚠️ 只挂常驻覆盖层自己这两扇窗：截屏 worker 窗口是故意 destroy() 的
+  //（destroy 不发 close 事件），不能给它加这一层。
+  if (win) attachCloseToTrayHide(win, '侧边面板');
+  if (overlayWin) attachCloseToTrayHide(overlayWin, '全屏标签画布');
+
   void loadDataset();
   void loadNameLibrary();
   visionLoop = new VisionLoop({
@@ -1238,9 +1669,15 @@ app.whenReady().then(() => {
   screen.on('display-metrics-changed', () => void positionOverlay());
 
   // 冒烟测试模式：4 秒后自动退出（用于 CI/验证，不弹窗打扰）
+  // ⚠️ 必须走 quitApp()：它先把 quitting 置真，否则窗口的 close 拦截
+  //    （见 attachCloseToTrayHide）会把这次 app.quit() **中止** → 永不退出。
   if (process.env['HEXBOX_SMOKE'] === '1') {
-    setTimeout(() => app.quit(), 4000);
+    setTimeout(() => quitApp('冒烟模式（HEXBOX_SMOKE=1）'), 4000);
   }
+
+  // 托盘/退出路径自测（默认不开；见 runTrayAutotest）
+  const autotestMs = trayAutotestMs();
+  if (autotestMs > 0) runTrayAutotest(autotestMs);
 });
 
 /**
@@ -1289,7 +1726,17 @@ async function loadNameLibrary(): Promise<void> {
 }
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  // 第二实例：没有任何窗口，也没有任何要收的东西
+  if (!singleInstanceLock) return;
+  if (process.platform === 'darwin') return;
+  // ⚠️ 正常情况**走不到这里**：关窗口只 hide（`attachCloseToTrayHide`），窗口不会
+  //    真的关闭。真走到这里说明窗口被别的东西销毁了 —— 托盘也随之不可用，
+  //    所以按退出处理，而且**必须**走 quitApp()：先置 quitting，
+  //    否则仍挂着的 close 拦截会把这次 app.quit() 中止，进程变成"没有窗口的僵尸"。
+  if (!isQuitting()) {
+    console.warn('[hexbox] ⚠ 所有窗口都已销毁但并未要求退出（托盘不再可用）→ 按退出处理');
+  }
+  quitApp('全部窗口已关闭');
 });
 
 /**
@@ -1306,10 +1753,15 @@ app.on('window-all-closed', () => {
  * "明确要清"的地方 —— 窗口马上销毁，不留残留字母。
  *
  * 为什么放在 `before-quit` 而不是只靠 `window-all-closed`：用户也可能从
- * 侧边面板的关闭按钮（IPC `overlay:close` → `app.quit()`）或冒烟模式退出，
+ * 侧边面板的关闭按钮（IPC `overlay:close` → 现已改为"最小化到托盘"）或冒烟模式退出，
  * 这些都走 `before-quit`。
+ *
+ * ⚠️ S6（托盘+单实例锁）后**唯一的真退出入口**是托盘菜单「退出」→ `quitApp()`
+ * → `app.quit()` → 这里。**不要**再写第二套退出清理：托盘那一条就是复用这一段。
  */
 app.on('before-quit', () => {
+  // 第二实例：什么都没建（连托盘都没有），不许在日志里留下"退出清理"这种假证据
+  if (!singleInstanceLock) return;
   try {
     // 令牌前移：任何在途启动的回调都会被判为过期（它们只自己收场，不碰当前会话）
     augmentSession++;
@@ -1317,6 +1769,13 @@ app.on('before-quit', () => {
     // ⚠️ 这里是**少数几个明确要求清标签**的地方之一（窗口马上销毁，
     // 不留残留字母）；局内正常的"离开对局"停止**不清标签**
     augment?.stop('程序退出', { clearLabels: true });
+    // 逐条写清楚"清理做了什么"：真机/打包版验证时 `grep 退出清理` 就能确认
+    // 走的是这一条路径（而不是残留一个没有窗口的僵尸进程）
+    console.log(
+      `[hexbox] 退出清理：停屏幕流 + 销毁 worker 窗口 + 清标签` +
+        `（局内链路${augment ? '已建立，stop() 幂等' : '未建立，无流可停'}）` +
+        `；isQuitting=${isQuitting()}`,
+    );
   } catch {
     /* 退出路径里不再抛 */
   }

@@ -26,6 +26,10 @@
 #    非管理员又读不到进程命令行 → **拿不到 token → 阶段恒为 None →
 #    选人标签与局内海克斯标签全都不会出现**。所以默认要求管理员。
 #    想改成"默认不提权"：把这一行换成 asInvoker（代价见文档）。
+#
+# 5. 托盘图标（`build/tray/*`）走 `extraResources` → `resources/tray/`：
+#    esbuild 不搬静态资源，`files` 里只会有 dist 产物，所以图标只能这么进包
+#    （见下面 extraResources 里的注释；缺了它有兜底但会糊）。
 
 appId: dev.hexbox.overlay
 productName: hexbox
@@ -70,6 +74,17 @@ extraResources:
       - builds.json
       - templates.json
       - augment-names.json
+  # 托盘图标（`scripts/make-tray-icon.py` 生成；随仓库提交）。
+  # ⚠️ 必须走 extraResources：`files` 只放 esbuild 产物，而 esbuild **不搬静态资源**
+  #    （build.mjs 只 cp 渲染端的 html/css），所以图标不可能出现在 dist/ 里。
+  #    落点是 `resources/tray/`，主进程 `main/tray.ts` 的 trayIconDirs() 按
+  #    `process.resourcesPath/tray` 找它（开发版走 apps/overlay/build/tray）。
+  #    缺了它不会崩（有兜底：源图缩到 16px），但托盘图标会变糊 —— 别删这一条。
+  - from: build/tray
+    to: tray
+    filter:
+      - '*.png'
+      - '*.ico'
 
 asar: true
 # 依赖已经被 esbuild 内联；不重编、不从源码构建依赖（本机也没装 VS 工具链）

@@ -19,6 +19,8 @@ export * from './augment-label.ts';
 export * from './augment-tier-label.ts';
 // 面板停留在期间的**单卡刷新（reroll）**检测：指纹 / 距离 / 判定 / 合并（纯函数）
 export * from './augment-reroll.ts';
+// 刷新后的**补救记账**：第一次没查出强度先重认一次；重认回传的基线不许倒退
+export * from './augment-reroll-retry.ts';
 // 「标签被清空」的原因词表 + 一行日志（每一次清空都必须能回答"为什么"）
 export * from './augment-clear.ts';
 // 局内链路 ⇄ 标签的**时间轴回放**（纯函数；回归测试与诊断脚本共用，不参与运行时）
@@ -40,3 +42,7 @@ export * from './label-overlay-coords.ts';
 export * from './augment-presence.ts';
 // 关闭边沿 → **确认**之后才让 API 触发状态机处理（复检窗口 + 假关闭作废/自愈）
 export * from './augment-close-confirm.ts';
+// 常驻覆盖层的**用户可见状态文案**（托盘菜单那一行 + tooltip；纯函数）
+export * from './overlay-status.ts';
+// 「读不到 LCU 凭证」的**一次性气泡**判定（连续 N 轮才提示、每个连接会话最多一次）
+export * from './credential-notice.ts';

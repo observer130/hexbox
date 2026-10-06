@@ -9,7 +9,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { CADENCE_DEFAULTS, createCadencePolicy } from './augment-cadence.ts';
+import {
+  API_CADENCE_DEFAULTS,
+  CADENCE_DEFAULTS,
+  apiCaptureInterval,
+  createCadencePolicy,
+} from './augment-cadence.ts';
 import type { PanelReading } from './augment-panel.ts';
 
 /** 造一份读数（只用到 found / state；面板信号在这条策略里不参与判定）。 */
@@ -120,4 +125,84 @@ test('cadence：reset 回到 idle', () => {
   p.reset();
   assert.equal(p.mode, 'idle');
   assert.equal(p.intervalMs, CADENCE_DEFAULTS.idleMs);
+});
+
+/* ------------------------------------------------------------------ */
+/* api 模式间隔决策（面板状态优先于触发状态机）                          */
+/* ------------------------------------------------------------------ */
+
+/** 造一份 api 决策输入（默认：什么都"不在"）。 */
+function apiInput(over: Partial<Parameters<typeof apiCaptureInterval>[0]> = {}) {
+  return {
+    panelOpen: false,
+    capture: false,
+    rechecking: false,
+    lastConfirmedCloseAtMs: null,
+    nowMs: 0,
+    ...over,
+  };
+}
+
+test('api 间隔：面板在屏时**即使 capture=false** 也必须 >0（面板状态优先）', () => {
+  const d = apiCaptureInterval(apiInput({ panelOpen: true, capture: false }));
+  assert.equal(d.intervalMs, API_CADENCE_DEFAULTS.rerollPollMs);
+  assert.ok(d.intervalMs > 0);
+  assert.equal(d.healProbe, false);
+});
+
+test('api 间隔：面板在屏优先于 capture（两者都为真也走重随轮询）', () => {
+  const d = apiCaptureInterval(apiInput({ panelOpen: true, capture: true }));
+  assert.equal(d.intervalMs, API_CADENCE_DEFAULTS.rerollPollMs);
+});
+
+test('api 间隔：capture=true（面板还没出现/等连选）→ ACTIVE_MS', () => {
+  const d = apiCaptureInterval(apiInput({ capture: true }));
+  assert.equal(d.intervalMs, API_CADENCE_DEFAULTS.activeMs);
+});
+
+test('api 间隔：关闭待确认的复检窗口 → ACTIVE_MS（必须有帧才可能自愈）', () => {
+  const d = apiCaptureInterval(apiInput({ rechecking: true }));
+  assert.equal(d.intervalMs, API_CADENCE_DEFAULTS.activeMs);
+});
+
+test('api 间隔：常态（严格零取帧）= 0', () => {
+  const d = apiCaptureInterval(apiInput());
+  assert.equal(d.intervalMs, 0);
+  // 确认关闭之后**也**是 0 —— 这就是用户 2026-10-11 的裁决
+  const afterClose = apiCaptureInterval(apiInput({ lastConfirmedCloseAtMs: 1000, nowMs: 2000 }));
+  assert.equal(afterClose.intervalMs, 0, '默认关闭自愈探针 → 误判后间隔仍回 0');
+  assert.equal(afterClose.healProbe, false);
+});
+
+test('api 间隔：自愈探针（开关打开时）—— 20s 内 = PROBE_MS，20s 后 = 0', () => {
+  const opts = { healProbe: true };
+  const closedAt = 100_000;
+  const at = (dt: number) =>
+    apiCaptureInterval(apiInput({ lastConfirmedCloseAtMs: closedAt, nowMs: closedAt + dt }), opts);
+  assert.equal(at(0).intervalMs, API_CADENCE_DEFAULTS.probeMs);
+  assert.equal(at(0).healProbe, true);
+  assert.equal(at(19_999).intervalMs, API_CADENCE_DEFAULTS.probeMs);
+  assert.equal(at(20_000).intervalMs, API_CADENCE_DEFAULTS.probeMs, '窗口边界仍算窗口内');
+  assert.equal(at(20_001).intervalMs, 0, '窗口一过必须回到严格零取帧');
+  assert.equal(at(60_000).healProbe, false);
+  // 面板状态依然优先于探针
+  const open = apiCaptureInterval(
+    apiInput({ panelOpen: true, lastConfirmedCloseAtMs: closedAt, nowMs: closedAt + 1000 }),
+    opts,
+  );
+  assert.equal(open.intervalMs, API_CADENCE_DEFAULTS.rerollPollMs);
+  // 反方向的时钟抖动（nowMs 比关闭时刻还早）不许进探针分支
+  const backwards = apiCaptureInterval(
+    apiInput({ lastConfirmedCloseAtMs: closedAt, nowMs: closedAt - 5 }),
+    opts,
+  );
+  assert.equal(backwards.intervalMs, 0);
+});
+
+test('api 间隔：常量表就是默认值（回退点只有一个）', () => {
+  assert.equal(API_CADENCE_DEFAULTS.healProbe, false, '用户裁决：严格零取帧 → 探针默认关闭');
+  assert.equal(API_CADENCE_DEFAULTS.rerollPollMs, 400);
+  assert.equal(API_CADENCE_DEFAULTS.activeMs, 250);
+  assert.equal(API_CADENCE_DEFAULTS.probeMs, 6000);
+  assert.equal(API_CADENCE_DEFAULTS.healWindowMs, 20_000);
 });

@@ -188,9 +188,25 @@ export function createAugmentTrigger(config: AugmentTriggerConfig = {}): Augment
       }
 
       // 1) 开局：开局那一次一定出现
+      //
+      // ⚠️ **只在还没开截屏时才 `startCapture()`**（真机 bug，2026-10-11）：
+      //    开局窗口有 `startWindowSec`(25) 秒，而 API 每 1 秒轮询一次 → 这 25 次采样
+      //    都会走到这一行。`startCapture()` 里有一句 `sawPanel = false`，
+      //    于是门控刚通过 `notePanelOpen()` 置的"见过面板"**下一秒就被抹掉** →
+      //    关边沿走 `wasSaw === false` 分支，日志出现自相矛盾的
+      //    `🔌 关截屏：未见面板即关闭`（前面明明有 `▶ 面板出现 #1`，L213/L291），
+      //    而且 25 秒内采样间隔在 0/250ms 之间反复跳（capture 被反复"重新打开"）。
+      //    第 4 条 `if (!capture)` 就是这条修复：已经在开截屏 → 一个字都不改。
+      let alreadyOpenNote: string | null = null;
       if (sample.gameTime <= startWindowSec && pending.includes(0)) {
-        const changed = startCapture(nowMs, `开局（对局 ${sample.gameTime.toFixed(0)}s）：开截屏`);
-        if (changed || first) return decision(changed, lastReason);
+        if (!capture) {
+          const changed = startCapture(nowMs, `开局（对局 ${sample.gameTime.toFixed(0)}s）：开截屏`);
+          if (changed || first) return decision(changed, lastReason);
+        } else {
+          // 已经在开截屏：**保持**（不清 sawPanel、不推窗口），只留一句人读原因
+          alreadyOpenNote =
+            `开局窗口（对局 ${sample.gameTime.toFixed(0)}s）：已在开截屏，保持（不重置"见过面板"）`;
+        }
       }
       // 2) 死亡：等级达标才有意义
       const died = sample.isDead && !prevDead;
@@ -223,6 +239,7 @@ export function createAugmentTrigger(config: AugmentTriggerConfig = {}): Augment
         return decision(true, lastReason);
       }
 
+      if (alreadyOpenNote !== null) return decision(false, alreadyOpenNote);
       if (initNote !== null) return decision(false, initNote);
       return decision(false, lastReason);
     },
@@ -256,7 +273,16 @@ export function createAugmentTrigger(config: AugmentTriggerConfig = {}): Augment
       if (consumed !== undefined) {
         pending = pending.filter((lv) => lv !== consumed);
       }
-      if (!capture) return decision(false, lastReason);
+      // ⚠️ 消耗发生在**上面**（门控既然报过"面板出现过"，就说明确实弹过一次），
+      //    所以这条 reason 必须如实说明"已经消耗了一次" —— 沿用它之前的字符串
+      //    会打出"窗口超时…关截屏"这种**看起来没消耗**的假日志（真机复盘时
+      //    正是靠这两条 reason 判断"记账有没有偏位"，不能含糊）。
+      if (!capture) {
+        return decision(
+          false,
+          `选完一次（等级 ${lastLevel}）：当时没在开截屏，不关表；待选 [${pending.join(',')}]`,
+        );
+      }
 
       // 选完后游戏可能紧接着再弹一次（连选）→ 保持开截屏
       if (eligible().length > 0) {

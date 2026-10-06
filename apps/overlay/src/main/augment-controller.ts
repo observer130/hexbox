@@ -62,6 +62,7 @@ import {
   AUGMENT_CLEAR_REASONS,
   AUGMENT_CLOSE_CONFIRM_MS,
   AUGMENT_REROLL_THRESHOLD,
+  apiCaptureInterval,
   augmentChainStopKeepsLabelsLine,
   augmentClearLogLine,
   augmentClearReasonForEmptyLabels,
@@ -74,6 +75,7 @@ import {
   createCadencePolicy,
   createCloseConfirm,
   createPanelTracker,
+  decideRerollRetry,
   fingerprintDistance,
   findGameWindowRectCached,
   lookupAugmentPickRate,
@@ -83,6 +85,7 @@ import {
   panelGateEvidence,
   panelRowRectInCapture,
   rerolledCardIndices,
+  shouldAdoptReportedBaseline,
   toScreenTierLabels,
   PANEL_ROW_REGION,
   type AugmentBadgeAlign,
@@ -144,6 +147,22 @@ const REROLL_POLL_MS = ((): number => {
   const v = Number(process.env['HEXBOX_AUGMENT_REROLL_POLL_MS'] ?? 400);
   if (!Number.isFinite(v) || v <= 0) return 400;
   return Math.max(50, Math.round(v));
+})();
+
+/**
+ * **关后自愈探针的总开关**（`HEXBOX_AUGMENT_CLOSE_HEAL_PROBE=1` 才打开）。
+ *
+ * ⚠️ 用户 2026-10-11 裁决：**保持严格常态零取帧**，所以这里是 **false**。
+ * 打开它会让"确认关闭"后的 `TAIL_MS`(20s) 内以 `PROBE_MS`(6s) 采一帧，
+ * 从而在"其实面板还开着却被误判关闭"时最多 6 秒自愈 —— 代价是关闭后
+ * 20 秒内每 6 秒 1 帧。关掉之后误判关闭仍然无帧可自愈，靠"修 trigger 记账
+ * （`augment-trigger.ts` 的开局窗口）+ 修幽灵标签（`label-memory.ts` 的容量上限）"
+ * 降低误判概率。决策规则本身是纯函数（`vision/augment-cadence.ts`
+ * 的 `apiCaptureInterval()`），单测里两种开关状态都锁过。
+ */
+const CLOSE_HEAL_PROBE = ((): boolean => {
+  const v = (process.env['HEXBOX_AUGMENT_CLOSE_HEAL_PROBE'] ?? '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'on';
 })();
 
 /**
@@ -677,6 +696,34 @@ export class AugmentController {
   private lastFrameFingerprints: readonly (AugmentCardFingerprint | null)[] | null = null;
   private watchingSinceMs = 0;
   private rerollCount = 0;
+  /**
+   * 本块面板里"已经重试过一次"的卡片序号（见 `decision`/`augment-reroll-retry.ts`）。
+   *
+   * 额度只有一次：刷新后第一次查不到强度 → 保留旧标签并排队重认；
+   * 第二次仍查不到 → 真的清掉那张卡的标签（底线）。
+   */
+  private retriedRerollCards = new Set<number>();
+  /** 排队中的"用稳定帧再认一次"的卡片序号（下一次采样 flush）。 */
+  private pendingRerollRetry: number[] = [];
+  /** 这次重认**之前**的基线（单调保护用；只在一次重随判定时短暂有效）。 */
+  private lastRerollPreviousBaseline: readonly (AugmentCardFingerprint | null)[] | null = null;
+  /** 判定"变了"那一帧的指纹（同上）。 */
+  private lastRerollDetectionFingerprints: readonly (AugmentCardFingerprint | null)[] | null = null;
+  /**
+   * 诊断（**无行为变化**）：面板停留期间有多少帧**没有可比指纹**。
+   *
+   * 常驻路径没有逐帧 CSV（那是录制工具独有的 `onReading`），所以
+   * "重随检测到底是不工作、还是没采样"只能靠这一行区分。
+   */
+  private noFingerprintFrames = 0;
+  private noFingerprintLogged = false;
+  /**
+   * 上一次"确认关闭（`notePanelClosed` 上报）"的时刻（ms）。
+   *
+   * 只喂给 `apiCaptureInterval()`：自愈探针窗口从这里起算。探针默认关闭
+   * （用户选择严格零取帧），所以它现在只进日志。
+   */
+  private lastConfirmedCloseAtMs: number | null = null;
   private rerollRows: AugmentRerollRow[] = [];
 
   /* ── 产物行 ── */
@@ -1040,6 +1087,13 @@ export class AugmentController {
     this.baselineFingerprints = null;
     this.lastFrameFingerprints = null;
     this.watchingSinceMs = 0;
+    this.retriedRerollCards.clear();
+    this.pendingRerollRetry = [];
+    this.lastRerollPreviousBaseline = null;
+    this.lastRerollDetectionFingerprints = null;
+    this.noFingerprintFrames = 0;
+    this.noFingerprintLogged = false;
+    this.lastConfirmedCloseAtMs = null;
     this.sawReady = false;
     this.sawFrame = false;
     this.tracker = createPanelTracker();
@@ -1250,12 +1304,17 @@ export class AugmentController {
    * 面板一关就回到触发方式给的值（api → 0、pixel → 节流策略的 idle/active），
    * 所以"面板关闭后回到常态零取帧"这条性质没有被削弱。
    */
-  private applyInterval(ms: number, why: string): void {
+  private applyInterval(ms: number, why: string, ctx = ''): void {
     const next = Number.isFinite(ms) && ms > 0 ? Math.max(50, Math.round(ms)) : 0;
     if (next === this.appliedIntervalMs) return;
     this.appliedIntervalMs = next;
     this.stream?.setCadence(next);
-    this.logLine(`[augment] ⏱ 采样间隔 → ${next === 0 ? '停（常态零取帧）' : `${next}ms`}：${why}`);
+    this.logLine(
+      `[augment] ⏱ 采样间隔 → ${next === 0 ? '停（常态零取帧）' : `${next}ms`}：${why}` +
+        // 诊断补丁（无行为变化）：打"停"时必须能看出**三个入参**各是什么状态，
+        // 否则"为什么停"只能靠前后几行日志猜（常驻路径没有逐帧 CSV）。
+        (ctx === '' ? '' : `［${ctx}］`),
+    );
   }
 
   /* ------------------------------------------------------------------ */
@@ -1285,6 +1344,8 @@ export class AugmentController {
     // 面板停留期间的**单卡刷新**检测：指纹来自渲染端（门控分辨率、冻结矩形）。
     // 放在 handleReading 之后：那时状态/边沿已经更新（只在 open 时判）。
     this.maybeDetectReroll(f);
+    // 上一步若判定"刷新后第一次没查出强度"，这里在**下一帧**（稳定帧）补认一次
+    this.flushRerollRetry(f);
   }
 
   /** 门控读数共有逻辑：计数 + 节流/触发 + 边沿处置（流与一次性截屏**同一段**）。 */
@@ -1334,22 +1395,39 @@ export class AugmentController {
       if (reading.edge === 'open') this.apiTrigger?.notePanelOpen(nowMs);
       if (confirm.notifyClosed) {
         this.logLine(`[augment] 🔒 关闭确认：${confirm.reason}`);
+        // 自愈探针窗口从这个时刻起算（探针默认关闭，见 CLOSE_HEAL_PROBE）
+        this.lastConfirmedCloseAtMs = nowMs;
         const d = this.apiTrigger?.notePanelClosed(nowMs);
         if (d?.changed) this.applyApiDecision(d);
       }
       const on = this.apiTrigger?.capture === true;
       const rechecking = confirm.rechecking;
-      // 复检期间**必须继续取帧**（ACTIVE_MS）：没有帧就不可能有开边沿，自愈无从谈起。
-      // 触发方式给的常态（api 模式 = 0，一帧不取）只在"既没开截屏、也不在复检"时恢复。
+      // 间隔决策全在**纯函数**里（`vision/augment-cadence.ts` 的
+      // `apiCaptureInterval()`，有单测）：本处只负责把三个入参喂进去。
+      // ⚠️ 面板状态**优先于**触发状态机：门控亲眼看到面板在屏时，哪怕 API 那边
+      //    因为记账偏位说 `capture=false`，也绝不能把间隔压回 0（那会一帧不取 →
+      //    面板上的标签永远不更新）。
+      const api = apiCaptureInterval(
+        {
+          panelOpen: reading.state === 'open',
+          capture: on,
+          rechecking,
+          lastConfirmedCloseAtMs: this.lastConfirmedCloseAtMs,
+          nowMs,
+        },
+        {
+          rerollPollMs: REROLL_POLL_MS,
+          activeMs: ACTIVE_MS,
+          probeMs: PROBE_MS,
+          healWindowMs: TAIL_MS,
+          healProbe: CLOSE_HEAL_PROBE,
+        },
+      );
       this.applyInterval(
-        on ? (reading.state === 'open' ? REROLL_POLL_MS : ACTIVE_MS) : rechecking ? ACTIVE_MS : 0,
-        on
-          ? reading.state === 'open'
-            ? `面板停留 → 重随轮询 ${REROLL_POLL_MS}ms`
-            : '已开截屏（等面板/等连选）'
-          : rechecking
-            ? `关闭待确认 → 复检取帧 ${ACTIVE_MS}ms（面板若还在就会自己回来）`
-            : '常态：api 模式一帧不取',
+        api.intervalMs,
+        api.reason,
+        `capture=${on} state=${reading.state} rechecking=${rechecking}` +
+          (api.healProbe ? ' 探针=on' : ''),
       );
       cadenceLabel = `${on ? 'on' : 'off'}${this.appliedIntervalMs > 0 ? `@${this.appliedIntervalMs}` : ''}`;
     } else {
@@ -1380,6 +1458,11 @@ export class AugmentController {
       // 基线必须对应"屏幕上画的是哪颗海克斯"那一帧，不能随便取一帧。
       this.baselineFingerprints = null;
       this.lastFrameFingerprints = null;
+      // "重认一次"的额度与排队也是**每块面板各自一份**（绝不许跨面板复用）
+      this.retriedRerollCards.clear();
+      this.pendingRerollRetry = [];
+      this.noFingerprintFrames = 0;
+      this.noFingerprintLogged = false;
       // 整排行基准的锁也在这里清掉：新面板 = 新的一排（"基准在**开边沿**锁定"）。
       this.rowLock = null;
       this.rowLockAtMs = 0;
@@ -1396,6 +1479,8 @@ export class AugmentController {
       // ⚠️ **关闭边沿立刻清空标签**：绝不复用选人阶段那套 6 轮 TTL
       //（局内每次 offer 是**不同**的三张卡，残留会把上一轮强度贴到新卡上）。
       this.clearLabels(AUGMENT_CLEAR_REASONS.panelClosed, `第 ${this.closeCount} 次`);
+      // 诊断：这块面板在屏期间"没有可比指纹"的帧数（重随检测是否真的在工作）
+      this.flushNoFingerprintDiag(`面板消失 #${this.closeCount}`);
       // 重随基线/冻结取样矩形也一起复位（下一块面板可能是另外三张、在别处）
       this.resetRerollWatch(`面板消失 #${this.closeCount}`);
     } else if (reading.presenceHolds === 1) {
@@ -1463,11 +1548,38 @@ export class AugmentController {
     if (origin === 'reroll') {
       // **只替换变化的那几张**：其余卡原样保留；认不出/取不到 → 该卡 augmentId 置 null
       // → 本次推送里它的标签消失（其余两张不受影响）。
+      //
+      // ⚠️ 但**第一次失败不清**（真机：标签闪一下又回来 —— 两次 OCR 结果一模一样，
+      // 差别只在"这一次查表查不到"）：给一次重试机会、先保住上一帧的标签，
+      // 用下一张稳定帧再认一次；**第二次仍失败才真的清**（底线，见
+      // `vision/augment-reroll-retry.ts` 与它的单测）。
       const refreshed = rep.refreshed ?? [];
       const before = this.currentCards;
-      this.currentCards = mergeRefreshedCards(before, refreshed, cards);
+      const merged = mergeRefreshedCards(before, refreshed, cards);
+      /** 本次"会掉标签"的卡：本来有标签 + 重认后查不到强度。 */
+      const wouldDrop = refreshed.filter((index) => {
+        const hadLabel = lookupAugmentTier(this.tierTable, before[index]?.augmentId ?? null) !== null;
+        const nowNull = lookupAugmentTier(this.tierTable, merged[index]?.augmentId ?? null) === null;
+        return hadLabel && nowNull;
+      });
+      const plan = decideRerollRetry({
+        refreshed,
+        wouldDrop,
+        retried: [...this.retriedRerollCards],
+      });
+      for (const index of plan.retry) this.retriedRerollCards.add(index);
+      this.currentCards =
+        plan.retry.length === 0
+          ? merged
+          : merged.map((c, i) => (plan.retry.includes(i) ? (before[i] ?? c) : c));
+      // ⚠️ **累加**而不是覆盖：两次重随在同一帧内先后被判定时，覆盖会让前一张卡的
+      //    重试被丢掉 → 那张卡会一直挂着**旧字母**（"显示错数据"，绝不允许）。
+      this.pendingRerollRetry = [...new Set([...this.pendingRerollRetry, ...plan.retry])];
       // 真机一眼可判的一行：卡几 → 重认成了什么
       const outcome = refreshed.map((index) => {
+        if (plan.retry.includes(index)) {
+          return `卡${index + 1} → 这次没查出强度（先保留上一帧标签，下一帧用稳定帧再认一次）`;
+        }
         const c = this.currentCards[index];
         const tier = lookupAugmentTier(this.tierTable, c?.augmentId ?? null);
         const pick = lookupAugmentPickRate(this.pickRateTable, c?.augmentId ?? null);
@@ -1484,6 +1596,8 @@ export class AugmentController {
       // **每一次"标签消失"都要有一行原因**（这是用户复现时唯一能定位的线索）：
       // 重随之后那张卡认不出（识别问题）/ 查不到强度（数据覆盖问题）必须分开写。
       // 之前那张卡本来就没有标签时不打 —— 别在日志里造出"清空"假事件。
+      //（`retry` 的那些卡这里会把旧值保留着 → `augmentClearReasonForRefreshedCard`
+      //  查到强度非空 → 自动跳过，不会打出假"清空"。）
       for (const index of refreshed) {
         const c = this.currentCards[index];
         const reason = augmentClearReasonForRefreshedCard(
@@ -1502,9 +1616,29 @@ export class AugmentController {
 
     // 基线 = 本次识别之后、**当前冻结取样矩形**下的每卡指纹（渲染端一起回传）。
     // 有了它，下一帧起的比对才有"屏幕上是哪颗海克斯"这个参照。
+    //
+    // ⚠️ 重随路径要**单调保护**（2026-10-11）：判定"变了"的那一刻基线已经推进到
+    // **检测帧**（新内容），而这里回传的是渲染端"最近一帧门控画面"的指纹 ——
+    // 万一它是**变化之前**那一帧，基线就被倒回旧内容 → 同一次刷新被重复检出
+    //（真机日志里同一个结构距离 0.0735 出现两次）。判据是纯函数（有单测）。
     if (rep.fingerprints && rep.fingerprints.length > 0) {
-      this.baselineFingerprints = rep.fingerprints;
-      this.lastFrameFingerprints = rep.fingerprints;
+      const adopt =
+        origin !== 'reroll' ||
+        shouldAdoptReportedBaseline({
+          previous: this.lastRerollPreviousBaseline,
+          detection: this.lastRerollDetectionFingerprints,
+          reported: rep.fingerprints,
+        });
+      if (adopt) {
+        this.baselineFingerprints = rep.fingerprints;
+        this.lastFrameFingerprints = rep.fingerprints;
+      } else {
+        // 留一行：这是"同一次刷新被重复检出"的直接嫌疑（下一次真机复盘靠它定性）
+        this.logLine(
+          '[augment] ♻ 重认回传的指纹比检测帧更旧（像变化之前那一帧）→ **不采信**，' +
+            '基线保持在新内容上（否则同一次刷新会被再检出一次）',
+        );
+      }
       this.watchingSinceMs = Date.now();
     }
     this.recognizedRows.push({
@@ -1708,7 +1842,30 @@ export class AugmentController {
     this.baselineFingerprints = null;
     this.lastFrameFingerprints = null;
     this.watchingSinceMs = 0;
+    // "重认一次"的额度/排队也随面板一起复位（跨面板复用会让新面板的第一张卡没有额度）
+    this.retriedRerollCards.clear();
+    this.pendingRerollRetry = [];
+    this.lastRerollPreviousBaseline = null;
+    this.lastRerollDetectionFingerprints = null;
+    this.noFingerprintFrames = 0;
+    this.noFingerprintLogged = false;
     this.stream?.unwatch();
+  }
+
+  /**
+   * 诊断（**无行为变化**）：面板停留期间有多少帧"没有可比指纹"。
+   *
+   * 常驻路径没有逐帧 CSV，所以"重随检测不工作"以前是**无法从日志区分**的三种形态
+   * （没采样 / 没报指纹 / 取到了但判据不过）。这一行把它们分开：本帧有可比指纹、
+   * 或面板关闭时各打一次（每块面板只打一行）。
+   */
+  private flushNoFingerprintDiag(why: string): void {
+    if (this.noFingerprintFrames === 0 || this.noFingerprintLogged) return;
+    this.noFingerprintLogged = true;
+    this.logLine(
+      `[augment] 🧭 面板停留期间 ${this.noFingerprintFrames} 帧没有可比指纹` +
+        `（watchRects 未登记/卡数不一致）→ 重随检测不工作（${why}）`,
+    );
   }
 
   /**
@@ -1724,7 +1881,13 @@ export class AugmentController {
   private maybeDetectReroll(f: AugmentFrame): void {
     // 渲染端只在"冻结矩形仍对得上"时报指纹（面板没认定/卡片数抖动时是空数组）
     const current = f.fingerprints && f.fingerprints.length > 0 ? f.fingerprints : null;
-    if (!current) return; // 这一帧没有可比指纹 → 不判定，也不动上一帧参照
+    if (!current) {
+      // 诊断（无行为变化）：面板**在屏**却没有可比指纹的帧 —— 重随检测在这些帧上
+      // 完全不工作（`watchRects` 没登记 / 本帧重建出的卡片数与冻结矩形数不一致）。
+      if (this.tracker.state === 'open') this.noFingerprintFrames++;
+      return; // 这一帧没有可比指纹 → 不判定，也不动上一帧参照
+    }
+    this.flushNoFingerprintDiag('又拿到可比指纹');
     const previous = this.lastFrameFingerprints;
     this.lastFrameFingerprints = current;
     if (this.tracker.state !== 'open') return;
@@ -1736,8 +1899,9 @@ export class AugmentController {
     );
     if (changed.length === 0) return;
     // 先把距离算出来（基线马上要被推进，之后就算不出"相对上次识别的差异"了）
+    const baselineBefore = this.baselineFingerprints;
     const distances = changed.map((i) =>
-      Number(fingerprintDistance(this.baselineFingerprints?.[i] ?? null, current[i] ?? null).toFixed(4)),
+      Number(fingerprintDistance(baselineBefore?.[i] ?? null, current[i] ?? null).toFixed(4)),
     );
     this.rerollCount++;
     const which = changed.map((i) => `卡${i + 1}`).join('/');
@@ -1746,6 +1910,9 @@ export class AugmentController {
         ' → 只重认这几张…',
     );
     this.baselineFingerprints = current;
+    // 单调保护的参照：这次重认**之前**的基线 vs 判定"变了"那一帧
+    this.lastRerollPreviousBaseline = baselineBefore;
+    this.lastRerollDetectionFingerprints = current;
     this.rerollRows.push({
       atMs: f.atMs - this.startedAt,
       indexes: changed.map((i) => i + 1),
@@ -1754,6 +1921,28 @@ export class AugmentController {
       pollMs: REROLL_POLL_MS,
     });
     this.stream?.recognize({ only: changed });
+  }
+
+  /**
+   * 把排队中的"刷新后重认一次"发出去（`decideRerollRetry` 的 `retry` 那一半）。
+   *
+   * ⚠️ **等到下一帧、且那一帧有可比指纹时才认**：渲染端只在"面板认定 + 卡片数与
+   * 冻结矩形数一致"的帧上报指纹，而翻牌动画的中间帧会报空数组 —— 所以这个条件
+   * 恰好就是"**画面已经稳定**"（与 `rerolledCardIndices` 的 settle 判据同源）。
+   * 代价：最多晚一个采样周期（`REROLL_POLL_MS`，默认 400ms）出标签。
+   */
+  private flushRerollRetry(f: AugmentFrame): void {
+    if (this.pendingRerollRetry.length === 0) return;
+    if (this.tracker.state !== 'open') return;
+    const current = f.fingerprints && f.fingerprints.length > 0 ? f.fingerprints : null;
+    if (!current) return;
+    const only = [...this.pendingRerollRetry];
+    this.pendingRerollRetry = [];
+    this.logLine(
+      `[augment] ♻ 刷新后第一次没查出强度 → 用稳定帧再认一次（卡${only.map((i) => i + 1).join('/')}；` +
+        '再失败才清那张卡的标签）',
+    );
+    this.stream?.recognize({ only });
   }
 
   /* ------------------------------------------------------------------ */

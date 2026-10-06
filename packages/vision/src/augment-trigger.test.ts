@@ -83,9 +83,65 @@ test('中途启动 + 首帧就是死亡：死亡事件不能被初始化吞掉�
 });
 
 /* ------------------------------------------------------------------ */
-/* 死亡触发                                                            */
+/* 开局窗口内的重复采样（真机记账错位回归，2026-10-11）                    */
 /* ------------------------------------------------------------------ */
 
+test('开局窗口：重复采样不得重复报"开截屏"，也不得清掉"见过面板"（关边沿必须报"选完"且消耗开局那次）', () => {
+  const t = createAugmentTrigger(NO_MIDGAME);
+  // 对局 5s：第一次采样开截屏
+  const d5 = t.onSample(sample({ gameTime: 5, level: 1 }), 1000);
+  assert.equal(d5.capture, true, '开局应开截屏');
+  assert.equal(d5.changed, true, '第一次开截屏是一次变化');
+  // 门控说"面板出现了"（真机 L213：▶ 面板出现 #1）
+  t.notePanelOpen(1200);
+  // 开局窗口内继续按 1 秒轮询（真机 5~25s ≈ 20 次）—— 改前每次都重新 startCapture()
+  const d10 = t.onSample(sample({ gameTime: 10, level: 1 }), 2000);
+  const d15 = t.onSample(sample({ gameTime: 15, level: 1 }), 3000);
+  assert.equal(d10.capture, true);
+  assert.equal(d15.capture, true);
+  assert.equal(d10.changed, false, '已经在开截屏 → 不许再报一次变化（否则会被反复下发 IPC）');
+  assert.equal(d15.changed, false);
+  // 改前这里会是 `开局（对局 10s）：开截屏`（startCapture 覆写了 reason）
+  for (const d of [d10, d15]) {
+    assert.ok(!d.reason.endsWith('：开截屏'), `重复报"开截屏"：${d.reason}`);
+    assert.match(d.reason, /已在开截屏/);
+  }
+  // 关边沿：因为 sawPanel 没被清掉，必须报"选完…"，并消耗掉开局那一次
+  const closed = t.notePanelClosed(4000);
+  assert.equal(closed.capture, false, '本次待选清空 → 关截屏');
+  assert.match(closed.reason, /^选完/, `关边沿必须是"选完"而不是"未见面板即关闭"：${closed.reason}`);
+  assert.deepEqual(t.pending, [7, 11, 15], '开局那次必须被消耗（改前记账整体偏一位）');
+});
+
+test('开局窗口：采样间隔不会在 0/250ms 之间反复跳（capture 必须一路保持 true）', () => {
+  const t = createAugmentTrigger(NO_MIDGAME);
+  const seen: boolean[] = [];
+  for (let sec = 1; sec <= 25; sec++) {
+    const d = t.onSample(sample({ gameTime: sec, level: 1 }), sec * 1000);
+    seen.push(d.capture);
+  }
+  assert.ok(seen.every((c) => c), '开局窗口内 capture 必须一直是 true（改前每轮被"重新打开"）');
+  assert.deepEqual(t.pending, [0, 7, 11, 15], '没见到面板就绝不消耗');
+});
+
+test('开局窗口之后仍然正常：超时关闭 → 下次死亡再开（这层"意外保护"不再存在也无妨）', () => {
+  const t = createAugmentTrigger({ armWindowMs: 5000, midGameStartSec: Number.MAX_SAFE_INTEGER });
+  t.onSample(sample({ gameTime: 5, level: 1 }), 1000);
+  assert.equal(t.capture, true);
+  // 窗口超时（没见过面板）→ 自己关，pending 保留
+  const late = t.onSample(sample({ gameTime: 60, level: 6 }), 20000);
+  assert.equal(late.capture, false);
+  assert.deepEqual(t.pending, [0, 7, 11, 15]);
+  // 之后（含"连选"那样的多次弹窗）记账仍然正确：关边沿一次只消耗一次
+  t.notePanelOpen(21000);
+  const c1 = t.notePanelClosed(22000);
+  assert.match(c1.reason, /^选完一次/, `关边沿必须如实报告"消耗了一次"：${c1.reason}`);
+  assert.deepEqual(t.pending, [7, 11, 15], '每次关边沿只消耗一次（且消耗的是最小的够格那一次）');
+});
+
+/* ------------------------------------------------------------------ */
+/* 死亡触发                                                            */
+/* ------------------------------------------------------------------ */
 test('死亡 + 等级达标 → 开截屏；选完 → 关', () => {
   const t = createAugmentTrigger(NO_MIDGAME);
   startOffer(t);

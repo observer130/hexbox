@@ -392,6 +392,172 @@ pnpm --filter @hexbox/overlay package:win
    的 exe 一启动就会弹 UAC，不能无人值守地验证）。
    请在普通终端里双击 `release\win-unpacked\hexbox.exe`（或跑安装包）确认：
    弹 UAC → 进选人/对局 → 标签出现；日志里应出现 `LCU 已连接 (port …, 来自进程命令行)`。
+   > 补充（**GPU 修复那一轮**，见 §十三）：本机 UAC 策略是"管理员静默提权"，
+   > 所以**提权后的打包版**已经无人值守跑过 `--label-overlay-test`（退出码 0、自测 ✅、无残留进程）；
+   > 仍未验证的只是"提权 + 客户端在跑 → LCU 拿到凭证"这一段。
 3. **安装器本身**（装/卸、快捷方式、中文界面）未逐项点过，
    只验证了 NSIS 构建成功并产出安装包。
 4. **签名相关**：未签名（无证书），SmartScreen 行为按 §六 如实说明。
+
+## 十三、已知环境问题：GPU 子进程起不来 → 启动即崩（已在程序内禁用硬件加速 + GPU 进主进程）
+
+> 真机事故 **2026-10-06**：打包版在普通终端里"数据全都加载成功、然后进程直接没了"。
+> 根因不在本项目的数据/识别代码，而在 **Chromium 的 GPU 子进程起不来**。
+
+### 现象（原文，用户终端）
+
+```text
+[hexbox] 日志文件（绝对路径）：C:\Users\13199\AppData\Local\hexbox\logs\overlay.log
+[hexbox] 数据目录: …\release\win-unpacked\resources\data
+[hexbox] 名字指纹 245 个 / 头像模板 245 个已加载
+[hexbox] 图鉴已加载: 海克斯(cn) 248 / 英雄 245 / 装备 870
+[hexbox] 排行榜已加载: 英雄榜 173 / 海克斯榜 211  统计日期 20261005
+[31444:…:ERROR:gpu_process_host.cc(976)] GPU process launch failed: error_code=18   ← 刷十余条
+[31444:…:FATAL:gpu_data_manager_impl_private.cc(423)] GPU process isn't usable. Goodbye.
+```
+
+要读懂这条崩溃，有两件事必须知道：
+
+1. **`FATAL` 是 `CheckOp` 直接杀进程**（退出码 `0x80000003` / `-2147483645`）——
+   JS 侧**没有** `catch`、`unhandledRejection`、`child-process-gone` 的机会，
+   所以这个 bug **只能靠"预防"修**，不能靠"捕获后降级"。
+2. **这些 `ERROR/FATAL` 行是 Chromium 直接写 stderr 的，不会进日志文件**
+   （打包版是 GUI 子系统进程，没有控制台）。所以症状在用户看来是
+   "日志文件看着一切正常，程序却自己消失了" —— 排查时**必须**在终端里跑一次
+   才能看到那十几行 GPU 报错。
+
+### 本机可重复的复现（验证场）
+
+本机（就是用户那台机器）默认**不会**复现（GPU 正常）。可以人为把 GPU 子进程
+"做成创建不出来"，从而得到**逐字一致**的签名：
+
+```powershell
+# 用不存在的 gpu-launcher 让 GPU 子进程无法创建（只影响 Chromium 的 GPU 子进程）
+& apps\overlay\node_modules\electron\dist\electron.exe apps\overlay `
+    --gpu-launcher=C:\hexbox-no-such-gpu.exe
+# 输出：GPU process launch failed: error_code=18 ×N → FATAL … Goodbye.，退出码 -2147483645
+```
+
+⚠️ 如实说明：这只是**同一条致命路径**的人造复现，**不等于**用户机器上的原始触发条件
+（原始触发条件未确证，可能是杀软扫描/沙箱/提权环境之一）。所以下面的表是
+"哪种开关能挡住这条路径"的实测，而不是"用户机器为什么失败了"的定论。
+
+### 实测：怎么才能挡住（**结论反直觉**）
+
+同一台机器、同一个复现条件、逐条实测（都是 `app ready` 之前的开关）：
+
+| 配置 | 结果 |
+|---|---|
+| 不改（基线） | **FATAL**，退出码 `-2147483645`（0x80000003）|
+| `app.disableHardwareAcceleration()`（Electron 官方 API） | **仍然 FATAL** —— 关掉硬件加速后 Chromium 仍会**为软件合成再起一个 GPU 子进程** |
+| `--disable-gpu --disable-gpu-sandbox` | 仍然 FATAL |
+| `--disable-gpu --disable-software-rasterizer` | 仍然 FATAL |
+| `--no-sandbox --disable-gpu` | 仍然 FATAL（人造失败发生在"能不能创建进程"这一层，与沙箱无关）|
+| `--disable-gpu-process-crash-limit` | 不崩，但**永不退出**：无限重启 GPU 子进程（实测 stderr 涨到 **91 MB**，自测都不会结束）→ 不可用 |
+| **`--disable-gpu --in-process-gpu`** | ✅ **无 GPU 子进程、正常启动、自测 ✅、退出码 0** |
+| `app.disableHardwareAcceleration()` + `--in-process-gpu` | 启动正常、自测 ✅，**但退出时 0xC0000005 访问违例**（3/3 必现，且与调用顺序无关）→ 不可用 |
+
+**最终采用**（`apps/overlay/src/main/index.ts` 文件开头的 `HEXBOX_GRAPHICS_SWITCHES`，
+一条清单同时驱动 `appendSwitch` 与日志）：
+
+```ts
+const HEXBOX_GRAPHICS_SWITCHES = ['disable-gpu', 'in-process-gpu', 'disable-gpu-sandbox'] as const
+for (const name of HEXBOX_GRAPHICS_SWITCHES) app.commandLine.appendSwitch(name)
+```
+
+* `disable-gpu`：关掉硬件加速（就是 `app.disableHardwareAcceleration()` 在命令行上的等价物）；
+* `in-process-gpu`：**本次修复的关键** —— GPU 服务跑进主进程，
+  "GPU 子进程起不来"这条致命路径于是**结构上不存在**；
+* `disable-gpu-sandbox`：兜底（万一哪一版 Electron 忽略上一条）——
+  只豁免 **GPU 子进程**的沙箱。
+
+**为什么不调 `app.disableHardwareAcceleration()`**（两条都是实测，不是偏好）：
+① 它**挡不住**这条 FATAL；② 它与 `in-process-gpu` **不能共存**（退出必崩 0xC0000005）。
+`--disable-gpu` 的效果与它相同（Chromium 只认命令行），所以改用它。
+
+**代价（如实）**：GPU 服务（软件合成）跑在**主进程**里。本程序只用 2D canvas
+（`renderer/overlay-canvas.ts`）且画布基本全透明，识别链路全是 CPU 纯函数
+（`packages/vision`），所以这部分开销可忽略；实测自测自测 ✅、真机局内标签照常出。
+**渲染进程的沙箱没有放开**（`--no-sandbox` 故意不加：渲染端仍保持 `contextIsolation`
++ 无 `nodeIntegration` + 只加载本地 `file://`）。
+
+### 第二次兜底：最多一次的"带 `--no-sandbox` 自动重启"
+
+`apps/overlay/src/main/index.ts` 里监听 **Electron 33 的真实 API**：
+
+* `app.on('child-process-gone')` —— GPU/Utility 等子进程（`gpu-process-crashed`
+  在 Electron 22 已被**移除**，33 的 `electron.d.ts` 里已经没有它）；
+* `webContents.on('render-process-gone')`（用 `app.on('web-contents-created')` 挂全局，
+  两扇窗 + 截屏 worker 自动覆盖）—— 渲染进程**不在** `child-process-gone` 里。
+
+两者都写一条带 `type/reason/exitCode` 的日志（便于以后取证），并在
+`reason = launch-failed | crashed` 且**启动 20 秒内**时，
+带 `--no-sandbox` + `--hexbox-degraded-no-sandbox` 标记 `app.relaunch()` 自己一次：
+
+* 代价：多一次启动（约 1~2 s）；重启后**渲染进程沙箱关闭**；
+  打包版是 `requireAdministrator`，由**已提权**父进程 relaunch，**不会再弹一次 UAC**；
+* **只重启一次**（标记 = 防重启循环的闸门）：再来一次就只记日志、照常退出。
+
+⚠️ 这一层**救不了** §十三 开头那条 FATAL（`CheckOp` 先杀进程）—— 那条只能靠
+`in-process-gpu` 预防。这一层管的是"渲染进程/工具进程起不来导致窗口空白"那一类。
+
+### 用户遇到类似崩溃时的排查手段
+
+按顺序试（都可以直接加在 exe 后面，**不需要**记住环境变量）：
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\hexbox\hexbox.exe" --disable-gpu        # 关硬件加速（用户实测有效）
+& "$env:LOCALAPPDATA\Programs\hexbox\hexbox.exe" --no-sandbox         # 整片 Chromium 沙箱都起不来时
+& "$env:LOCALAPPDATA\Programs\hexbox\hexbox.exe" --in-process-gpu     # 本仓库默认已加（见上）
+& "$env:LOCALAPPDATA\Programs\hexbox\hexbox.exe" --log-file D:\logs\hexbox.log
+```
+
+⚠️ 这些是 **Chromium 自己的开关**，本程序不解析它们（`applyCliOverrides()` 只认它自己那张表），
+直接透传给 Chromium 即可。**必须在终端里运行**才看得到 GPU 报错（GUI 进程没有控制台；
+`--log-file` 里的日志是 JS 的 `console.*`，Chromium 的 stderr 不在其中）。
+
+日志里现在能看到的取证行：
+
+```text
+[hexbox] 图形引导：已关硬件加速 + GPU 服务在主进程（命令行开关，见文件开头为什么不用 API）：--disable-gpu --in-process-gpu --disable-gpu-sandbox（实际生效 3/3）
+[hexbox] ⚠ 子进程消失：type=GPU reason=launch-failed exitCode=18
+[hexbox] ⚠ 渲染进程消失：reason=launch-failed exitCode=…
+[hexbox] ⚠ 子进程 GPU launch-failed（exitCode 18）（启动 3s 内）→ 自动降级：带 --no-sandbox 重启一次
+```
+
+### 本次（GPU 修复）实测到什么程度（诚实清单）
+
+已验证：
+
+* 复现：`--gpu-launcher=<不存在的 exe>` → 与用户逐字一致的 FATAL + 退出码 `0x80000003`；
+* 修复后同一复现条件：**无 FATAL、自测 ✅、退出码 0**（3/3）；
+* 修复后普通启动：自测 ✅、退出码 0（2/2）；屏幕截图确认三个字母**真的画在屏幕上**
+  （软件合成 / in-process GPU 下透明画布正常）；
+* `app.disableHardwareAcceleration()` + `in-process-gpu` 的退出崩溃：3/3 复现（所以没采用）；
+* **打包版（`requireAdministrator`，就是最终产物）**：本机 UAC 策略是
+  `ConsentPromptBehaviorAdmin = 0`（管理员静默提权），所以可以直接无人值守验证 ——
+  用提权 `cmd` 包一层，抓住 stdout / stderr / 退出码：
+
+  ```text
+  # release\win-unpacked\hexbox.exe --label-overlay-test --label-overlay-test-ms 4000
+  [1] EXIT=0     自测✅=True   stderr 0 行   FATAL/GPU 错误=False     ← 不带任何参数
+  [2] EXIT=0     自测✅=True   stderr 0 行   FATAL/GPU 错误=False     ← 额外加 --gpu-launcher=<不存在>
+  [hexbox] 图形引导：已关硬件加速 + GPU 服务在主进程…：--disable-gpu --in-process-gpu --disable-gpu-sandbox（实际生效 3/3）
+  三个标签中心像素：L=已画 C=已画 R=已画
+  ✅ 窗口可见 + 置顶 + 画布出像素 —— 覆盖窗链路正常
+  # 两次运行结束后残留 hexbox 进程 = 0；日志落在 %LOCALAPPDATA%\hexbox\logs\overlay.log（含上面那行"图形引导"）
+  ```
+
+* 自动降级链路**端到端跑过**（dev 入口，人为强杀渲染进程）：
+  `⚠ 渲染进程消失：reason=crashed exitCode=-1` → `自动降级：带 --no-sandbox 重启一次`
+  → 新进程日志里出现 `本次是降级后的运行（--hexbox-degraded-no-sandbox → 渲染进程沙箱已关闭）`
+  → 再崩一次时只打印 `已经降级后的运行 → 不再重启，避免无限重启`（防循环闸门生效）。
+
+未验证 / 无法确证：
+
+* **用户机器上 GPU 子进程起不来的原始触发条件**没有确证（人造复现只覆盖同一条致命路径）；
+* `in-process-gpu` 下软件合成的**长时间帧率 / CPU 占用**没有做量化基准
+  （只有"自测 ✅ + 真机局内标签照常出"的定性结论）；
+* 便携版（`hexbox-portable-*.exe`）与安装包**没有逐个点开跑过**（它们内嵌同一份
+  `app.asar`，而免安装目录那一份已经验过）。
+

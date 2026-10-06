@@ -23,9 +23,10 @@ import {
   cropBitmap,
   detectAugmentPanel,
   panelGateEvidence,
+  presenceLooksNearMiss,
   type PanelThresholds,
 } from './augment-panel.ts';
-import { detectPanelPresence } from './augment-presence.ts';
+import { detectPanelPresence, type PanelPresence } from './augment-presence.ts';
 import { panelRowRectInCapture } from './augment-region.ts';
 import type { Bitmap, Rect } from './types.ts';
 
@@ -300,6 +301,128 @@ test('tracker：托底额度（5 帧）用完 → 未命中照常累计并关闭
     'close',
     '累计到 3 帧仍然要关（额度只影响托底，不影响关闭阈值）',
   );
+});
+
+/* ------------------------------------------------------------------ */
+/* presence 判据的滞后（2026-10-11：抹掉一张卡就掉到突出量阈值之下）        */
+/* ------------------------------------------------------------------ */
+
+/** 造一份"临界失败"的面板信号读数（真机抹掉一整张卡时的实测值）。 */
+function nearMissPresence(
+  over: Partial<Parameters<typeof presenceLooksNearMiss>[0] & object> = {},
+): PanelPresence {
+  return {
+    present: false,
+    topRow: 0.148,
+    bottomRow: 0.886,
+    topFrac: 0.7,
+    bottomFrac: 0.61,
+    // ⚠️ 真机实测：抹掉一整张卡 → 上 0.131 / 下 0.098，双双 < 0.15
+    topProminence: 0.131,
+    bottomProminence: 0.098,
+    reason: '亮带不突出（突出量 上 0.13 / 下 0.10 < 0.15）',
+    ...over,
+  };
+}
+
+/** 造一份"整片亮画面"的读数（本信号存在的意义就是拒绝它）。 */
+function brightScreenPresence(): PanelPresence {
+  return {
+    present: false,
+    topRow: 0.148,
+    bottomRow: 0.886,
+    topFrac: 1,
+    bottomFrac: 1,
+    topProminence: 0.001,
+    bottomProminence: 0.001,
+    reason: '亮带不突出（突出量 上 0.00 / 下 0.00 < 0.15）',
+  };
+}
+
+test('presence 滞后：临界失败的一帧不算未命中；连续 3 帧真失败仍然出关闭边沿', () => {
+  const tracker = createPanelTracker({ openAfterHits: 1 });
+  const panel = makeFrame({ bg: 60 });
+  const gone = detectAugmentPanel(makeFrame({ xs: [], bg: 60 }));
+  assert.equal(tracker.pushBitmap(panel).edge, 'open');
+  // 帧①：面板信号说"在" → 托底
+  assert.equal(tracker.push(gone, nearMissPresence({ present: true })).misses, 0);
+  // 帧②：临界失败（突出量 0.131/0.098 < 0.15）→ **滞后放过**，仍不算未命中
+  const forgiven = tracker.push(gone, nearMissPresence());
+  assert.equal(forgiven.misses, 0, '上一帧仍在 + 本帧临界失败 → 放过 1 帧');
+  assert.equal(forgiven.edge, null);
+  assert.match(forgiven.reason, /滞后放过/);
+  assert.equal(forgiven.presenceHolds, 2);
+  // 帧③~⑤：真失败（占比直接不够）→ 连续累计，3 帧才关
+  const m1 = tracker.push(gone, brightScreenPresence());
+  const m2 = tracker.push(gone, brightScreenPresence());
+  const m3 = tracker.push(gone, brightScreenPresence());
+  assert.equal(m1.misses, 1);
+  assert.equal(m2.misses, 2);
+  assert.equal(m2.edge, null);
+  assert.equal(m3.misses, 3);
+  assert.equal(m3.edge, 'close', 'presence 连续不在 ≥3 帧仍然必须出关闭边沿');
+});
+
+test('presence 滞后：只是"临界"不行 —— 上一帧说不在时不许放过', () => {
+  const tracker = createPanelTracker({ openAfterHits: 1 });
+  const panel = makeFrame({ bg: 60 });
+  const gone = detectAugmentPanel(makeFrame({ xs: [], bg: 60 }));
+  assert.equal(tracker.pushBitmap(panel).edge, 'open');
+  // 上一帧是**真失败**（不是"仍在"）→ 本帧的临界读数没有"刚才还在"作保
+  assert.equal(tracker.push(gone, brightScreenPresence()).misses, 1);
+  const after = tracker.push(gone, nearMissPresence());
+  assert.equal(after.misses, 2, '上一帧不在 → 临界失败照常计入未命中');
+  assert.ok(!/滞后放过/.test(after.reason));
+});
+
+test('presence 滞后：额度只有 1 帧（连续两帧临界失败，第二帧就算未命中）', () => {
+  const tracker = createPanelTracker({ openAfterHits: 1 });
+  const panel = makeFrame({ bg: 60 });
+  const gone = detectAugmentPanel(makeFrame({ xs: [], bg: 60 }));
+  assert.equal(tracker.pushBitmap(panel).edge, 'open');
+  assert.equal(tracker.push(gone, nearMissPresence({ present: true })).misses, 0);
+  assert.equal(tracker.push(gone, nearMissPresence()).misses, 0, '第 1 帧临界 → 放过');
+  const second = tracker.push(gone, nearMissPresence());
+  assert.equal(second.misses, 1, '第 2 帧临界 → 额度用尽，计入未命中');
+  assert.match(second.reason, /已无滞后额度/);
+});
+
+test('presence 滞后：不放宽阈值 —— "整片亮画面"永远不被放过（本信号存在的意义）', () => {
+  const tracker = createPanelTracker({ openAfterHits: 1 });
+  const panel = makeFrame({ bg: 60 });
+  const gone = detectAugmentPanel(makeFrame({ xs: [], bg: 60 }));
+  assert.equal(tracker.pushBitmap(panel).edge, 'open');
+  // 占比 1.0（看起来"更满足"占比判据）但突出量 ≈ 0 → 不是两条细亮线
+  const r = tracker.push(gone, brightScreenPresence());
+  assert.equal(r.misses, 1, '均匀亮背景必须直接计入未命中');
+  assert.equal(presenceLooksNearMiss(brightScreenPresence()), false);
+  // 而真机的临界读数就是"临界"
+  assert.equal(presenceLooksNearMiss(nearMissPresence()), true);
+});
+
+test('presence 滞后：presence=null（旧渲染端）行为完全不变', () => {
+  const tracker = createPanelTracker({ openAfterHits: 1 });
+  const panel = makeFrame({ bg: 60 });
+  const gone = detectAugmentPanel(makeFrame({ xs: [], bg: 60 }));
+  assert.equal(tracker.pushBitmap(panel).edge, 'open');
+  assert.equal(tracker.push(gone, null).misses, 1);
+  assert.equal(tracker.push(gone, null).misses, 2);
+  assert.equal(tracker.push(gone, null).edge, 'close');
+});
+
+test('panelGateEvidence：presence 的读数（占比/突出量/跨度）也要打出来', () => {
+  const tracker = createPanelTracker({ openAfterHits: 1 });
+  const panel = makeFrame({ bg: 60 });
+  const gone = detectAugmentPanel(makeFrame({ xs: [], bg: 60 }));
+  tracker.pushBitmap(panel);
+  tracker.push(gone, nearMissPresence({ present: true }));
+  tracker.push(gone, brightScreenPresence());
+  tracker.push(gone, brightScreenPresence());
+  const closing = tracker.push(gone, brightScreenPresence());
+  assert.equal(closing.edge, 'close');
+  const line = panelGateEvidence(closing);
+  assert.match(line, /读数：上 y0\.148\(1\.00，突0\.00\)/);
+  assert.match(line, /跨度0\.74/);
 });
 
 test('tracker：reset 清空去抖计数', () => {

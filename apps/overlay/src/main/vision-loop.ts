@@ -188,14 +188,26 @@ async function captureGameBitmap(): Promise<{
   return { bmp: { width: size.width, height: size.height, data }, display, windowPhysical };
 }
 
-/** 一轮识别：返回 null 表示「本轮无可信结果,应清空」。 */
+/** 一轮识别落在哪个子阶段（`null` = 这一轮没有可用的阶段证据，别拿它下结论）。 */
+export type VisionStage = 'cards' | 'topbar';
+
+/**
+ * 一轮识别：返回 null 消息表示「本轮无可信结果,应清空」。
+ *
+ * @param pickState LCU 给的子阶段。⚠️ **必须是调用方每 tick 只读一次的那个值**：
+ *   本函数内部再读一次的话，tick 用于"换阶段就清记忆"的那次读取与阶段判定用的
+ *   这次读取会落在截屏 await 的两侧（1.5 秒），LCU 每 2 秒轮询足以在此期间把
+ *   picking 翻成 locked —— 真机日志 L86 就是这样（本轮报第二阶段却仍推 3 个卡片标签）。
+ */
 export async function runVisionRound(
   deps: VisionLoopDeps,
-): Promise<{ msg: VisionOverlayMsg | null; display: Electron.Display }> {
+  pickState: 'picking' | 'locked' | 'unknown',
+): Promise<{ msg: VisionOverlayMsg | null; display: Electron.Display; stage: VisionStage | null }> {
   // 窗口矩形来自 createGameBitmap 的同一次探测（勿在此再查一遍）
   const grabbed = await captureGameBitmap();
   if (!grabbed) {
-    return { msg: null, display: screen.getPrimaryDisplay() };
+    // 连图都没有 → 没有任何阶段证据（`null`：调用方不要拿它去改记忆状态）
+    return { msg: null, display: screen.getPrimaryDisplay(), stage: null };
   }
   const { bmp, display, windowPhysical } = grabbed;
 
@@ -229,7 +241,8 @@ export async function runVisionRound(
   // 用"顶栏是否有头像"来区分阶段，这个歧义就消失了。
   const portraits = (resolveDeps(deps.portraits) ?? []) as readonly PreparedTemplate[];
   const rankings = resolveDeps(deps.rankings) as RankingSnapshot | null;
-  const pickState = deps.pickState?.() ?? 'unknown';
+  // ⚠️ `pickState` 由**调用方**每 tick 只读一次并传进来（本函数不再自己读）：
+  //    否则"换阶段清记忆"与"阶段判定"会用两次读取的结果，中间隔着截屏 await。
   let topBarOccupiedCount = 0;
   let cands: ReturnType<typeof detectTopBarCandidates> = [];
   let captureSlots: Rect[] = [];
@@ -280,10 +293,13 @@ export async function runVisionRound(
       (identified.length > 0 ? ` [${identified.join(' ')}]` : '') +
       (labels[0]
         ? ` 标签0@(${labels[0].x.toFixed(0)},${labels[0].y.toFixed(0)}) ${labels[0].w}x${labels[0].h}` +
-          ` 槽0 x=${captureSlots[0]!.x.toFixed(3)}(归一)→CSS ${(captureSlots[0]!.x * geo.windowWidth).toFixed(0)}`
+          // ⚠️ 槽位 x 是**窗口内归一化**坐标，换成屏幕 CSS 必须加窗口原点
+          //    `geo.windowX`（真机日志打 439 而真实屏幕 x 是 784 = 439+345 →
+          //    少了这一项，这条日志一直在把人往"坐标算错"的方向带）。
+          ` 槽0 x=${captureSlots[0]!.x.toFixed(3)}(归一)→CSS ${(captureSlots[0]!.x * geo.windowWidth + geo.windowX).toFixed(0)}`
         : '');
     // 有头像但一个都没认出来：不画（宁漏勿错），诊断留给日志
-    return { msg: { active: labels.length > 0, labels, diag }, display };
+    return { msg: { active: labels.length > 0, labels, diag }, display, stage: 'topbar' };
   }
 
   if (!det.confident || det.cards.length === 0) {
@@ -294,6 +310,9 @@ export async function runVisionRound(
         diag: `第一阶段(${pickState})但未检出卡片: ${det.reason ?? '?'}（顶栏占用 ${topBarOccupiedCount}）`,
       },
       display,
+      // 阶段判定是**明确的**（顶栏没占用、LCU 也没说 locked）→ 就是一阶段，
+      // 只是这一轮没检出卡片。它仍然是一阶段证据（不能当成"不知道"）。
+      stage: 'cards',
     };
   }
 
@@ -370,6 +389,7 @@ export async function runVisionRound(
           : ''),
     },
     display,
+    stage: 'cards',
   };
 }
 
@@ -396,6 +416,16 @@ export class VisionLoop {
   private failCount = 0;
   /** 上一轮所处的子阶段（用于检测切换并立刻清空记忆）。 */
   private lastPickState: 'picking' | 'locked' | 'unknown' | null = null;
+  /**
+   * 上一轮**真正落在**的子阶段（`runVisionRound` 回报；`null` = 还没有证据）。
+   *
+   * ⚠️ 为什么不能只看 `pickState`（真机 bug，2026-10-11）：LCU 的 `pickState`
+   * 可能是 `unknown`/'picking' 而屏幕上顶栏已经有头像（占用 > 0）→
+   * `isPhase2` 为真、走顶栏分支，但 `pickState` 一直没变 → 换阶段判据**永不触发**
+   * → 卡片标签以 TTL 挂在二阶段（日志 L86：`第二阶段(locked): 顶栏占用 2 格,
+   * 识别成功 0 格` 却仍推送 3 个卡片标签）。所以换阶段要按**实际阶段**判。
+   */
+  private lastStage: VisionStage | null = null;
 
   constructor(deps: VisionLoopDeps, intervalMs = 1500) {
     this.deps = deps;
@@ -408,19 +438,34 @@ export class VisionLoop {
       if (this.running) return;
       this.running = true;
       try {
+        // ⚠️ **每 tick 只读一次** `pickState`，并把同一个值传进 `runVisionRound`：
+        // 截屏 await 有 1~2 秒，期间 LCU（每 2 秒轮询）完全可能把 picking 翻成
+        // locked —— 两次读取会得到两个阶段，于是"用于重置记忆的阶段"与
+        // "用于画标签的阶段"不一致（真机日志 L86 的成因）。
+        const pickState = this.deps.pickState?.() ?? 'unknown';
+        const { msg, display, stage } = await runVisionRound(this.deps, pickState);
+        this.round++;
         // 子阶段切换（第一阶段⇄第二阶段）时**立刻**清空标签记忆 —— 否则
         // 卡片胜率会在选定后继续残留最多 6 轮（≈9 秒），真机反馈为
         // "进入二阶段还不消失"。卡片与顶栏的标签位置完全不同，不能混用。
-        const pickState = this.deps.pickState?.() ?? 'unknown';
-        if (this.lastPickState !== null && pickState !== this.lastPickState) {
+        //
+        // 两条判据都留着（各自覆盖对方漏掉的情形）：
+        //   · `pickState` 变化（LCU 说得清时最灵敏）；
+        //   · **实际阶段**变化（LCU 说 unknown/picking、靠顶栏占用进二阶段时，
+        //     `pickState` 根本不会变 —— 只有这条能兜住）。
+        // 重置放在本轮输出之后、`memory.update()` 之前：效果与"轮前重置"等价，
+        // 而且用的是**本轮真正使用的**那个阶段。
+        const pickChanged = this.lastPickState !== null && pickState !== this.lastPickState;
+        const stageChanged = stage !== null && this.lastStage !== null && stage !== this.lastStage;
+        if (pickChanged || stageChanged) {
           this.memory.reset();
         }
         this.lastPickState = pickState;
+        if (stage !== null) this.lastStage = stage;
 
-        const { msg, display } = await runVisionRound(this.deps);
-        this.round++;
         const active = msg !== null && msg.active;
         // 记忆补齐:本轮识别到的标签 + TTL 内未过期的旧标签
+        const produced = msg?.labels.length ?? 0;
         const labels = this.memory.update(msg?.labels ?? [], this.round, active);
         if (active) {
           this.failCount = 0;
@@ -428,10 +473,14 @@ export class VisionLoop {
           this.failCount++;
         }
         const shown = active || labels.length > 0;
+        // ⚠️ 诊断必须把"**本轮产出 X 个 → 实际推出 Y 个**"打在同一行：
+        // 幽灵标签那个 bug 里，两行日志（产出 3 / 推送 4）要靠人工对比才发现
+        //（真机日志 L40 vs L34）。
+        const flow = `本轮产出 ${produced} → 实际推出 ${labels.length}`;
         this.deps.onResult(
           shown
-            ? { active: true, labels, diag: msg?.diag ?? '记忆保持' }
-            : { active: false, labels: [], diag: msg?.diag ?? '未找到游戏窗口' },
+            ? { active: true, labels, diag: `${msg?.diag ?? '记忆保持'}（${flow}）` }
+            : { active: false, labels: [], diag: `${msg?.diag ?? '未找到游戏窗口'}（${flow}）` },
           display,
         );
       } catch {
@@ -455,6 +504,9 @@ export class VisionLoop {
     this.memory.reset();
     this.round = 0;
     this.failCount = 0;
+    // 新会话不该继承上一段的阶段（否则第一 tick 会拿着旧阶段做一次无意义的重置）
+    this.lastPickState = null;
+    this.lastStage = null;
     this.deps.onResult({ active: false, labels: [] }, screen.getPrimaryDisplay());
   }
 

@@ -287,3 +287,63 @@ pnpm --filter @hexbox/overlay debug:overlay-test
 4. 重复 2-3 直到定位稳定，再做覆盖层绘制
 
 > 这个反馈回路是必须的 —— 盲写算法只会让你反复试错。
+
+## 八、标签记忆的两个真机 bug（2026-10-11）
+
+### 8.1 「第四个悬浮标签」（幽灵标签）
+
+用户打包版日志（`%LOCALAPPDATA%\hexbox\logs\overlay.log` L34 → L40）：
+
+```
+L34 推送 active=true labels=1 … 第一阶段: 卡片 2 张 → 出标签 1 个 … 标签0@(1160,621)
+L40 推送 active=true labels=4 … 第一阶段: 卡片 3 张 → 出标签 3 个 … 标签0@(757,614)
+L41~L78 draw labels=4（约 20~25 秒）→ L79 才回到 3
+```
+
+`label-memory.ts` 的"按位置记忆"（容差 24 DIP、TTL 6 轮、只比 x/y）在某一轮
+`detectCards` **误检**（候选行被当成 2 张卡、名字只低置信命中）产出标签 @(1160,621)
+之后，下一轮正确检出 3 张卡时三个新标签与它**两两都差 >24 DIP** →
+位置规则认不出"同一个元素被重认"，于是**原样保留** → 屏幕上是 4 个。
+
+**修法**：记忆里记"本块 UI 见过的**最大元素数**" `capacity`
+（`reset()` 清 0、每轮用本轮输入条目数取 max），合并输出时
+`if (out.length >= capacity) break`。两条语义都保住：
+
+- 3 张卡某轮只检出 2 张 → 容量仍是 3 → 仍能补齐第 3 个（本模块最初的目的）；
+- 误检成 2 张后再检出 3 张 → 容量升到 3 且被新标签占满 → 幽灵**永远进不来**。
+
+### 8.2 二阶段的卡片标签：换阶段要按**实际阶段**判，`pickState` 只读一次
+
+真机日志 L86：`推送 active=true labels=3 … 第二阶段(locked): 顶栏占用 2 格, 识别成功 0 格`
+—— 二阶段本轮产出 0 个，却还推 3 个**卡片**标签（靠 TTL 挂着）。
+
+两个成因，各修一处（`apps/overlay/src/main/vision-loop.ts`）：
+
+1. `tick()` 在截屏**之前**读一次 `pickState` 用于清记忆，`runVisionRound()`
+   内部又读一次用于阶段判定 —— 中间隔着 1~2 秒的截屏 await，LCU 每 2 秒轮询
+   足以把 picking 翻成 locked（"本轮报 second 阶段却仍推卡片标签"）。
+   → **每 tick 只读一次**并作为参数传进 `runVisionRound(deps, pickState)`。
+2. `isPhase2` 的另一半是"顶栏占用 > 0"，而那条路径下 LCU 的 `pickState` 可能是
+   `unknown`/`picking`（**永远不变**）→ 只看 `pickState` 的换阶段判据永不触发。
+   → `runVisionRound()` 回报**实际阶段**（`stage: 'cards' | 'topbar' | null`），
+   `tick()` 在阶段变化时 `memory.reset()`（`pickState` 变化那条保留作补充）。
+
+### 8.3 怎么在没有游戏的情况下复验
+
+```powershell
+# 真机帧 + 线上记忆：打印"改前 / 改后（容量）/ 改后（容量+阶段重置）"的输出个数
+node --experimental-strip-types debug/diag-ghost-label.mts
+```
+
+实测（`debug/real/*.png` 与 `debug/shots/champselect-*.png` 都是真机截图）：
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| `real/shot1.png`（只重建出 2 张卡 → 2 个标签）→ `champselect-locked-152419`（2 个正确标签，整排位置偏 33 DIP）| **4** | 2（容量上限）|
+| 打包版日志 L34 的真实标签 @(1160,621) → 真机 3 卡帧算出的 3 个标签 | **4** | **3** |
+| `real/phase1.png`（一阶段 2 个）→ `real/phase2.png`（二阶段 1 个，`pickState` 读不到）| 3 | 1（阶段重置）|
+
+日志侧同时补了两个诊断（不改变行为）：推送行现在写
+`… （本轮产出 X → 实际推出 Y）`（幽灵那个 bug 以前要靠对比两行日志才发现），
+以及顶栏诊断里的 `槽0 …→CSS` 补上了窗口原点 `geo.windowX`
+（真机打 439 而真实屏幕 x 是 784 = 439+345）。

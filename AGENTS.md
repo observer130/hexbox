@@ -68,8 +68,13 @@ packages/
                               / win-geometry + panel-geometry + augment-region
                                 (window rect → capture coordinates)
                               / augment-panel (panel open/close gating)
-                              / augment-cadence (idle/active throttling policy)
+                              / augment-cadence (idle/active throttling policy
+                                + apiCaptureInterval: api-mode interval, panel
+                                state outranks the trigger state machine)
                               / augment-trigger (API trigger state machine)
+                              / augment-reroll + augment-reroll-retry (single-card
+                                reroll: fingerprints/thresholds + retry-once
+                                bookkeeping and the non-regressing baseline)
                               / augment-ocr (augment-name OCR)
                               / augment-label (label geometry presets)
                               / augment-tier-label (cards × tier table → labels)
@@ -158,7 +163,7 @@ pnpm --filter @hexbox/web typecheck
 Tests use Node's built-in runner: `node --experimental-strip-types --test ...`.
 **Make the suite green before committing.** New behavior should include tests.
 
-Current tests: **672** — `core` 55 / `vision` 448 / `lcu` 87 /
+Current tests: **718** — `core` 55 / `vision` 494 / `lcu` 87 /
 `provider-communitydragon` 12 / `provider-tencent` 43 / `data-store` 17 /
 `data-cli` 10 (measured locally; **treat `pnpm test` output as the source of
 truth** — this number moves whenever a suite is touched). `provider-registry`
@@ -216,6 +221,20 @@ overlay owns the stage decision through `vision/src/visibility.ts` —
 champ-select labels and in-game augment labels **mutually exclusive** (a handover
 clears the leftovers of the other producer) and start/stop the augment chain with
 the match; `HEXBOX_OVERLAY_AUGMENT=0` disables just the in-game chain.
+
+> **The resident overlay has no visible window: the tray is its only entry point
+> and the only way to quit** (`main/tray.ts`). Closing a window **hides it**
+> (`attachCloseToTrayHide()` → `preventDefault()` + `hide()`); the single real exit
+> is the tray menu's 退出 → `quitApp()` (sets `quitting`, then `app.quit()` →
+> the **existing** `before-quit` cleanup — never write a second cleanup path).
+> `app.requestSingleInstanceLock()` is mandatory: two `hexbox.exe` processes each
+> drew their own labels and computed **different** strength tables (the user
+> reported "multiple labels and win rates overlapping"). A rejected second instance
+> builds **nothing**; the first one only shows a balloon (never `show()`/`focus()`).
+> The "no LCU credentials" balloon fires **once per connection session**
+> (3 consecutive failures; re-armed only after 6 consecutive successes) — the rule
+> is a pure function in `vision/credential-notice.ts`, the tray status text in
+> `vision/overlay-status.ts`.
 
 > **Window-rect probing can pick the wrong window — always search a fallback region.**
 > `win-geometry` + `augment-region.ts` map a window-normalized region to capture
@@ -325,6 +344,7 @@ the match; `HEXBOX_OVERLAY_AUGMENT=0` disables just the in-game chain.
 | Capture | `HEXBOX_AUGMENT_FORENSICS` | `1` = also grab native full-res frames (cursor stall; off by default) |
 | Capture | `HEXBOX_AUGMENT_CLOSED_SAMPLES` | how many closed-state samples to keep (default 0) |
 | Cadence | `HEXBOX_AUGMENT_IDLE_MS` / `_ACTIVE_MS` / `_PROBE_MS` / `_TAIL_MS` | throttling intervals (1000 / 250 / 6000 / 20000) |
+| Cadence | `HEXBOX_AUGMENT_CLOSE_HEAL_PROBE` | `1` = enable the low-frequency **post-close self-heal probe** in api mode (1 frame / 6 s for 20 s after a confirmed close). **Off by default**: the user chose strict zero frames; see §十七 of `docs/AUGMENT-PANEL.md` |
 | Recording | `HEXBOX_AUGMENT_SECONDS` | fixed recording length; `0` = follow the game (default) |
 | Recording | `HEXBOX_AUGMENT_MAX_MINUTES` | follow-mode cap in minutes (default 45) |
 | Recording | `HEXBOX_AUGMENT_OUT` | artifact subdirectory under `debug/`, or an absolute path |
@@ -339,6 +359,9 @@ the match; `HEXBOX_OVERLAY_AUGMENT=0` disables just the in-game chain.
 | Overlay | `HEXBOX_DATA_DIR` | explicit `data/` directory (otherwise resolved by walking up to `dataset.json`) |
 | Overlay | `HEXBOX_LOG_FILE` | tee console output to this file as UTF-8 (never via PowerShell redirection) |
 | Overlay | `HEXBOX_SMOKE` | `1` = auto-quit after 4 s (smoke run) |
+| Tray | `HEXBOX_TRAY_AUTOTEST_MS` | `>0` = tray/exit self-test: after N ms simulate "close window" (must hide to tray, process stays alive), 3 s later simulate the tray menu's 退出; CLI `--tray-autotest <ms>` |
+| Tray | `HEXBOX_TRAY_ICON` | explicit tray-icon **directory** (troubleshooting; defaults to packaged `resources/tray` / dev `apps/overlay/build/tray`) |
+| Tray | `HEXBOX_NOTICE_TEST` | `1` = **verification injection**: feed "no LCU credentials" into the one-shot balloon decision (only the decision input changes) |
 | LCU | `HEXBOX_LCU_CREDENTIALS` | `<port>:<token>` (or a lockfile line); highest priority, no-admin channel |
 | LCU | `HEXBOX_LCU_CREDENTIALS_FILE` | path to a credentials file (default `~/.hexbox/lcu-credentials`) |
 

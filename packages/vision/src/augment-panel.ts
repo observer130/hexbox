@@ -50,6 +50,13 @@
  * 由 `PANEL_PRESENCE_TRUST_FRAMES`(5) 帧的额度托底，额度用完就不再托底
  * （避免误报让标签永远不消失）。
  *
+ * ⚠️ **2026-10-11 追加：presence 判据的 1 帧滞后**（`PANEL_PRESENCE_HYSTERESIS_FRAMES`）。
+ * 真机余量比 `augment-presence.ts` 头注写的"×1.2"小得多 —— 那个 ×1.2 只对**行占比**
+ * 成立，真正的约束是**亮线突出量 ≥ 0.15**：合成翻牌实验里抹掉一整张卡时
+ * 上/下突出量只有 0.131 / 0.098。所以"上一帧确实在、本帧只是临界失败"的帧
+ * 现在会被放过（最多 1 帧），而不是直接计入未命中。它**不放宽任何阈值**
+ * （放宽 `minLineProminence` 会让"整片亮画面"通过），代价是真关闭最多晚 1 帧。
+ *
  * ⚠️⚠️ **别把这一步当成"已经修好了"**（2026-10-06 交接时明确写下的事实）：
  * 本文件这次的改动只是把关闭确认从 **2 帧（0.8 秒）** 提到 **3 帧（1.2 秒）**，
  * 而真机实测（`debug/augment/timeline.csv`：32524 命中 → 32930/33333/33612/33862
@@ -72,6 +79,7 @@ import { extractGray } from './match.ts';
 import {
   NO_PANEL_PRESENCE,
   PANEL_PRESENCE_REGION,
+  PANEL_PRESENCE_THRESHOLDS,
   detectPanelPresence,
   type PanelPresence,
 } from './augment-presence.ts';
@@ -411,6 +419,53 @@ export const PANEL_CLOSE_CONFIRM_FRAMES = 3;
  */
 export const PANEL_PRESENCE_TRUST_FRAMES = 5;
 
+/**
+ * "面板仍在"信号的**临界失败放过额度**（帧）—— 即 presence 判据的 1~2 帧滞后。
+ *
+ * ── 为什么需要（真机余量比 `augment-presence.ts` 头注以为的小）──────────────
+ *
+ * 该信号的真正约束是**亮线突出量 ≥ 0.15**（`minLineProminence`），不是行占比 0.25：
+ * 合成翻牌实验里"抹掉一整张卡"时上/下突出量只有 **0.131 / 0.098** —— 低于 0.15
+ * 就整帧失败。于是"面板其实还在、只是少了一张卡的边线"这种帧仍然会被计入未命中，
+ * 3 帧（1.2 秒）就判关闭。
+ *
+ * ⚠️ **不许**直接放宽 `minLineProminence`：那条阈值正是用来拒绝"整片亮画面"
+ * 误报的（均匀亮背景的突出量 ≈ 0；放宽到 0.09 会让一整类亮场景通过）。
+ * 正解是**滞后**：只有"**上一帧确实在**（卡片判据命中或面板信号成立）+
+ * 本帧只是**临界**失败"才放过，且最多连续 `PANEL_PRESENCE_HYSTERESIS_FRAMES` 帧。
+ * 代价明确且有限：真关闭时关闭延迟最多多 1 帧（400ms 采样 = +0.4 秒）。
+ */
+export const PANEL_PRESENCE_HYSTERESIS_FRAMES = 1;
+
+/** 临界失败的**占比**容差：亮带占比 ≥ 0.8×阈值就仍认它是那两条线。 */
+export const PANEL_PRESENCE_NEAR_MISS_FRAC_RATIO = 0.8;
+
+/**
+ * 临界失败的**突出量**容差：≥ 0.6×阈值。
+ *
+ * 取 0.6 的依据是真机读数：抹掉一整张卡时下带突出量实测 **0.098 = 0.65×0.15**。
+ * 它必须**远高于 0** —— "整片亮画面"的突出量 ≈ 0，任何比例都不该放过它。
+ */
+export const PANEL_PRESENCE_NEAR_MISS_PROMINENCE_RATIO = 0.6;
+
+/**
+ * 这一帧的 presence 是"**临界失败**"吗（差一点点，但形状仍然像两条亮线）。
+ *
+ * 判据：占比 ≥ 0.8×阈值、突出量 ≥ 0.6×阈值、上下带位置与跨度都还在区间内。
+ * 位置与跨度**不放松**：那是"这两条线属于同一排卡片"的唯一证据。
+ */
+export function presenceLooksNearMiss(presence: PanelPresence | null): boolean {
+  if (presence === null || presence.present) return false;
+  if (presence.topRow === null || presence.bottomRow === null) return false;
+  const t = PANEL_PRESENCE_THRESHOLDS;
+  const fracNeed = t.minBorderRowFrac * PANEL_PRESENCE_NEAR_MISS_FRAC_RATIO;
+  const promNeed = t.minLineProminence * PANEL_PRESENCE_NEAR_MISS_PROMINENCE_RATIO;
+  if (presence.topFrac < fracNeed || presence.bottomFrac < fracNeed) return false;
+  if (presence.topProminence < promNeed || presence.bottomProminence < promNeed) return false;
+  const span = presence.bottomRow - presence.topRow;
+  return span >= t.minRowSpanFrac && span <= t.maxRowSpanFrac;
+}
+
 export interface PanelTrackerOptions {
   /** 连续多少帧命中才算"开了"（去抖；默认 `PANEL_OPEN_CONFIRM_FRAMES`）。 */
   readonly openAfterHits?: number;
@@ -421,6 +476,8 @@ export interface PanelTrackerOptions {
   readonly closeAfterMisses?: number;
   /** "面板仍在"信号最多托底多少帧（默认 `PANEL_PRESENCE_TRUST_FRAMES`）。 */
   readonly presenceTrustFrames?: number;
+  /** presence 判据的滞后额度（帧；默认 `PANEL_PRESENCE_HYSTERESIS_FRAMES`）。 */
+  readonly presenceHysteresisFrames?: number;
   readonly thresholds?: PanelThresholds;
 }
 
@@ -489,12 +546,22 @@ export function createPanelTracker(options: PanelTrackerOptions = {}): PanelTrac
   const openAfterHits = options.openAfterHits ?? PANEL_OPEN_CONFIRM_FRAMES;
   const closeAfterMisses = options.closeAfterMisses ?? PANEL_CLOSE_CONFIRM_FRAMES;
   const presenceTrustFrames = options.presenceTrustFrames ?? PANEL_PRESENCE_TRUST_FRAMES;
+  const hysteresisFrames = options.presenceHysteresisFrames ?? PANEL_PRESENCE_HYSTERESIS_FRAMES;
   const thresholds = options.thresholds ?? PANEL_THRESHOLDS;
 
   let state: 'closed' | 'open' = 'closed';
   let hits = 0;
   let misses = 0;
   let presenceHolds = 0;
+  /**
+   * 上一帧"面板确实在"吗（卡片判据命中，或面板信号成立/被滞后放过）。
+   *
+   * 滞后只对"仍在 → 临界失败"这一种过渡生效：若上一帧本来就说"不在"，
+   * 这一帧的临界读数没有"刚才还在"作保，不该放过。
+   */
+  let presenceWasIn = false;
+  /** 连续几帧是"滞后放过"的（上限 `hysteresisFrames`）。 */
+  let presenceForgiven = 0;
 
   const push = (det: PanelDetection, presence: PanelPresence | null = null): PanelReading => {
     let edge: 'open' | 'close' | null = null;
@@ -503,6 +570,8 @@ export function createPanelTracker(options: PanelTrackerOptions = {}): PanelTrac
       hits++;
       misses = 0;
       presenceHolds = 0;
+      presenceWasIn = true;
+      presenceForgiven = 0;
       if (state === 'closed' && hits >= openAfterHits) {
         state = 'open';
         edge = 'open';
@@ -510,21 +579,34 @@ export function createPanelTracker(options: PanelTrackerOptions = {}): PanelTrac
     } else {
       hits = 0;
       // 卡片判据失效 ≠ 面板不在：面板信号仍在（且在托底额度内）→ 本帧不算未命中
-      const trusted =
-        presence !== null && presence.present && presenceHolds < presenceTrustFrames;
+      const signalSaysIn = presence !== null && presence.present;
+      // **滞后**：上一帧确实在 + 本帧只是临界失败 → 这一帧仍然算"在"
+      const forgiven =
+        !signalSaysIn && presenceWasIn && presenceForgiven < hysteresisFrames && presenceLooksNearMiss(presence);
+      const trusted = (signalSaysIn || forgiven) && presenceHolds < presenceTrustFrames;
       if (trusted) {
         presenceHolds++;
         misses = 0;
+        presenceWasIn = true;
+        presenceForgiven = signalSaysIn ? 0 : presenceForgiven + 1;
         // ⚠️ **两条判据的原文都要留下**：只说"面板信号仍在"会丢掉"卡片判据为什么挂"
         //（排查时分不清是翻牌（内容变亮）还是结构没重建出来）。
         reason =
-          `${det.reason} → 卡片判据失效但**面板信号仍在**（第 ${presenceHolds}/${presenceTrustFrames} 次）` +
-          `→ 不判关闭（面板信号：${presence.reason}）`;
+          `${det.reason} → 卡片判据失效但**面板信号仍在**（第 ${presenceHolds}/${presenceTrustFrames} 次` +
+          (signalSaysIn ? '' : `，其中第 ${presenceForgiven} 帧是临界失败按滞后放过`) +
+          `）→ 不判关闭（面板信号：${presence?.reason ?? '—'}）`;
       } else {
         misses++;
+        presenceWasIn = false;
+        presenceForgiven = 0;
         if (presence !== null && presence.present) {
           reason =
             `${det.reason} → 面板信号已用完托底额度（${presenceTrustFrames} 帧）` +
+            `→ 计入未命中（面板信号：${presence.reason}）`;
+        } else if (presence !== null && presenceLooksNearMiss(presence)) {
+          // 临界失败但**没有**滞后额度了（或上一帧本来就不在）→ 如实说明，别让人以为判据差很多
+          reason =
+            `${det.reason} → 面板信号临界失败（已无滞后额度）` +
             `→ 计入未命中（面板信号：${presence.reason}）`;
         }
         if (state === 'open' && misses >= closeAfterMisses) {
@@ -566,6 +648,8 @@ export function createPanelTracker(options: PanelTrackerOptions = {}): PanelTrac
       hits = 0;
       misses = 0;
       presenceHolds = 0;
+      presenceWasIn = false;
+      presenceForgiven = 0;
     },
   };
 }
@@ -588,11 +672,19 @@ export function panelGateEvidence(
   const closeFrames = options.closeFrames ?? PANEL_CLOSE_CONFIRM_FRAMES;
   const trustFrames = options.presenceTrustFrames ?? PANEL_PRESENCE_TRUST_FRAMES;
   const p = reading.presence;
+  // presence 的**读数**也要带上（占比 / 突出量 / 跨度）：只写"在/不在"回答不了
+  // "余量还剩多少" —— 真机复盘时正是靠这三个数才看出"卡边框被抹掉一张就掉到阈值下"。
+  const readings =
+    p === null || p.topRow === null || p.bottomRow === null
+      ? ''
+      : `；读数：上 y${p.topRow.toFixed(3)}(${p.topFrac.toFixed(2)}，突${p.topProminence.toFixed(2)})` +
+        ` / 下 y${p.bottomRow.toFixed(3)}(${p.bottomFrac.toFixed(2)}，突${p.bottomProminence.toFixed(2)})` +
+        ` 跨度${(p.bottomRow - p.topRow).toFixed(2)}`;
   return (
     `卡片判据连续未命中 ${reading.misses}/${closeFrames} 帧；` +
     `面板信号 ${reading.presenceHolds}/${trustFrames} 帧仍成立` +
     `（阈值：未命中 ${closeFrames} 帧、托底 ${trustFrames} 帧；` +
-    `面板信号=${p === null ? '未提供' : p.present ? '在' : '不在'}）` +
+    `面板信号=${p === null ? '未提供' : p.present ? '在' : '不在'}${readings}）` +
     ` — ${reading.reason}`
   );
 }
