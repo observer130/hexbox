@@ -8,4 +8,9 @@ packages:
 # 原则：只批准确实必需的；新增项前请说明必要性。
 allowBuilds:
   electron: true
+  # electron-builder 的可选依赖（只给 Squirrel.Windows 目标用）。
+  # 我们只出 **NSIS 安装包 + 便携版**（见 apps/overlay/electron-builder.yml），
+  # 用不到它；但 pnpm 对"未表态"的构建脚本会直接报错退出
+  # （ERR_PNPM_IGNORED_BUILDS），所以显式写 false（= 明确不跑它的安装脚本）。
+  electron-winstaller: false
   esbuild: true

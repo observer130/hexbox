@@ -32,6 +32,7 @@ import {
   describeLabelOverlay,
   pushLabelOverlay,
 } from './label-overlay.ts';
+import { packagedArtifactDir } from './user-paths.ts';
 
 /** 开关名（写进 apps/overlay/README.md，改这里必须同步文档）。 */
 export const LABEL_OVERLAY_TEST_ENV = 'HEXBOX_LABEL_OVERLAY_TEST';
@@ -92,8 +93,14 @@ export function logLabelOverlaySelfTestExitNotice(): void {
  * ⚠️ 不能用固定的 `..\..\..\debug`：本模块会被打进两个入口，`__dirname`
  * 一个是 `dist/main`、一个是 `dist`（同一个坑见 `label-overlay.ts`）。
  * 按**仓库根**（`pnpm-workspace.yaml` 所在目录）定位最稳。
+ *
+ * ⚠️ **打包后没有仓库根**：双击 exe 时 cwd 可能是 `C:\Windows\System32`，
+ * 往上找也永远找不到 `pnpm-workspace.yaml` → 旧实现会写到 cwd 下（写不进去
+ * 或写到莫名其妙的地方）。所以打包后统一切到用户目录
+ * `%LOCALAPPDATA%\hexbox\logs\selftest`（见 main/user-paths.ts）。
  */
 function resolveDebugDir(): string {
+  if (app.isPackaged) return packagedArtifactDir();
   let dir = __dirname;
   for (let i = 0; i < 6; i++) {
     if (existsSync(join(dir, 'pnpm-workspace.yaml'))) return join(dir, 'debug');

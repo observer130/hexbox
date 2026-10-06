@@ -17,9 +17,88 @@
  */
 
 import { app, BrowserWindow, ipcMain, screen } from 'electron';
-import { appendFileSync, existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { inspect } from 'node:util';
+
+/**
+ * 命令行参数 → 环境变量（**打包后的主要开关入口**）。
+ *
+ * 为什么需要它：安装包出来的程序是 GUI 子系统进程，**没有控制台**，
+ * 双击运行的玩家也不会去设 `$env:HEXBOX_LABEL_OVERLAY_TEST`（开发文档里
+ * 那一套在打包后不可用）。所以把这些诊断开关做成命令行参数：
+ *
+ *   hexbox.exe --label-overlay-test          # 覆盖窗自测（画 L/C/R 三个大字母）
+ *   hexbox.exe --label-overlay-test-ms 15000 # 自测停留时长
+ *   hexbox.exe --log-file D:\logs\x.log      # 指定日志文件
+ *   hexbox.exe --data-dir D:\data            # 指定数据目录
+ *   hexbox.exe --no-augment                  # 关掉局内海克斯链路（选人标签照常）
+ *   hexbox.exe --no-draw                     # 只识别不画（排查用）
+ *
+ * ⚠️ 必须在**日志接管与数据解析之前**调用：`--log-file` / `--data-dir`
+ * 影响的就是那两处的解析结果。
+ *
+ * 只认这张表里的开关（不吞 Electron/Chromium 自己的参数，如 `--no-sandbox`）；
+ * 写成 `--k=v` 或 `--k v` 都接受。**显式设过的环境变量优先**（便于临时覆盖）。
+ */
+function applyCliOverrides(argv: readonly string[] = process.argv.slice(1)): void {
+  const flags: Record<string, { readonly env: string; readonly value?: string }> = {
+    '--label-overlay-test': { env: 'HEXBOX_LABEL_OVERLAY_TEST', value: '1' },
+    '--label-overlay-test-ms': { env: 'HEXBOX_LABEL_OVERLAY_TEST_MS' },
+    '--log-file': { env: 'HEXBOX_LOG_FILE' },
+    '--data-dir': { env: 'HEXBOX_DATA_DIR' },
+    '--no-augment': { env: 'HEXBOX_OVERLAY_AUGMENT', value: '0' },
+    '--no-draw': { env: 'HEXBOX_AUGMENT_DRAW', value: '0' },
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const raw = argv[i] ?? '';
+    const eq = raw.indexOf('=');
+    const name = eq >= 0 ? raw.slice(0, eq) : raw;
+    const spec = flags[name];
+    if (!spec) continue;
+    // `--k=v` 取等号右边；`--k v` 取下一个参数（缺了就只当布尔开关用默认值）
+    const inline = eq >= 0 ? raw.slice(eq + 1) : undefined;
+    const next = argv[i + 1];
+    const value = spec.value ?? inline ?? (next && !next.startsWith('--') ? next : undefined);
+    if (value === undefined) continue;
+    if (inline === undefined && spec.value === undefined && next && !next.startsWith('--')) i++;
+    if (process.env[spec.env] === undefined) process.env[spec.env] = value;
+    console.log(`[hexbox] 命令行开关 ${name} → ${spec.env}`);
+  }
+}
+
+applyCliOverrides();
+
+/**
+ * 显式定名（**必须早于任何 `app.getPath()` 使用**）。
+ *
+ * 为什么：`app.getPath('userData')` = `appData + '/' + app.getName()`，而
+ * `getName()` 取自包名 —— 打包后是 **`@hexbox/overlay`**，于是 userData 变成
+ * `%APPDATA%\@hexbox/overlay`（名字里带 `/`，等于凭空多一层），
+ * Chromium 实测直接报
+ *   `Failed to grant sandbox access to cache directory …\@hexbox/overlay\Cache … 拒绝访问`
+ * 并放弃缓存（每次启动十几行 ERROR，用户会以为是程序坏了）。定名后是
+ * `%APPDATA%\hexbox\…`。
+ */
+app.setName('hexbox');
+
+/**
+ * 日志文件大小上限（打包后默认开启日志，必须有上限，否则一年下来几个 GB）。
+ * 超限就把旧内容整体挪到 `<file>.1`（只留一份历史，够定位"上一次崩在哪"）。
+ */
+const LOG_MAX_BYTES = 4 * 1024 * 1024;
+
+/** 超过上限就轮转一次（旧文件先删再改名：Windows 上 rename 不允许覆盖已存在的目标）。 */
+function rotateLogIfLarge(path: string): void {
+  try {
+    if (statSync(path).size < LOG_MAX_BYTES) return;
+    const prev = `${path}.1`;
+    rmSync(prev, { force: true });
+    renameSync(path, prev);
+  } catch {
+    // 文件不存在/被占用都无所谓：日志写入失败绝不影响功能
+  }
+}
 
 /**
  * 把 console 输出同时写入日志文件（UTF-8），供真机排查。
@@ -31,7 +110,8 @@ import { inspect } from 'node:util';
  * **解析失败**（中文字符串被拆坏）。
  *
  * 这里由 Node 直接以 UTF-8 写文件：编码完全可控，与 PowerShell 无关。
- * 未设置 `HEXBOX_LOG_FILE` 时不写文件（默认行为不变）。
+ * 开发时未设置 `HEXBOX_LOG_FILE` 就不写文件（默认行为不变）；**打包后默认写**
+ * `%LOCALAPPDATA%\hexbox\logs\overlay.log`（GUI 进程没有控制台，不落文件等于没有日志）。
  *
  * ⚠️ **相对路径的坑（真实浪费时间）**：`pnpm dev:overlay` 会把 cwd 设成
  * `apps/overlay`，所以 `HEXBOX_LOG_FILE=debug/overlay.log` 落在
@@ -68,15 +148,53 @@ function teeConsoleToFile(path: string): void {
   };
 }
 
-const logFile = process.env['HEXBOX_LOG_FILE'];
+/**
+ * 决定这次运行要不要落日志文件。
+ *
+ * · 显式 `HEXBOX_LOG_FILE`（或 `--log-file`）→ 用它，**开发与打包一致**；
+ * · 打包后没给 → **默认落** `%LOCALAPPDATA%\hexbox\logs\overlay.log`。
+ *   为什么默认要落：安装包出来的是 **GUI 子系统进程，没有控制台**，
+ *   `console.log` 谁都不看 —— 不落文件就等于"出问题什么都没有"，
+ *   而真机排查（LCU 读不到凭证 / 标签没出现）唯一能靠的就是这个文件。
+ * · 开发时没给 → 不落文件（保持原行为，别往 LOCALAPPDATA 里塞东西）。
+ */
+function resolveLogFile(): string | null {
+  const explicit = process.env['HEXBOX_LOG_FILE'];
+  if (explicit) return explicit;
+  return app.isPackaged ? packagedLogFile() : null;
+}
+
+const logFile = resolveLogFile();
 if (logFile) {
+  /**
+   * ⚠️ **必须先把目录建出来**（2026-10-06 打包实测踩到）：
+   * `appendFileSync` 在父目录不存在时抛 ENOENT，而下面的写入是
+   * `try { … } catch {}`（"日志失败绝不影响功能"）—— 于是表现是
+   * **日志文件一个都不产生、什么错也没有**：打包后默认日志目录
+   * `%LOCALAPPDATA%\hexbox\logs` 在第一次运行时本来就不存在。
+   * 开发时目录（`debug/`）通常已存在，所以这个坑只有打包版才会露出来。
+   */
+  try {
+    mkdirSync(dirname(logFile), { recursive: true });
+  } catch (e) {
+    // ⚠️ **不要在这里静默**：建不出目录就是"永远没有日志"，必须说出来
+    //（第一次写这个 catch 时它是空的，结果打包版一个日志文件都没有、
+    //  也没有任何提示 —— 见 docs/RELEASE-WINDOWS.md 的排查清单）。
+    console.error(
+      `[hexbox] ⚠ 无法创建日志目录 ${dirname(logFile)}：` +
+        `${e instanceof Error ? e.message : String(e)}（本次运行不落日志）`,
+    );
+  }
+  rotateLogIfLarge(logFile);
   teeConsoleToFile(logFile);
   // 启动第一行：**绝对路径**（用户按相对路径找不到文件是真实踩过的坑）+
   // 当前 cwd（`pnpm` 会把 cwd 设成 `apps/overlay`，相对路径就从那里算）。
   console.log(
     `[hexbox] 日志文件（绝对路径）：${resolve(logFile)}\n` +
       `         当前工作目录 cwd=${process.cwd()}` +
-      `（HEXBOX_LOG_FILE 写相对路径时**相对它**解析 —— 建议直接写绝对路径）`,
+      (process.env['HEXBOX_LOG_FILE']
+        ? '（HEXBOX_LOG_FILE 写相对路径时**相对它**解析 —— 建议直接写绝对路径）'
+        : '（打包后默认日志位置；用 --log-file 或 HEXBOX_LOG_FILE 可改）'),
   );
 }
 
@@ -139,6 +257,7 @@ import {
 } from './label-overlay.ts';
 import { isLabelOverlaySelfTest, runLabelOverlaySelfTest } from './label-selftest.ts';
 import { AugmentController, type AugmentLabelSink } from './augment-controller.ts';
+import { packagedDataDir, packagedLogFile } from './user-paths.ts';
 
 // ---------------------------------------------------------------------------
 // 悬浮窗状态
@@ -380,14 +499,29 @@ async function positionOverlay(): Promise<void> {
  * ⚠️ 也不要用固定的 `..\..\` 层级：打包后 `__dirname` 是 `dist/main`，
  * 而 `process.cwd()` 取决于启动方式（`electron .` 与直接跑 bundle 不同）。
  * 唯一稳妥的做法是**向上遍历、以 `data/dataset.json` 是否存在为准**。
+ *
+ * ⚠️ 打包后多两条候选（顺序即优先级）：
+ *   1. `HEXBOX_DATA_DIR` / `--data-dir`（显式指定，永远最高）；
+ *   2. `%LOCALAPPDATA%\hexbox\data`（**用户覆盖**：往里放一份 dataset.json
+ *      就整套用它 —— 数据更新不必重新打包/重装，见 docs/RELEASE-WINDOWS.md）；
+ *   3. 向上遍历（打包后会在 `…\resources\data\` 命中 extraResources 打进去的快照）。
  */
 function resolveDataDir(): string {
   const envDir = process.env['HEXBOX_DATA_DIR'];
   if (envDir) return envDir;
 
+  if (app.isPackaged) {
+    const userData = packagedDataDir();
+    if (existsSync(join(userData, 'dataset.json'))) {
+      console.log(`[hexbox] 使用用户目录里的数据覆盖：${userData}`);
+      return userData;
+    }
+  }
+
   const tried: string[] = [];
   const seen = new Set<string>();
-  const starts = [__dirname, app.getAppPath(), process.cwd()];
+  // `process.resourcesPath`：打包后 = `…\resources`，数据快照就在它下面的 `data/`
+  const starts = [__dirname, app.getAppPath(), process.resourcesPath, process.cwd()];
   for (const start of starts) {
     let dir = start;
     for (let depth = 0; depth < 6; depth++) {
@@ -405,9 +539,13 @@ function resolveDataDir(): string {
   console.warn(
     `[hexbox] ⚠ 未找到 data/dataset.json（已尝试 ${tried.length} 个候选目录，例如：\n` +
       `         ${tried.slice(0, 4).join('\n         ')}\n` +
-      '         请先运行 pnpm sync；或用 HEXBOX_DATA_DIR 显式指定数据目录）',
+      '         开发环境请先运行 pnpm sync；或用 HEXBOX_DATA_DIR / --data-dir 指定数据目录；\n' +
+      `         打包版可把数据快照放进 ${packagedDataDir()}` +
+      (app.isPackaged ? '（推荐）' : '（打包后生效）') +
+      '）',
   );
-  return join(process.cwd(), 'data');
+  // 打包后不要退回 cwd（双击运行时 cwd 可能是 System32 之类）：退回用户数据目录
+  return app.isPackaged ? packagedDataDir() : join(process.cwd(), 'data');
 }
 
 async function loadDataset(): Promise<void> {

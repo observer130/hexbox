@@ -1,0 +1,117 @@
+# Windows 桌面打包配置（electron-builder 26.x）
+#
+# 用法（在仓库根或 apps/overlay 下都行）：
+#   pnpm --filter @hexbox/overlay package:win     # NSIS 安装包 + 便携版
+#   pnpm --filter @hexbox/overlay package:dir     # 只出免安装目录（快速验证配置）
+#
+# 设计要点（**别随手改**，每一条都对应一个真实约束）：
+#
+# 1. `directories.app` 就是本包（apps/overlay）。**不新增 apps/desktop**：
+#    本包已经是 workspace 项目、已声明 main=dist/main/index.cjs，
+#    再开一个"打包壳"只会让 `pnpm -r` 多一个项目、多一份要同步的元数据。
+#
+# 2. `files` 只放 **esbuild 产物**。主进程/preload/渲染端所需的一切
+#    （含 @hexbox/* 四个 workspace 包）都已经被 esbuild 内联进 dist/*.cjs，
+#    所以打包**不需要** node_modules —— 也因此不可能把仓库源码、
+#    `data/`、`debug/`（真机截图，含个人信息）带进安装包。
+#
+# 3. 数据（`data/*.json`）走 `extraResources` → 落到 `resources/data/`。
+#    主进程的 resolveDataDir() 会向上遍历找到它（见 src/main/index.ts），
+#    所以**运行时不需要额外配置**。数据更新 = 在开发仓库重跑
+#    `pnpm sync` / `pnpm templates` 后重新打包；也可以让用户把新数据
+#    放进 `%LOCALAPPDATA%\hexbox\data\`（优先级更高，免重新打包）。
+#
+# 4. `requestedExecutionLevel` 见 docs/RELEASE-WINDOWS.md §权限：
+#    国服（WeGame）客户端的 `LeagueClient\lockfile` 实测为 **0 字节**，
+#    非管理员又读不到进程命令行 → **拿不到 token → 阶段恒为 None →
+#    选人标签与局内海克斯标签全都不会出现**。所以默认要求管理员。
+#    想改成"默认不提权"：把这一行换成 asInvoker（代价见文档）。
+
+appId: dev.hexbox.overlay
+productName: hexbox
+copyright: hexbox
+
+directories:
+  # 只出 dist 与 package.json（原因见上面第 2 条）
+  output: ../../release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - package.json
+  - '!**/*.map'
+  # ⚠️ 必须显式排除 node_modules：electron-builder 会**自动**把
+  #    package.json 里 dependencies 的**生产依赖**塞进包（本仓库是
+  #    workspace:* 链接）→ 实测会把 packages/*/src/**.test.ts、tsconfig.json
+  #    一起打进去（首次打包列表核对：130 个文件、asar 1.74MB）。
+  #    而本包**不需要**任何 node_modules：主进程/preload/渲染端所需的一切
+  #    都已经被 esbuild 内联进 dist/*.cjs（这也是"不可能把源码带进安装包"的原因）。
+  - '!node_modules/**/*'
+  # ⚠️ 诊断/录制入口**不进安装包**（决策见 docs/RELEASE-WINDOWS.md §发布哪些入口）：
+  #    · `--label-overlay-test` 已经把"覆盖窗自测"做进了主入口，
+  #      玩家日常排查显示问题不再需要一个 debug 版；
+  #    · `debug-augment.cjs`（真机录制）依赖 launcher 的 Ctrl+C 哨兵
+  #      （run-electron.mjs，不发进安装包），且产物目录在打包后是 cwd 下的
+  #      `debug/augment`（要发布它得先改到 %LOCALAPPDATA%）；
+  #    · `debug-capture.cjs` / `phase-probe.cjs` 是开发期工具。
+  #    想出一个带的版本：删掉下面三行、把 output 换成别的目录即可。
+  - '!dist/debug-*.cjs'
+  - '!dist/phase-probe.cjs'
+
+# 运行时数据快照（gitignore 的 pnpm sync / pnpm templates 产物）
+# 只带**运行时真正会读**的 5 个文件；name-fingerprints.json 是构建期中间产物
+# （它的内容已经被 pnpm templates 编进 templates.json），不进包。
+extraResources:
+  - from: ../../data
+    to: data
+    filter:
+      - dataset.json
+      - rankings.json
+      - builds.json
+      - templates.json
+      - augment-names.json
+
+asar: true
+# 依赖已经被 esbuild 内联；不重编、不从源码构建依赖（本机也没装 VS 工具链）
+npmRebuild: false
+nodeGypRebuild: false
+buildDependenciesFromSource: false
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+  # 见上面第 4 条
+  requestedExecutionLevel: requireAdministrator
+  # ⚠️ 本机**没有代码签名证书** → 不设 publisherName（v26 里它挪到了
+  #    win.signtoolOptions.publisherName，且只在签名时才有意义）。
+  #    后果见 docs/RELEASE-WINDOWS.md §代码签名：安装器与 exe 都显示
+  #    "未知发布者"，首次运行会有 SmartScreen 警告。
+  icon: build/icon.png
+
+nsis:
+  # 非一键安装：允许用户选安装目录（一键装会把 UAC 与目录选择都吞掉）
+  oneClick: false
+  # 每用户安装：安装本身**不需要**管理员（程序运行时才提权）
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: hexbox
+  # 中文安装界面（2052 = 简体中文）
+  language: '2052'
+  artifactName: hexbox-setup-${version}-${arch}.${ext}
+  # 卸载时保留 %LOCALAPPDATA%\hexbox（日志与用户放进去的数据），
+  # 想彻底清干净就手动删这个目录
+  deleteAppDataOnUninstall: false
+
+portable:
+  artifactName: hexbox-portable-${version}-${arch}.${ext}
+  # ⚠️ 便携版必须自己先提权再启动内层 exe：内层程序的清单写了
+  #    requireAdministrator，而未提权的进程 CreateProcess 一个要求提权的
+  #    exe 会直接失败（ERROR_ELEVATION_REQUIRED / 740）。
+  requestExecutionLevel: admin

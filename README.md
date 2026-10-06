@@ -121,6 +121,43 @@ node --experimental-strip-types scripts/diag-augment-frames.mts <帧.png...>
 `pnpm --filter @hexbox/lcu probe:live`（对局中读游戏自带 Live Client Data API）、
 `$env:HEXBOX_LOG_FILE='debug/overlay.log'; pnpm dev:overlay`（日志以 UTF-8 写文件）。
 
+## 安装与发布
+
+面向"给别人一个能装的 `.exe`"（**只是打包，不改任何识别/标签链路**）。
+完整事实、失败点与取舍见 [docs/RELEASE-WINDOWS.md](docs/RELEASE-WINDOWS.md)。
+
+```powershell
+# 仓库根执行。第一次要下载打包工具链；国内网络建议先设镜像（否则可能 600s 超时）
+$env:ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
+$env:ELECTRON_BUILDER_BINARIES_MIRROR = 'https://npmmirror.com/mirrors/electron-builder-binaries/'
+pnpm --filter @hexbox/overlay package:win      # → release\hexbox-setup-0.1.0-x64.exe（NSIS 安装包）
+pnpm --filter @hexbox/overlay package:dir      # 只出免安装目录，最快
+```
+
+- **产物**：`release\hexbox-setup-0.1.0-x64.exe`（NSIS，每用户安装）+
+  `release\hexbox-portable-0.1.0-x64.exe`（便携版），各约 **77 MB**。
+- **数据**：`data/` 下 5 个运行时 json（约 6.3 MB）作为快照打进去，
+  运行时由 `resolveDataDir()` 自动命中 `resources\data`。
+  **数据更新 = 重跑 `pnpm sync` / `pnpm templates` 后重新打包**；
+  不想重装的话，把新的 json 放进 `%LOCALAPPDATA%\hexbox\data\` 即可覆盖。
+- **权限**：安装包**不需要**管理员；程序本身要求管理员（`requireAdministrator`）——
+  因为国服 WeGame 的 `LeagueClient\lockfile` 是 0 字节，非管理员拿不到 LCU 凭证，
+  选人/局内标签就全都不会出现（每次启动会弹一次 UAC）。
+- **未做代码签名**：首次运行会有 SmartScreen「未知发布者」提示，
+  点「更多信息」→「仍要运行」即可；企业环境（AppLocker 等）可能直接拦截。
+- **日志**（GUI 进程没有控制台，排查只能看这里）：
+  `%LOCALAPPDATA%\hexbox\logs\overlay.log`（超过 4 MB 自动轮转成 `.log.1`）。
+- **打包版自带的诊断开关**（等价于开发期的环境变量）：
+
+  ```powershell
+  & "$env:LOCALAPPDATA\Programs\hexbox\hexbox.exe" --label-overlay-test          # 覆盖窗自测（L/C/R）
+  & …\hexbox.exe --log-file D:\logs\hexbox.log                                  # 指定日志文件
+  & …\hexbox.exe --data-dir D:\hexbox-data                                      # 指定数据目录
+  & …\hexbox.exe --no-augment                                                   # 只关局内链路
+  ```
+
+- **数据站 `apps/web` 不打包**：它是独立部署的静态站点，与覆盖层没有运行时耦合。
+
 ## 数据来源与边界
 
 | 用途 | 来源 |

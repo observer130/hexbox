@@ -477,6 +477,21 @@ data/builds.json   ─┘
 node build.mjs     # 产物: dist/main/index.cjs, dist/preload/index.cjs, dist/renderer/*
 ```
 
+### 打包成 Windows 安装包
+
+```powershell
+# 仓库根执行；配置在 apps/overlay/electron-builder.yml
+pnpm --filter @hexbox/overlay package:win      # → release/hexbox-setup-*.exe + 便携版
+pnpm --filter @hexbox/overlay package:dir      # 只出 release/win-unpacked（最快）
+```
+
+只发**常驻覆盖层**（`dist/debug-*.cjs` 等诊断入口不进安装包）；
+"覆盖窗自测"改为主入口的命令行开关 `--label-overlay-test`。
+数据（`data/*.json`）作为快照打进 `resources/data`，日志落在
+`%LOCALAPPDATA%\hexbox\logs\overlay.log`。
+完整事实（UAC 取舍、代码签名、数据更新、网络镜像、失败点）见
+[docs/RELEASE-WINDOWS.md](../../docs/RELEASE-WINDOWS.md)。
+
 为什么用 esbuild 而非纯 tsc：
 主进程/preload 需要打包 workspace 依赖（`@hexbox/lcu` 等），
 Electron 渲染端也需单文件 IIFE。

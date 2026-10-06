@@ -11,8 +11,11 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "debug:capture": "node build.mjs && node run-electron.mjs dist/debug-capture.cjs",
     "debug:augment": "node build.mjs && node run-electron.mjs dist/debug-augment.cjs",
-    "debug:overlay-test": "node build.mjs && node run-electron.mjs dist/debug-overlay-test.cjs"
+    "debug:overlay-test": "node build.mjs && node run-electron.mjs dist/debug-overlay-test.cjs",
+    "package:dir": "node build.mjs && electron-builder --dir",
+    "package:win": "node build.mjs && electron-builder --win"
   },
+  "author": "hexbox",
   "dependencies": {
     "@hexbox/core": "workspace:*",
     "@hexbox/data-store": "workspace:*",
@@ -21,6 +24,7 @@
   },
   "devDependencies": {
     "electron": "^33.2.0",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.25.12",
     "typescript": "^5.7.2"
   }

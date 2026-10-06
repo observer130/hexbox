@@ -14,3 +14,7 @@ debug/
 .env.local
 .DS_Store
 *.log
+
+# electron-builder 的产物（installer / portable exe / win-unpacked）
+# 配置在 apps/overlay/electron-builder.yml，命令见 docs/RELEASE-WINDOWS.md
+release/
