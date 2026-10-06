@@ -206,7 +206,15 @@ export const LcuEndpoints = {
 /**
  * 从 gameflow session 里尽力挖出「我的英雄」championId。
  *
- * 为什么需要它：选人会话（`/lol-champ-select/v1/session`）在进入对局后
+ * ⚠️ **不要再用它决定"我这局用哪个英雄"**（2026-10-05 真机事故）：
+ * 它按"第一个命中的 `championId`"返回，而 gameflow 的队伍列表里坐着 **10 个人**
+ * —— 真机上它给出的是**队友**（玩无极剑圣解析出 154  Zac、玩酒桶解析出 43 Karma），
+ * 于是整局显示的都是别人英雄的强度表。请改用 `champion-identity.ts` 的
+ * `resolveChampionIdentity()` / `pickMyChampionIdFromGameflow(session, me)`：
+ * 后者**必须**收到"我自己的身份"（puuid/summonerId/cellId），没有身份直接放弃。
+ * 本函数仅保留给诊断脚本（打印会话形状）使用。
+ *
+ * 为什么需要它（历史）：选人会话（`/lol-champ-select/v1/session`）在进入对局后
  * 就消失了。若悬浮窗是**中途打开**的（没经历选人），局内就拿不到英雄。
  *
  * 上游把 championId 放在哪个字段随版本变化，因此做一次**有界深度搜索**，

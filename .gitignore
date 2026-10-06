@@ -6,6 +6,7 @@ dist/
 data/
 
 # debug-capture 调试产物（真机截屏，含个人信息，不入库）
+# 也覆盖 debug/augment/（局内海克斯门控录制的时间线 CSV 与帧图）
 debug/
 
 # 本地环境

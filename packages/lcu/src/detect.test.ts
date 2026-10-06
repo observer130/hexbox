@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtempSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -13,9 +14,39 @@ import {
   findLcuPort,
   parseExplicitCredentials,
   resolveExplicitCredentials,
+  probePort,
   LCU_CREDENTIALS_ENV,
   LCU_CREDENTIALS_FILE_ENV,
 } from './detect.ts';
+
+/* ------------------------------------------------------------------ */
+/* 凭证探活（2026-10-05 事故：装备推荐"完全失效"）                        */
+/* ------------------------------------------------------------------ */
+
+test('probePort：端口没人监听 → false（过期缓存就是被这样判掉的）', async () => {
+  const srv = createServer();
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+  const port = (srv.address() as { port: number }).port;
+  await new Promise<void>((r) => srv.close(() => r()));
+  assert.equal(await probePort(port, 600), false);
+});
+
+test('probePort：端口有人在听 → true', async () => {
+  const srv = createServer();
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+  const port = (srv.address() as { port: number }).port;
+  try {
+    assert.equal(await probePort(port, 1500), true);
+  } finally {
+    await new Promise<void>((r) => srv.close(() => r()));
+  }
+});
+
+test('probePort：非法端口/连不上 → false，不抛异常', async () => {
+  assert.equal(await probePort(0), false);
+  assert.equal(await probePort(-1), false);
+  assert.equal(await probePort(Number.NaN), false);
+});
 import { isBrawlSession, pickChampionIdFromGameflow, type GameflowSession } from './client.ts';
 
 test('parseCmdline 能解析标准 LCU 参数', () => {

@@ -67,6 +67,12 @@ https://mlol.qt.qq.com/go/battle_info/odp_proxy/fuwen_hero_rank?championid=<英�
 | `skill_json` | 技能加点 | JSON，`sk_s`/`sk_w` 是**原始计数** |
 | `dtstatdate` | 统计日期 | `20260925` |
 
+> ⚠️ **`augment_json_irank` 是「以该英雄为准」的池，不是图鉴全量**（2026-10-05 实测）：
+> 每个英雄 95~162 条（中位数 126），约图鉴 248 的 43%~57%。这不是抓漏/截断 ——
+> 原始块数 == 解析条数、`255` 组 == 三个品质组的并集、173 个英雄的并集 == 全局榜 211 条。
+> 同接口的 `augment_json`（每品质前 10、5 列无强度）更少，**刻意不采集**。
+> 覆盖率实测与纪律见 [AUGMENT-PANEL.md](AUGMENT-PANEL.md) §十二。
+
 ### 解析时必须注意的三点
 
 1. **`augment_json_irank` 带稀有度分组**：组头形如 `255:1|…`，
@@ -96,7 +102,7 @@ https://mlol.qt.qq.com/go/battle_info/odp_proxy/fuwen_hero_rank?championid=<英�
 | 避坑海克斯 | 不做 | 同上 |
 | 出装 | **写入配装方案**，不放悬浮窗 | 见 [build-slots.md](build-slots.md) |
 | 鞋栏 | **不生成** | 一行只有一件装备，游戏内既不好看也无信息量 |
-| 预抓范围 | 245 英雄全抓 | 实测 173 个有官方统计，其余无数据 |
+| 预抓范围 | 245 条英雄条目全抓（**173 真实英雄 + 72 条同一英雄的变体条目**）| 实测 173 个英雄有官方统计；72 条变体条目没有独立统计 |
 
 ### 关于 Tier 的查证记录
 

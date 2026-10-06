@@ -1,0 +1,216 @@
+/**
+ * 海克斯触发状态机测试
+ *
+ * 这些用例逐条对应真机上会发生的场景（尤其**连选**与**自愈**），
+ * 因为"什么时候开截屏"一旦错，整局就白录了。
+ *
+ * 注意两处约定：
+ *   · 需要"干净的四次待选"时传 `midGameStartSec: Number.MAX_SAFE_INTEGER`
+ *     关掉"中途启动"初始化（真机默认会剔掉"开局"那次）；
+ *   · `notePanelClosed` 即使当时没在开截屏也会消耗一次（门控报过就算弹过）。
+ */
+
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+
+import { createAugmentTrigger, type AugmentTriggerSample } from './augment-trigger.ts';
+
+/** 造采样：默认活着、等级 3、对局 300 秒。 */
+function sample(over: Partial<AugmentTriggerSample> = {}): AugmentTriggerSample {
+  return { gameTime: 300, level: 3, isDead: false, respawnTimer: 0, ...over };
+}
+
+/** 关掉"中途启动"初始化 → 保留完整的 [0,7,11,15]。 */
+const NO_MIDGAME = { midGameStartSec: Number.MAX_SAFE_INTEGER } as const;
+
+/** 走一个"死亡 → 选完"的完整回合。 */
+function deathAndPick(
+  t: ReturnType<typeof createAugmentTrigger>,
+  nowMs: number,
+  level: number,
+): { armed: boolean; afterClose: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  const d1 = t.onSample(sample({ level, isDead: true, respawnTimer: 8, gameTime: nowMs / 1000 }), nowMs);
+  reasons.push(d1.reason);
+  const armed = d1.capture;
+  t.notePanelOpen(nowMs + 500);
+  const d2 = t.notePanelClosed(nowMs + 3000);
+  reasons.push(d2.reason);
+  return { armed, afterClose: d2.capture, reasons };
+}
+
+/** 开局：弹一次并选掉（真机路径）。 */
+function startOffer(t: ReturnType<typeof createAugmentTrigger>, atMs = 1000): void {
+  const d = t.onSample(sample({ gameTime: 5, level: 1 }), atMs);
+  assert.equal(d.capture, true, '开局应开截屏');
+  t.notePanelOpen(atMs + 300);
+  t.notePanelClosed(atMs + 1500);
+}
+
+/* ------------------------------------------------------------------ */
+/* 常态与开局                                                          */
+/* ------------------------------------------------------------------ */
+
+test('常态：不死亡就绝不开截屏（等级涨到 18 也不开）', () => {
+  const t = createAugmentTrigger(NO_MIDGAME);
+  for (const level of [1, 3, 5, 7, 9, 11, 14, 15, 18]) {
+    const d = t.onSample(sample({ level, gameTime: 60 + level * 30 }), level * 30000);
+    assert.equal(d.capture, false, `等级 ${level} 未死亡不应开截屏`);
+  }
+  assert.deepEqual(t.pending, [0, 7, 11, 15], '未死亡不消耗任何待选');
+});
+
+test('开局：对局早期直接开截屏，选完关掉且消耗"开局"那一次', () => {
+  const t = createAugmentTrigger(NO_MIDGAME);
+  startOffer(t);
+  const closed = t.notePanelClosed(4000); // 再报一次关（幂等：不该重复消耗）
+  assert.equal(closed.capture, false);
+  assert.deepEqual(t.pending, [7, 11, 15]);
+});
+
+test('中途启动：对局已进行到 300 秒 → 开局那次按已选处理（避免误判连选）', () => {
+  const t = createAugmentTrigger();
+  const d = t.onSample(sample({ gameTime: 300, level: 4 }), 1000);
+  assert.equal(d.capture, false);
+  assert.deepEqual(t.pending, [7, 11, 15], '开局那次应被剔除');
+});
+
+test('中途启动 + 首帧就是死亡：死亡事件不能被初始化吞掉（回归）', () => {
+  const t = createAugmentTrigger();
+  const d = t.onSample(sample({ gameTime: 300, level: 7, isDead: true, respawnTimer: 9 }), 1000);
+  assert.equal(d.capture, true, '首帧死亡必须触发（曾因提前 return 被吞掉）');
+  assert.deepEqual(t.pending, [7, 11, 15]);
+});
+
+/* ------------------------------------------------------------------ */
+/* 死亡触发                                                            */
+/* ------------------------------------------------------------------ */
+
+test('死亡 + 等级达标 → 开截屏；选完 → 关', () => {
+  const t = createAugmentTrigger(NO_MIDGAME);
+  startOffer(t);
+  const r = deathAndPick(t, 200000, 7);
+  assert.equal(r.armed, true, '死亡且 7 级未选 → 应开');
+  assert.equal(r.afterClose, false, '选完应关');
+  assert.deepEqual(t.pending, [11, 15]);
+});
+
+test('死亡但等级不够 → 不开（面板要等级达标才出现）', () => {
+  const t = createAugmentTrigger(NO_MIDGAME);
+  startOffer(t);
+  const d = t.onSample(sample({ level: 5, isDead: true, respawnTimer: 6 }), 10000);
+  assert.equal(d.capture, false);
+  assert.match(d.reason, /无待选/);
+});
+
+test('死亡但该次已选过 → 不开', () => {
+  const t = createAugmentTrigger(NO_MIDGAME);
+  startOffer(t);
+  deathAndPick(t, 10000, 7); // 7 级选掉
+  const d = t.onSample(sample({ level: 7, isDead: true, respawnTimer: 5 }), 40000);
+  assert.equal(d.capture, false, '7 级已选，再死也不开（11 级未到）');
+});
+
+/* ------------------------------------------------------------------ */
+/* 连选（用户明确要求考虑的场景）                                        */
+/* ------------------------------------------------------------------ */
+
+test('连选：开局没选、11 级才死亡 → 一次死亡连弹三次，中途不能关', () => {
+  const t = createAugmentTrigger(NO_MIDGAME);
+  // 开局开了截屏但玩家没选（收不到关边沿）→ 窗口超时自动关，pending 全保留
+  const d1 = t.onSample(sample({ gameTime: 5, level: 1 }), 5000);
+  assert.equal(d1.capture, true, '开局就应开');
+  const d2 = t.onSample(sample({ gameTime: 200, level: 6 }), 100000);
+  assert.equal(d2.capture, false, '超时应自动关');
+  assert.deepEqual(t.pending, [0, 7, 11, 15], '未见面板不得消耗');
+
+  // 11 级第一次死亡：开局 + 7 + 11 都还没选 → 连选
+  const d3 = t.onSample(sample({ gameTime: 600, level: 11, isDead: true, respawnTimer: 12 }), 600000);
+  assert.equal(d3.capture, true);
+  assert.match(d3.reason, /\[0,7,11\]/);
+
+  t.notePanelOpen(600500);
+  const afterFirst = t.notePanelClosed(603000);
+  assert.equal(afterFirst.capture, true, '还有 7/11 未选 → 必须保持开截屏等连选');
+  assert.deepEqual(afterFirst.pending, [7, 11, 15]);
+
+  t.notePanelOpen(604000);
+  const afterSecond = t.notePanelClosed(606000);
+  assert.equal(afterSecond.capture, true, '还有 11 未选 → 继续等');
+  assert.deepEqual(afterSecond.pending, [11, 15]);
+
+  t.notePanelOpen(607000);
+  const afterThird = t.notePanelClosed(609000);
+  assert.equal(afterThird.capture, false, '本轮够格的都选完了 → 关');
+  assert.deepEqual(afterThird.pending, [15]);
+});
+
+test('连选等待不会无限开着：下一次弹窗迟迟不来 → 窗口到点自动关', () => {
+  const t = createAugmentTrigger({ chainGraceMs: 5000, armWindowMs: 5000 });
+  // 对局中途启动（0 被剔除）→ 死亡时待选 [7,11,15]
+  t.onSample(sample({ gameTime: 300, level: 11, isDead: true }), 1000);
+  t.notePanelOpen(1500);
+  const afterFirst = t.notePanelClosed(2000);
+  assert.equal(afterFirst.capture, true, '还有未选的 → 先保持');
+  assert.deepEqual(afterFirst.pending, [11, 15]);
+  // 之后一直没有面板
+  const later = t.onSample(sample({ gameTime: 360, level: 11 }), 20000);
+  assert.equal(later.capture, false, '等不到就该关，不能一直开着');
+  assert.deepEqual(t.pending, [11, 15], '未选状态保留到下次死亡');
+});
+
+/* ------------------------------------------------------------------ */
+/* 自愈                                                                */
+/* ------------------------------------------------------------------ */
+
+test('自愈：门控漏检面板（收到开边沿但没有关边沿）→ 到点自动关，pending 不丢', () => {
+  const t = createAugmentTrigger({ armWindowMs: 10000 });
+  t.onSample(sample({ gameTime: 300, level: 7, isDead: true }), 1000);
+  assert.equal(t.capture, true);
+  // 漏检：一直没收到关边沿，采样继续
+  const d = t.onSample(sample({ gameTime: 330, level: 7 }), 30000);
+  assert.equal(d.capture, false, '超时关闭（自愈）');
+  assert.deepEqual(t.pending, [7, 11, 15], '漏检不得消耗待选（下次死亡再试）');
+});
+
+test('自愈：面板开着时绝不超时（玩家思考中）', () => {
+  const t = createAugmentTrigger({ armWindowMs: 5000 });
+  t.onSample(sample({ gameTime: 300, level: 7, isDead: true }), 1000);
+  t.notePanelOpen(1200);
+  const d = t.onSample(sample({ gameTime: 340, level: 7 }), 60000);
+  assert.equal(d.capture, true, '面板还开着就不能因为超时关掉');
+});
+
+test('决策变化只报一次（changed 用于避免刷 IPC）', () => {
+  const t = createAugmentTrigger(NO_MIDGAME);
+  const a = t.onSample(sample({ gameTime: 5, level: 1 }), 1000);
+  assert.equal(a.changed, true);
+  const b = t.onSample(sample({ gameTime: 6, level: 1 }), 2000);
+  assert.equal(b.changed, false, '状态没变就不该报变化');
+  t.notePanelOpen(2200);
+  const c = t.notePanelClosed(4000);
+  assert.equal(c.changed, true, '关截屏是变化');
+});
+
+/* ------------------------------------------------------------------ */
+/* 可配置                                                              */
+/* ------------------------------------------------------------------ */
+
+test('等级表可配置（默认 0/7/11/15，实测值）', () => {
+  const t = createAugmentTrigger({ offerLevels: [0, 6], midGameStartSec: Number.MAX_SAFE_INTEGER });
+  t.onSample(sample({ gameTime: 5, level: 1 }), 1000);
+  t.notePanelOpen(1500);
+  t.notePanelClosed(2500); // 开局
+  const d = t.onSample(sample({ level: 6, isDead: true }), 10000);
+  assert.equal(d.capture, true, '6 级也应触发（可配置）');
+  assert.deepEqual(t.pending, [6]);
+});
+
+test('reset：回到初始（下次对局复用同一个实例）', () => {
+  const t = createAugmentTrigger(NO_MIDGAME);
+  startOffer(t);
+  assert.deepEqual(t.pending, [7, 11, 15]);
+  t.reset();
+  assert.deepEqual(t.pending, [0, 7, 11, 15]);
+  assert.equal(t.capture, false);
+});

@@ -9,6 +9,11 @@
 >
 > 合规：截屏只读取屏幕像素，**不注入、不读内存、不解析封包**。
 > 见 [AGENTS.md](../AGENTS.md) —— 这是明确许可的做法。
+>
+> ➡️ **局内（对局中）的海克斯面板识别是另一条链路**，见
+> [AUGMENT-PANEL.md](AUGMENT-PANEL.md)：那一侧不预测刷新时间，
+> 只识别"面板在/不在"的开/关边沿，门控纯函数在
+> `packages/vision/src/augment-panel.ts`。
 
 ## 一、总体结构
 
@@ -72,7 +77,8 @@
 |---|---|---|
 | `src/debug-capture.ts` | 调试 CLI：截屏 → 定位 → 识别 → 标注图 | ✅ 已实现 |
 | `src/main/vision-loop.ts` | 定时截屏 → 调 vision → 推送结果 | ✅ 已实现 |
-| `src/renderer/overlay-canvas.ts` | 按坐标把标签画到对应位置（DPR 感知） | ✅ 已实现 |
+| `src/main/label-overlay.ts` | 全屏透明标签画布（创建/定位/推送）——选人标签与局内海克斯标签**共用** | ✅ 已实现 |
+| `src/renderer/overlay-canvas.ts` | 按坐标把标签画到对应位置（DPR 感知；可选 `color` = 档位配色） | ✅ 已实现 |
 | `src/debug-overlay-test.ts` | 覆盖层渲染自测（不需要游戏/选人）| ✅ 已实现 |
 
 > **为什么放 core/vision 而不是主进程**：主进程需要 Electron + 真实桌面，
@@ -93,6 +99,8 @@ pnpm templates   # = data-cli「templates」命令
   （⚠️ `dataset.json` 里的 `iconPath` 是 LCU 内部路径 `/lol-game-data/assets/...`，
   该前缀在 CDragon 上**不存在**——不能直接拼接，按英雄 ID 构造 URL）
 - 解码：`vision/png.ts`（零依赖，node:zlib inflate），245/245 全部成功
+  （245 = 图鉴的**全部条目**：173 真实英雄 + 72 条同一英雄的变体条目 —— 见
+  `packages/core/src/champion-set.ts`；这里说的是"图标解码成功数"，不是英雄数）
 - 产物：`data/templates.json`（gzip+base64 单字符串，409 KB），运行时只读、离线可用
 - 落盘：`data-store` 的 `writeTemplates/readTemplates`（原子写，与数据文件同目录）
 
@@ -143,7 +151,7 @@ pnpm templates   # = data-cli「templates」命令
 卡片区下部有印刷体英雄名（白字,Microsoft YaHei,与游戏内字体同源）。
 `vision/ocr.ts`：名字带二值化 → 裁剪文字包围盒 → 统一网格拉伸 →
 与名字指纹库（`pnpm templates` 构建,`scripts/render-name-fingerprints.ps1`
-渲染 245 个名字）做 Jaccard 匹配。
+渲染 **245 条**名字 —— 173 真实英雄 + 72 条同一英雄的变体条目）做 Jaccard 匹配。
 离线回放真机截图：2/2 正确（0.608/0.552,错误名 < 0.45）。
 
 **阶段 2 —— 确认态顶栏逐格匹配（2026-09-28 重做）**：

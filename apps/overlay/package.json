@@ -10,6 +10,7 @@
     "build": "node build.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "debug:capture": "node build.mjs && node run-electron.mjs dist/debug-capture.cjs",
+    "debug:augment": "node build.mjs && node run-electron.mjs dist/debug-augment.cjs",
     "debug:overlay-test": "node build.mjs && node run-electron.mjs dist/debug-overlay-test.cjs"
   },
   "dependencies": {

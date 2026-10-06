@@ -54,6 +54,14 @@ export interface VisionOverlayMsg {
     readonly sub: string;
     readonly hasData: boolean;
     readonly championId: number;
+    /**
+     * 强调色（描边 + 文字）。
+     *
+     * 选人标签不用它（按 `hasData` 取绿/灰）；局内海克斯强度标签用它画
+     * **档位配色**（S/A/B/C，由 `vision/augmentTierColor()` 给出），
+     * 与选人标签共用同一块画布（见 main/label-overlay.ts）。
+     */
+    readonly color?: string;
   }>;
   /** 诊断信息（可选,调试面板用）。 */
   readonly diag?: string;

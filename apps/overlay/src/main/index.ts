@@ -18,7 +18,7 @@
 
 import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import { appendFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { inspect } from 'node:util';
 
 /**
@@ -32,6 +32,12 @@ import { inspect } from 'node:util';
  *
  * 这里由 Node 直接以 UTF-8 写文件：编码完全可控，与 PowerShell 无关。
  * 未设置 `HEXBOX_LOG_FILE` 时不写文件（默认行为不变）。
+ *
+ * ⚠️ **相对路径的坑（真实浪费时间）**：`pnpm dev:overlay` 会把 cwd 设成
+ * `apps/overlay`，所以 `HEXBOX_LOG_FILE=debug/overlay.log` 落在
+ * `apps/overlay/debug/overlay.log`，而用户会去仓库根的 `debug/` 找 → "日志文件呢？"。
+ * 因此启动第一行就把**解析后的绝对路径**与 **cwd** 都打出来（见下面的调用点），
+ * 文档里也一律建议写绝对路径。
  */
 function teeConsoleToFile(path: string): void {
   const orig = {
@@ -63,14 +69,28 @@ function teeConsoleToFile(path: string): void {
 }
 
 const logFile = process.env['HEXBOX_LOG_FILE'];
-if (logFile) teeConsoleToFile(logFile);
+if (logFile) {
+  teeConsoleToFile(logFile);
+  // 启动第一行：**绝对路径**（用户按相对路径找不到文件是真实踩过的坑）+
+  // 当前 cwd（`pnpm` 会把 cwd 设成 `apps/overlay`，相对路径就从那里算）。
+  console.log(
+    `[hexbox] 日志文件（绝对路径）：${resolve(logFile)}\n` +
+      `         当前工作目录 cwd=${process.cwd()}` +
+      `（HEXBOX_LOG_FILE 写相对路径时**相对它**解析 —— 建议直接写绝对路径）`,
+  );
+}
 
 import {
   LcuClient,
   LcuHttpError,
+  createLiveDataClient,
   detectCredentialsDetailed,
+  hasSelfIdentity,
   isBrawlSession,
-  pickChampionIdFromGameflow,
+  readSelfIdentity,
+  resolveMyChampionIdentity,
+  type LiveDataClient,
+  type SelfIdentity,
 } from '@hexbox/lcu';
 import { readBuilds, readDataset, readRankings, readTemplates } from '@hexbox/data-store';
 import {
@@ -83,6 +103,17 @@ import {
   findGameWindowRectCached,
   prepareTemplates,
   sameVisibleState,
+  augmentChainTransition,
+  augmentStartIsStale,
+  createStageGate,
+  labelProducerFor,
+  overlayAugmentEnabled,
+  stageSampleFromSession,
+  AUGMENT_CLEAR_REASONS,
+  AUGMENT_CHAIN_PHASES,
+  augmentClearLogLine,
+  type AugmentChainState,
+  type LabelProducer,
   type NameFingerprint,
   type PreparedTemplate,
   type VisibleState,
@@ -100,6 +131,14 @@ import {
   type RankingSnapshot,
 } from '@hexbox/core';
 import { VisionLoop, type VisionOverlayMsg } from './vision-loop.ts';
+import {
+  attachLabelOverlayDiagnostics,
+  clearLabelOverlay,
+  createLabelOverlay,
+  pushLabelOverlay,
+} from './label-overlay.ts';
+import { isLabelOverlaySelfTest, runLabelOverlaySelfTest } from './label-selftest.ts';
+import { AugmentController, type AugmentLabelSink } from './augment-controller.ts';
 
 // ---------------------------------------------------------------------------
 // 悬浮窗状态
@@ -126,6 +165,15 @@ let credsDetail = '';
 /** 本次选人中「我」选的英雄（0 = 未知）。 */
 let myChampionId = 0;
 /**
+ * 我自己的身份（puuid / summonerId / 显示名）—— 用于在 gameflow 里定位"我"。
+ *
+ * 读一次就够（一局内不变）；读不到就是空对象：此时 gameflow 通道**直接放弃**
+ * （宁可不显示，也不能像旧实现那样"取队伍列表里第一个 championId"）。
+ */
+let selfIdentity: SelfIdentity | null = null;
+/** 2999 局内客户端（懒建；不在对局里时请求失败返回 null 即可）。 */
+let liveData: LiveDataClient | null = null;
+/**
  * 选人子阶段（供视觉循环决定画卡片还是画顶栏）。
  *
  * `picking` = 卡片已发出、还没选；`locked` = 已选定（未选的英雄已进顶栏）；
@@ -138,6 +186,93 @@ let visionLoop: VisionLoop | null = null;
 let nameLibrary: NameFingerprint[] = [];
 /** 头像模板（确认阶段识别用）。 */
 let portraits: PreparedTemplate[] = [];
+/**
+ * **局内海克斯链路**（S5.4d）：与录制工具 `debug:augment` **同一份控制器**
+ * （`main/augment-controller.ts`）—— 触发状态机、采样节奏、识别、强度表、
+ * 标签几何与行基准锁、单卡刷新编排都在那边，这里只做阶段启停与画布注入。
+ */
+let augment: AugmentController | null = null;
+/**
+ * 局内链路的启动状态（纯函数 `augmentChainTransition()` 的输入与输出）。
+ *
+ * `failed` 只表示"这一局起不来了"（屏幕流没就绪）—— 不再重试，
+ * 免得每 2 秒轮询都去建一次流；离开对局会回到 `idle`，下一局重新试。
+ */
+let augmentState: AugmentChainState = 'idle';
+/**
+ * 每次"起链路"的**会话令牌**。
+ *
+ * ⚠️ `start()` 是异步的（探窗口 ~1.2s + 建流 + 等就绪最多 8s）。若期间阶段已经
+ * 变走（比如对局结束），回调不能把它标成 running —— 用**令牌**作废在途结果，
+ * 而不是靠猜时序：
+ *   · `augmentChainTransition()` 的 `generation` 就是当前会话号（一次启动一个号，
+ *     单调递增、绝不重号）；`token` 是本轮动作要带上的号（`stop` 带的是**要作废
+ *     的那一代**）；
+ *   · 回调里只允许用 `augmentStartIsStale(token, augmentSession)` 判断"我这一代
+ *     还在不在"，过期就**什么都不做** —— 绝不可以"看到新世代就 `stop()`"
+ *     （那会把期间新起的那一代连流带标签一起收掉，正是"标签闪一下就没了"）。
+ *     本代自己的屏幕流由控制器在每个 await 检查点按令牌自行收干净，
+ *     所以"什么都不做"不会留下没人管的流。
+ */
+let augmentSession = 0;
+/**
+ * 上一次已应用的**画布生产者**（`null` = 还没判定过）。
+ *
+ * 判定本身是纯函数（`@hexbox/vision` 的 `labelProducerFor()`，有单测）：
+ * 选人阶段归选人视觉循环，局内归海克斯链路，两者**互斥**。
+ */
+let lastLabelProducer: LabelProducer | null = null;
+/**
+ * 局内海克斯链路的降级开关（`HEXBOX_OVERLAY_AUGMENT=0` → 整体关闭）。
+ *
+ * ⚠️ 关掉它**只**影响局内那一条链路：选人阶段的胜率标签照常工作
+ * （两个生产者的判定在 `vision/visibility.ts` 里是分开的）。
+ */
+const AUGMENT_ENABLED = overlayAugmentEnabled(process.env['HEXBOX_OVERLAY_AUGMENT']);
+/**
+ * 是否把局内强度标签画到屏幕上（与录制工具同一个开关：`HEXBOX_AUGMENT_DRAW=0`）。
+ *
+ * 关掉 = 链路照跑（识别、日志、判据都在），只是不画 —— 排查"标签是不是把
+ * 面板判据挡住了 / 是不是标签本身有问题"时用；常驻覆盖层的选人标签不受影响。
+ */
+const AUGMENT_DRAW = process.env['HEXBOX_AUGMENT_DRAW'] !== '0';
+/**
+ * 最后一次 LCU 轮询到的阶段（`inMatch` 判定用；画布归属由本轮 `phase` 决定）。
+ *
+ * 为什么单独留一份：控制器的 API 轮询是**异步**的，它需要在"本轮采样时刻"
+ * 知道"现在是不是确实在对局中"（否则进游戏前的 2999 不可用会被误记成失败）。
+ *
+ * ⚠️ 这里是**经过阶段门**的值（`stageGate.push()` 的输出），不是原始读数。
+ */
+let lastPhase = 'None';
+
+/**
+ * LCU 阶段读数的**去抖门**（纯函数 `vision/visibility.ts` 的 `createStageGate()`）。
+ *
+ * ⚠️ 为什么必须有它（真机缺陷 2026-10-06：局内面板开着不动、标签几秒后自己消失）：
+ * `/lol-gameflow/v1/session` 的读取有**三种**结果，而旧实现把后两种都写成 `'None'`：
+ *   · 读到会话 → `phase` = 会话里的阶段；
+ *   · **确实没有会话**（404/400，大厅里很正常）→ `'None'`；
+ *   · **读失败**（5 秒超时 / 网络抖动 / 5xx / 鉴权失效）→ 旧实现也写 `'None'`。
+ * 于是**一次偶发失败**就同时触发两条不可逆的清空：
+ *   ① `labelProducerFor('None', …, 'augment')` → `handover` → `clearLabelOverlay()`；
+ *   ② `augmentChainTransition('running', gen, 'None')` → `stop` → 控制器也清标签，
+ *      并且重新起链路时 API 触发状态机是新的（`capture=false`）→ 那一块面板
+ *      **再也画不出标签**。
+ *
+ * 门只做一件事：**读取失败不算离开、离开要连续 `AUGMENT_STAGE_LEAVE_CONFIRM` 次**。
+ */
+const stageGate = createStageGate();
+
+/**
+ * 上一轮阶段门**已打印过的结论**（原因原文 + 采纳的阶段），用于去重。
+ *
+ * 为什么要它：门现在**每次结论变化都要打一行**（包括"连续 2 次读到 None → 确认
+ * 离开对局"那一轮 —— 旧代码那一轮是静默的，导致日志看起来自相矛盾）。
+ * 没有去重的话，`保持 InProgress` 这类结论会在每 2 秒轮询里各打一次。
+ */
+let lastStageGateReason = '';
+let lastStageGateStage = '';
 
 /**
  * 「对局进行中」的阶段集合。
@@ -326,48 +461,14 @@ function slotMsg(rows: readonly BuildSlotRow[]): BuildSlotMsg[] {
 }
 
 /**
- * 对局中兜底识别「我的英雄」。
+ * 局内 2999 客户端（懒建一次即可；只读官方本地接口）。
  *
- * 背景：选人会话（`/lol-champ-select/v1/session`）在进入对局后即消失，
- * 因此**冷启动直接进对局**（悬浮窗中途打开、或没经历选人）时会拿不到英雄。
- * 这里按可靠性依次尝试几个官方 LCU 端点：
- *
- *   1. `/lol-champ-select/v1/session` —— 选人尚未完全结束时仍可用
- *   2. `/lol-gameflow/v1/session`     —— 部分版本在对局内带 `championId`
- *   3. `/lol-summoner/v1/current-summoner` —— 仅作诊断，不含英雄
- *
- * ⚠️ 已知局限：这些端点在**国服对局内**是否稳定返回英雄，未经真机验证
- * （CI/无管理员环境无法复现）。因此：
- *   - 任一步失败都只是继续下一步，不抛错；
- *   - 全部失败时返回 0，UI 显示「未识别到你的英雄」而不是猜一个。
- *
- * 正常情况下**不依赖**本函数：只要经历过选人阶段，myChampionId 已被记住。
+ * 英雄身份**最权威**的来源就在这里（`activePlayer.rawChampionName` /
+ * `championName`）—— 它是"我自己"，而 gameflow 的队伍列表里坐着 10 个人。
  */
-async function recoverMyChampionId(client: LcuClient): Promise<number> {
-  // 1) 选人会话（可能仍存在）
-  const cs = await client
-    .get<{
-      myTeam?: Array<{ championId?: number; cellId?: number }>;
-      localPlayerCellId?: number;
-    }>('/lol-champ-select/v1/session')
-    .catch(() => null);
-  if (cs) {
-    const me = (cs.myTeam ?? []).find((m) => m.cellId === cs.localPlayerCellId);
-    if (typeof me?.championId === 'number' && me.championId > 0) return me.championId;
-    const any = (cs.myTeam ?? []).find(
-      (m) => typeof m.championId === 'number' && m.championId > 0,
-    );
-    if (any?.championId) return any.championId;
-  }
-
-  // 2) 游戏流会话（不同版本字段位置不一，这里广泛探测）
-  const gf = await client
-    .get<Record<string, unknown>>('/lol-gameflow/v1/session')
-    .catch(() => null);
-  const fromGf = pickChampionIdFromGameflow(gf);
-  if (fromGf > 0) return fromGf;
-
-  return 0;
+function liveClient(): LiveDataClient {
+  liveData ??= createLiveDataClient({ timeoutMs: 2500 });
+  return liveData;
 }
 
 /** 组装「我」这个英雄的全部阶段数据。 */
@@ -428,6 +529,14 @@ async function pollOnce(): Promise<void> {
   let phase = 'None';
   let session: unknown = null;
   let picks: OverlayStateMsg['picks'] = [];
+  /**
+   * 本轮的**阶段读数**：`null` = "这一轮读不到"（**不是**"不在对局"）。
+   *
+   * 只有两种东西能写出确定的阶段：**读到的会话**（`s.phase`）与
+   * **确定的没有会话**（404/400）。凭证探测失败、超时、网络抖动、5xx、
+   * 鉴权失效都只能写 `null` —— 交给阶段门保持上一阶段（见 `stageGate`）。
+   */
+  let stageSample: string | null = null;
 
   if (!client) {
     const res = await detectCredentialsDetailed().catch(() => null);
@@ -460,49 +569,99 @@ async function pollOnce(): Promise<void> {
           ].join('\n');
       console.warn(hint);
     }
+    // ⚠️ 凭证**读不到**也只是"这一轮不知道阶段"，不是"不在对局"：
+    // 探测要读客户端进程命令行（WMI/PowerShell），真机上偶发失败过；
+    // 旧实现会让 `phase` 保持 `'None'` → 一次探测失败 = 清掉整排强度标签 + 停链路。
+    stageSample = null;
   }
 
   if (client) {
-    // 用 getOrNull：大厅里 `/lol-gameflow/v1/session` 返回 404 是**正常**的
-    // （当前没有对局），不能当成故障。
-    //
-    // ⚠️ 这里原先是 `.catch(() => null)` + `else { client = null }`，
-    // 于是大厅里每轮轮询都会把**有效凭证**丢掉，下一轮重新探测凭证；
-    // 一旦探测失败就显示「读不到 LCU 凭证」—— 表现为「没进对局时一直报读不到凭证，
-    // 进选人后又正常」（真实踩过）。
-    // 现在：只有**鉴权失败**才丢弃凭证，其它情况一律视为「当前无对局」。
+    // ⚠️ 三种结果必须分开（真机缺陷 2026-10-06：一次偶发失败清掉整排强度标签）：
+    //   · 读到会话            → `stageSample = 会话里的 phase`；
+    //   · **确实没有会话**（404/400，大厅里这是正常的）→ `'None'`；
+    //   · **读失败**（5 秒超时 / 网络抖动 / 5xx / 鉴权失效）→ `null`
+    //     = "这一轮不知道"，交给阶段门**保持**上一阶段。
+    // 旧实现用 `getOrNull()`，它把 404 与 5xx **一起**变成 null，调用方再写成
+    // `'None'` —— 那正是"读不到 = 不在对局"这个错误的来源（超时也会走到这里）。
     let s: {
       phase?: string;
       map?: { gameMode?: string };
       gameData?: { queue?: { id?: number } };
     } | null = null;
     try {
-      s = await client.getOrNull('/lol-gameflow/v1/session');
+      const read = await client.get<{
+        phase?: string;
+        map?: { gameMode?: string };
+        gameData?: { queue?: { id?: number } };
+      }>('/lol-gameflow/v1/session');
+      s = read;
+      // ⚠️ 读到了会话、但 `phase` 字段不可用 → **`null`（这一轮不知道）**，
+      // 不能写成 `'None'`：`'None'` 是"**确定的**不在对局"，连续两次就会确认离开
+      // → 停链路 + 清整排标签（而面板可能还开着）。判定在纯函数
+      // `stageSampleFromSession()`（`@hexbox/vision`，有单测）里。
+      const read_sample = stageSampleFromSession(read);
+      stageSample = read_sample.sample;
+      if (stageSample === null && s !== null) {
+        console.warn(`[hexbox] ⚠ ${read_sample.reason}`);
+      }
     } catch (err) {
-      // getOrNull 只在 401/403（或网络异常）时抛出
-      if (err instanceof LcuHttpError && err.isAuthFailure) {
-        console.warn('[hexbox] LCU 鉴权失败，凭证可能已失效，将重新探测');
-        client = null;
-        warnedNoCreds = false; // 允许重新提示
-        credsDetail = '';
+      if (err instanceof LcuHttpError) {
+        if (err.isAuthFailure) {
+          console.warn('[hexbox] LCU 鉴权失败，凭证可能已失效，将重新探测');
+          client = null;
+          warnedNoCreds = false; // 允许重新提示
+          credsDetail = '';
+          stageSample = null; // 读失败：这一轮不知道阶段（不是"不在对局"）
+        } else if (err.status === 404 || err.status === 400) {
+          // 当前没有对局会话 —— 这是**确定的**"不在对局"，不是故障
+          stageSample = 'None';
+        } else {
+          console.warn(`[hexbox] LCU 会话查询异常（HTTP ${err.status}）：保留凭证，下轮再试`);
+          stageSample = null;
+        }
       } else {
-        // 网络抖动/客户端正在关停：保留 client，下轮再试
+        // 网络抖动/客户端正在关停（含 5 秒超时）：保留 client，下轮再试
         console.warn('[hexbox] LCU 会话查询异常:', err instanceof Error ? err.message : err);
+        stageSample = null;
       }
     }
 
     if (s) {
       connected = true;
       session = s;
-      phase = String(s.phase ?? 'None');
     } else if (client) {
-      // 有凭证但无对局会话 —— 客户端是活的，只是当前不在对局中。
-      // 这**不是**错误，UI 应显示「未在对局中」而不是诊断面板。
+      // 有凭证但没读到会话 —— 客户端是活的（或这一轮读失败），UI 不该显示诊断面板
       connected = true;
-      phase = 'None';
     }
+  }
 
-    // 选人阶段：读取我方已选英雄（pregame-visible）
+  // ── 阶段门（**两条入口都要过**：读到会话 / 读失败 / 连凭证都没有）────────
+  // 读取失败保持上一阶段；"离开对局"要连续 N 次才认（见 `stageGate` 与
+  // docs/AUGMENT-PANEL.md §十六 7）。
+  //
+  // ⚠️ **门的每一次结论都要有日志**（2026-10-06 真机复盘）：
+  // 旧代码只在 `held && 本来在局内` 时打印，于是"疑似离开 1/2 → 保持 InProgress"
+  // 之后**第 2 次确认离开那一轮是静默的** —— 日志上一行还在"保持 InProgress"，
+  // 下一行却是"阶段换手（augment → none）+ 链路停止（离开对局）"，看起来
+  // **自相矛盾**（实际是门的第二轮结论，只是没打）。现在：门给出的
+  // `stage` 或"是否在局内"一变就打一行（同一句不重复）。
+  const gated = stageGate.push(stageSample);
+  const wasInGame = AUGMENT_CHAIN_PHASES.includes(phase);
+  const nowInGame = AUGMENT_CHAIN_PHASES.includes(gated.stage);
+  if (
+    gated.reason !== lastStageGateReason &&
+    (gated.held || gated.stage !== lastStageGateStage || wasInGame !== nowInGame)
+  ) {
+    const mark = gated.held ? '⚠ 保持' : nowInGame ? '✔ 采纳' : '✔ 采纳（离开对局）';
+    console.warn(`[hexbox] ${mark} ${gated.reason}`);
+  }
+  lastStageGateReason = gated.reason;
+  lastStageGateStage = gated.stage;
+  phase = gated.stage;
+
+  if (client) {
+    // 选人阶段：读取我方已选英雄（pregame-visible）—— 会话本身留给下面的身份解析
+    let champSelectSession: unknown = null;
     if (phase === 'ChampSelect' && client) {
       const cs = await client
         .get<{
@@ -514,6 +673,7 @@ async function pollOnce(): Promise<void> {
           >;
         }>('/lol-champ-select/v1/session')
         .catch(() => null);
+      champSelectSession = cs;
       const team = cs?.myTeam ?? [];
       picks = team
         .filter((m) => typeof m.championId === 'number' && m.championId > 0)
@@ -521,21 +681,6 @@ async function pollOnce(): Promise<void> {
           championId: m.championId as number,
           name: championName(m.championId as number),
         }));
-
-      // 找出「我」选的英雄：优先按 localPlayerCellId 定位。
-      // 拿不到就退回「我方唯一的已选英雄」——选人早期往往只有自己选了。
-      const me = team.find((m) => m.cellId === cs?.localPlayerCellId);
-      const picked =
-        typeof me?.championId === 'number' && me.championId > 0
-          ? me.championId
-          : picks.length === 1
-            ? picks[0]!.championId
-            : 0;
-
-      // ⚠️ 只在拿到有效值时更新，**不要**在这里清空：
-      // 选人阶段的会话在进入对局后就没了，若离开选人时把 myChampionId 置 0，
-      // 局内就会永远显示「未识别到你的英雄」（真实踩过）。
-      if (picked > 0) myChampionId = picked;
 
       // 两个子阶段的判据（用户确认的流程）：
       //   第一阶段：卡片已发出、还没选 → 卡片下方显示胜率
@@ -554,11 +699,45 @@ async function pollOnce(): Promise<void> {
         );
         champSelectPickState = done ? 'locked' : 'picking';
       }
-    } else if (phase === 'InProgress' && client && myChampionId === 0) {
-      // 进对局后选人会话已消失，从游戏会话里补一次兜底。
-      // 冷启动直接进对局（悬浮窗开着但没经历选人）时会走到这里。
-      const recovered = await recoverMyChampionId(client).catch(() => 0);
-      if (recovered > 0) myChampionId = recovered;
+    }
+
+    // ── 「我这局用哪个英雄」：以"我自己"为唯一权威来源 ──────────────────
+    //
+    // ⚠️ 真机 bug（2026-10-05，两处都错在同一个念头"随便取一个 championId"）：
+    //   旧实现在选人会话里匹配不到 `localPlayerCellId` 时**取 myTeam 里第一个
+    //   有 championId 的人**；局内又去 gameflow 的 **10 人队伍列表**里有界搜索
+    //   `championId`。结果：玩无极剑圣解析出 154（生化魔人 Zac）、玩酒桶解析出
+    //   43（天启者 Karma）—— 都是**队友**，于是整局显示别人英雄的强度表。
+    //
+    // 现在只认（纯函数 + 单测在 @hexbox/lcu 的 champion-identity.ts）：
+    //   activePlayer-raw → activePlayer-name → lcu-champsession → gameflow-self
+    // 全都不确定 → **不显示**（宁缺勿错），并打印具体原因。
+    if (client && myChampionId === 0 && (phase === 'ChampSelect' || phase === 'InProgress')) {
+      // 身份读不到就**不缓存空值**（客户端刚起/正在关停时读不到是常见的），下一轮再试。
+      if (selfIdentity === null) {
+        const read = await readSelfIdentity(client).catch(() => ({}));
+        if (hasSelfIdentity(read)) selfIdentity = read;
+      }
+      // 只在换成有效值时更新，**不要**在这里清空：
+      // 选人会话在对局开始后就没了，若离开选人时置 0，局内就永远认不出英雄（真机踩过）。
+      const identity = await resolveMyChampionIdentity(client, {
+        champions: dataset?.champions ?? [],
+        live: phase === 'InProgress' ? liveClient() : null,
+        champSelect: champSelectSession,
+        // `session` = 本轮**读到的** gameflow 会话（读失败时为 null：
+        // 身份解析的 gameflow 通道自己会放弃，不会拿旧会话猜英雄）
+        gameflow: session,
+        me: selfIdentity ?? {},
+      });
+      if (identity.championId > 0) {
+        myChampionId = identity.championId;
+        console.log(
+          `[hexbox] 本局英雄 #${identity.championId} ${identity.championName || '(图鉴无此 ID)'}` +
+            `（来源 ${identity.source}：${identity.reason}）`,
+        );
+      } else {
+        console.warn(`[hexbox] 未能确定本局英雄（${identity.reason}）→ 不显示该英雄数据`);
+      }
     }
 
     // 完全离开对局后清空，避免把上一局的英雄带到下一局
@@ -577,6 +756,39 @@ async function pollOnce(): Promise<void> {
   //   诊断面板只在冷启动时出现过一次 —— 真实 bug，已由 visibility.ts 的
   //   单测锁住。判定逻辑本身是纯函数，放在 CI 覆盖得到的包里。
   const want = decideVisible(phase, connected);
+
+  // ── 画布归属：选人胜率标签 vs 局内海克斯标签（同一块画布，绝不同时写）──
+  //
+  // 判定全在纯函数 `labelProducerFor()` 里（各阶段 / 面板开与关 / 阶段切换瞬间 /
+  // 未知阶段 / 降级开关都有单测）。这里只做两件事：
+  //   ① 换手时立刻清掉对方遗留的标签（**复用现成的 clearLabelOverlay()**，
+  //      不新写一套清空逻辑）—— 真实场景：上一局面板还开着时对局结束，
+  //      局内字母会一直挂在屏幕上；"确认离开对局"也是靠这里清空的；
+  //   ② 打印一行归属日志（真机排查"谁把标签盖掉了"只看它）。
+  //
+  // ⚠️ 这是局内强度标签**仅有的两个"阶段驱动"清空**之一（另一个是控制器内部的
+  // 面板关闭边沿）：链路的启停**不再清标签**（2026-10-06 真机缺陷的修法 ——
+  // 改前 `stop()` 无条件清，面板还开着也会被抹掉，表现是"标签闪一下就没了"）。
+  //
+  // ⚠️ 这一步**不能**只在 `sameVisibleState()` 变化时做：大厅 ⇄ 对局的
+  // `VisibleState` 完全相同（局内也不要侧边窗），归属却变了。
+  lastPhase = phase;
+  const ownership = labelProducerFor(phase, augment?.panelState ?? 'unknown', lastLabelProducer, {
+    augmentEnabled: AUGMENT_ENABLED,
+  });
+  if (ownership.handover) {
+    const from = lastLabelProducer ?? 'none';
+    // 与控制器用**同一行格式**（`vision/augment-clear.ts`）：用户 grep
+    // `🧹 清空强度标签：原因=` 就能看到每一次清空（含这一处换手）。
+    const detail = `${from} → ${ownership.producer}；面板在屏=${ownership.shouldDraw}`;
+    clearLabelOverlay(overlayWin, detail);
+    console.log(`[hexbox] ${augmentClearLogLine(AUGMENT_CLEAR_REASONS.stageHandover, detail)}`);
+  }
+  lastLabelProducer = ownership.producer;
+
+  // 局内海克斯链路的启停（与上面的归属判定分开：一个是"谁能画"，一个是"跑不跑"）
+  applyAugmentChain(phase);
+
   if (!sameVisibleState(lastVisible, want)) {
     lastVisible = want;
     if (win) {
@@ -687,73 +899,28 @@ const PRELOAD_PATH = join(__dirname, '..', 'preload', 'index.cjs');
 /**
  * S2 覆盖窗口：全屏透明、点击穿透、绝不抢焦点。
  *
- * 与侧边悬浮窗的区别：它**铺满整个显示器**，内容按识别到的
- * 卡片屏幕坐标绝对定位（见 vision/card-overlay.ts）。
+ * 窗口创建/定位/推送已抽到 `main/label-overlay.ts` —— **局内海克斯标签
+ * （S5.4c，`debug-augment.ts`）用的是同一份**：一处创建、两处使用，
+ * 免得两条并行的窗口代码各自漂移（`__dirname`/DPI/显示器定位都是踩过的坑）。
  *
  * ⚠️ 游戏可能不在主显示器 —— 窗口必须放在**游戏所在的显示器**上
  * （display 参数由 vision-loop 每轮回报,坐标错位时先查这里）。
  */
 function createOverlayWindow(): void {
-  const display = screen.getPrimaryDisplay();
-  overlayWin = new BrowserWindow({
-    x: display.workArea.x,
-    y: display.workArea.y,
-    width: display.workArea.width,
-    height: display.workArea.height,
-    transparent: true,
-    frame: false,
-    alwaysOnTop: true,
-    focusable: false,
-    skipTaskbar: true,
-    resizable: false,
-    movable: false,
-    hasShadow: false,
-    show: false,
-    webPreferences: {
-      preload: PRELOAD_PATH,
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-    },
+  overlayWin = createLabelOverlay({
+    display: screen.getPrimaryDisplay(),
+    // 主入口的 preload 路径是确定的（见上方 PRELOAD_PATH 的注释），显式传入
+    preload: PRELOAD_PATH,
   });
-  overlayWin.setAlwaysOnTop(true, 'screen-saver');
-  overlayWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  // 覆盖层永远穿透 —— 它只展示,不接受任何输入
-  overlayWin.setIgnoreMouseEvents(true, { forward: true });
-  attachOverlayDiagnostics(overlayWin);
-  void overlayWin.loadFile(join(__dirname, '..', 'renderer', 'overlay.html'));
-}
-
-/** 把覆盖窗口移动/缩放到指定显示器（游戏换屏时同步）。 */
-function positionOverlayOn(display: Electron.Display): void {
-  if (!overlayWin || overlayWin.isDestroyed()) return;
-  const target = {
-    x: display.workArea.x,
-    y: display.workArea.y,
-    width: display.workArea.width,
-    height: display.workArea.height,
-  };
-  const cur = overlayWin.getBounds();
-  if (
-    cur.x !== target.x ||
-    cur.y !== target.y ||
-    cur.width !== target.width ||
-    cur.height !== target.height
-  ) {
-    overlayWin.setBounds(target);
-  }
-  // 覆盖层内容按窗口内逻辑坐标绘制,窗口尺寸变化后画布要重设
-  overlayWin.webContents.send('overlay:resize', {
-    width: target.width,
-    height: target.height,
-  });
+  // 渲染端的错误（preload 失败、JS 异常）默认不可见 —— 这层转发是"覆盖层空白"
+  // 类问题的唯一观察窗口（真机教训）。实现与局内标签共用一份。
+  attachLabelOverlayDiagnostics(overlayWin, 'overlay:renderer');
 }
 
 function pushOverlayVision(msg: VisionOverlayMsg, display: Electron.Display): void {
   if (!overlayWin || overlayWin.isDestroyed()) return;
-  positionOverlayOn(display);
-  overlayWin.showInactive();
-  overlayWin.webContents.send('overlay:vision', msg);
+  // 定位（可能换显示器）+ 显示 + 推送，全在 label-overlay 里（与局内海克斯标签同一份）
+  pushLabelOverlay(overlayWin, display, msg);
   // 诊断: 覆盖层空白时,从主进程日志判断是「没推送」还是「推送了没画」
   console.log(
     `[hexbox:vision] 推送 active=${msg.active} labels=${msg.labels.length}` +
@@ -764,22 +931,123 @@ function pushOverlayVision(msg: VisionOverlayMsg, display: Electron.Display): vo
   );
 }
 
+/* ------------------------------------------------------------------ */
+/* 局内海克斯链路（S5.4d）：与录制工具同一份控制器，这里只做启停与注入      */
+/* ------------------------------------------------------------------ */
+
 /**
- * 把覆盖窗口渲染端的 console / 加载错误转发到主进程终端。
- * 渲染端的错误（preload 失败、JS 异常）默认不可见 —— 这层转发
- * 是"覆盖层空白"类问题的唯一观察窗口（真机教训）。
+ * 局内海克斯标签的**推送器**（控制器唯一的绘制出口）。
+ *
+ * `overlayWin` 就是选人标签那块画布 —— **一处创建、两处使用**：局内标签
+ * 绝不再建一块平行窗口（`label-overlay.ts` 里的 `__dirname`/DPI/显示器定位
+ * 每个都是踩过的坑）。`prepare()` 不需要：这块画布启动时就建好了。
+ *
+ * ⚠️ 画布的显隐由 `pushLabelOverlay()` 保证（首次推送会 `showInactive()` +
+ * 重申置顶）；主进程这边不再重复管它 —— 两个生产者都只往同一条通道推。
  */
-function attachOverlayDiagnostics(win: BrowserWindow): void {
-  const fwd = (label: string, text: string): void => {
-    if (text.includes('Electron Security Warning')) return; // 噪音过滤
-    console.log(`[overlay:renderer] ${label}: ${text}`);
-  };
-  win.webContents.on('console-message', (_e, _level, message) => fwd('console', message));
-  win.webContents.on('preload-error', (_e, path, err) => fwd('preload-error', `${path}: ${err}`));
-  win.webContents.on('did-fail-load', (_e, code, desc) => fwd('did-fail-load', `${code} ${desc}`));
-  win.webContents.on('render-process-gone', (_e, details) =>
-    fwd('render-process-gone', details.reason),
+const augmentLabelSink: AugmentLabelSink = {
+  push: (msg, display) => {
+    if (!overlayWin || overlayWin.isDestroyed()) return;
+    pushLabelOverlay(overlayWin, display, msg);
+    console.log(
+      `[hexbox:augment] 推送 active=${msg.active} labels=${msg.labels.length}` +
+        (msg.labels[0]
+          ? ` 首标签@(${msg.labels[0].x.toFixed(0)},${msg.labels[0].y.toFixed(0)}) ${msg.labels[0].text}` +
+            (msg.labels[0].sub !== '' ? `「${msg.labels[0].sub}」` : '')
+          : '') +
+        (msg.diag ? ` [${msg.diag}]` : ''),
+    );
+  },
+  clear: (why) => {
+    clearLabelOverlay(overlayWin, why);
+  },
+};
+
+/** 懒建控制器（构造很轻；真正建流的是 `start()`）。 */
+function ensureAugmentController(): AugmentController {
+  if (augment) return augment;
+  augment = new AugmentController({
+    dataDir: resolveDataDir(),
+    // `HEXBOX_AUGMENT_DRAW=0` → 不画（只识别 + 打日志），与录制工具同一个语义
+    labels: AUGMENT_DRAW ? augmentLabelSink : undefined,
+    // 常驻覆盖层启动时已经读过图鉴与英雄详情（builds.json 4.5MB）—— 复用，
+    // 不再读一遍大盘；两者都拿不到时控制器会自己去 dataDir 读。
+    loadData: async () => ({ dataset, builds }),
+    // ⚠️ 常驻覆盖层**固定 api 触发**（用户 2026-10-05 的方案）：
+    // 常态**一帧不取**，只在「死亡 + 等级达标 + 该次未选」时开截屏。
+    // 录制工具保留 `HEXBOX_AUGMENT_TRIGGER` 的 pixel 对照路径。
+    trigger: 'api',
+    // api 模式只在"已知确实在对局中"时计 2999 的失败（进游戏前一定没有 2999）
+    inMatch: () => AUGMENT_CHAIN_PHASES.includes(lastPhase),
+  });
+  return augment;
+}
+
+/**
+ * 阶段 → 局内链路启停。
+ *
+ * ⚠️ "什么时候起、什么时候停"本身是**纯函数**（`augmentChainTransition()`，有单测）：
+ * 局内只起一次、离开立刻停、在途启动**只作废自己那一代**、失败本局不重试。
+ * 这里只负责执行动作 + 把状态存回去 —— 主进程里**不写第二份启停判断**。
+ *
+ * ⚠️ 停止**不再清标签**（真机缺陷 2026-10-06 的修法）：标签的生命周期只由
+ * 「面板关闭边沿」与「确认离开对局（本轮画布换手 → `clearLabelOverlay()`）」
+ * 决定。这样即使链路因为任何原因停掉，**面板还开着**时标签也不会被抹掉
+ *（代价：极端边界下可能多留一个轮询周期，见 docs/AUGMENT-PANEL.md §十六 6）。
+ */
+function applyAugmentChain(stage: string): void {
+  const t = augmentChainTransition(augmentState, augmentSession, stage, {
+    augmentEnabled: AUGMENT_ENABLED,
+  });
+  augmentSession = t.generation;
+  augmentState = t.state;
+
+  if (t.action === 'stop') {
+    // 离开对局：停流 + 丢行基准锁与重随基线（控制器内部一次做完，幂等）。
+    // ⚠️ 令牌 = **要作废的那一代**：期间若已经起了新一代，这条请求会被忽略
+    //（绝不允许旧一代的收工把新一代的流一起收掉）
+    augment?.stop('离开对局', { token: t.token });
+    return;
+  }
+  if (t.action !== 'start') return;
+
+  const controller = ensureAugmentController();
+  const token = t.token;
+  console.log(
+    `[hexbox] 进入对局（${stage}）→ 启动局内海克斯链路（常态零取帧：API 触发 + 常驻屏幕流）`,
   );
+  void controller
+    .start(token)
+    .then((state) => {
+      if (augmentStartIsStale(token, augmentSession)) {
+        // 这一代已经作废（期间确认离开又回来 / 退出）：**什么都不做**。
+        // 它自己的屏幕流已由控制器在每个 await 检查点按令牌收干净。
+        console.log(
+          `[hexbox] ⏹ 忽略已作废的启动结果（令牌 ${token} ≠ 当前会话 ${augmentSession}）` +
+            ' —— 不碰当前会话的流与标签',
+        );
+        return;
+      }
+      if (state === 'stream') {
+        augmentState = 'running';
+        console.log('[hexbox] 局内海克斯链路已就绪（面板开边沿才取帧；关闭边沿立刻清空标签）');
+        return;
+      }
+      augmentState = 'failed';
+      console.warn(
+        '⚠ 局内海克斯链路未能启动（常驻屏幕流不可用，详见上面带 ⚠ 的日志）\n' +
+          '         → 本局只显示选人标签；下一局会重试',
+      );
+      controller.stop('屏幕流不可用', { token });
+    })
+    .catch((e: unknown) => {
+      if (augmentStartIsStale(token, augmentSession)) return;
+      augmentState = 'failed';
+      console.warn('[hexbox] 局内海克斯链路启动异常：', e instanceof Error ? e.message : e);
+      // 控制器内部已兜住异常（返回 unavailable），这里是双保险：
+      // 绝不允许异常之后还留着一条在跑的屏幕流
+      controller.stop('启动异常', { token });
+    });
 }
 
 function applyClickThrough(on: boolean): void {
@@ -800,6 +1068,15 @@ app.whenReady().then(() => {
   // 注意：**不要**在这里全局设置 NODE_TLS_REJECT_UNAUTHORIZED。
   // LcuClient 内部已用 withInsecureTls() 按请求豁免自签证书，
   // 全局关闭会顺带让所有其它 HTTPS 请求（含外部数据源）失去校验。
+
+  // ── 覆盖窗自测（`HEXBOX_LABEL_OVERLAY_TEST=1`）────────────────────────
+  // 不需要游戏、不需要 LCU：直接在屏幕上画左/中/右三个大字母并自动退出。
+  // 用途：把"局内标签画了但看不见"的**窗口可见性**单独隔离出来验证
+  // （见 main/label-selftest.ts 与 apps/overlay/README.md）。
+  if (isLabelOverlaySelfTest()) {
+    runLabelOverlaySelfTest();
+    return;
+  }
 
   registerIpc();
   createWindow();
@@ -850,10 +1127,11 @@ async function loadNameLibrary(): Promise<void> {
       bits: base64ToBits(n.bits, n.width * n.height),
     }));
     // ⚠️ 曾经这里过滤掉所有 60000+ 的模板，理由是"变体 ID、join 不到数据"。
-    // 真机核实后是**错的**：模板包里 245 个 ID **全是图鉴里的真英雄**
-    // （60001 黑暗之女、60002 狂战士…），过滤一次就废掉 72 个英雄，
-    // 第二阶段顶栏对它们永远识别不出。同一位英雄的两套编号问题
-    // 应该在 **ID 归一化**（core/canonicalChampionId）里解决，而不是丢模板。
+    // 真机核实后是**错的**：模板包 245 条里有 **72 条是同一英雄的变体条目**
+    // （60001 = `Jade_Annie` 黑暗之女、60002 = `Jade_Olaf` 狂战士…，第二套 ID），
+    // 它们与真实英雄**共用同一个名字**，过滤一次就会让这 72 条模板永远匹配不到
+    // （第二阶段顶栏识别不出）。同一位英雄的两套编号问题应该在 **ID 归一化**
+    // （core/canonicalChampionId）里解决，而不是丢模板。
     const realPortraits = pack.templates.filter((t) => t.championId > 0);
     const skipped = pack.templates.length - realPortraits.length;
     portraits = prepareTemplates(
@@ -874,4 +1152,34 @@ async function loadNameLibrary(): Promise<void> {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+/**
+ * 退出前把局内链路收干净（S5.4d 的硬要求）。
+ *
+ * 关闭覆盖层时**不许留下**：屏幕流（隐藏 worker 窗口 + 正在跑的门控定时器）、
+ * 还在屏上的标签（透明画布本身不抢焦点、点击穿透，但内容要清掉）。
+ * `AugmentController.stop()` 一次做完这些事（停流 + 销毁 worker 窗口 +
+ * 丢行基准锁/重随基线），而且**幂等** —— 所以退出路径可以放心调。
+ *
+ * ⚠️ 标签是**显式**要求才清的（`{ clearLabels: true }`）：局内正常的"离开对局"
+ * 停止**不清标签**（清空由面板关闭边沿 / 阶段换手负责，见
+ * `vision/augment-clear.ts` 的 `augmentStopClearsLabels()`）。退出是少数几个
+ * "明确要清"的地方 —— 窗口马上销毁，不留残留字母。
+ *
+ * 为什么放在 `before-quit` 而不是只靠 `window-all-closed`：用户也可能从
+ * 侧边面板的关闭按钮（IPC `overlay:close` → `app.quit()`）或冒烟模式退出，
+ * 这些都走 `before-quit`。
+ */
+app.on('before-quit', () => {
+  try {
+    // 令牌前移：任何在途启动的回调都会被判为过期（它们只自己收场，不碰当前会话）
+    augmentSession++;
+    augmentState = 'idle';
+    // ⚠️ 这里是**少数几个明确要求清标签**的地方之一（窗口马上销毁，
+    // 不留残留字母）；局内正常的"离开对局"停止**不清标签**
+    augment?.stop('程序退出', { clearLabels: true });
+  } catch {
+    /* 退出路径里不再抛 */
+  }
 });

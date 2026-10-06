@@ -17,11 +17,44 @@
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { connect } from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * 探活：这个端口上**真的**有东西在监听吗？
+ *
+ * ⚠️ 为什么必须有（2026-10-05 真机事故：装备推荐"完全失效"）：
+ * 显式凭证缓存文件（`~/.hexbox/lcu-credentials`）**没有校验就直接被采用**，
+ * 而且优先级最高。客户端一重启就会换端口，缓存随即过期 ——
+ * 于是所有 LCU 请求都变成 `ECONNREFUSED`，而 CLI 只会打印
+ * "未捕获错误: fetch failed"，看不出原因，且**不删文件永远好不了**。
+ *
+ * 只做一次 TCP connect：不需要 TLS、不需要 token，
+ * 端口没人监听就说明这份凭证已经废了。
+ */
+export function probePort(port: number, timeoutMs = 1200): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (!Number.isFinite(port) || port <= 0) {
+      resolve(false);
+      return;
+    }
+    const sock = connect({ host: '127.0.0.1', port });
+    let done = false;
+    const finish = (ok: boolean): void => {
+      if (done) return;
+      done = true;
+      sock.destroy();
+      resolve(ok);
+    };
+    sock.setTimeout(timeoutMs, () => finish(false));
+    sock.on('connect', () => finish(true));
+    sock.on('error', () => finish(false));
+  });
+}
 
 /**
  * 解析 PowerShell 可执行文件的绝对路径。
@@ -449,15 +482,25 @@ export async function detectCredentialsDetailed(
   installDirs: readonly string[] = [],
 ): Promise<DetectResult> {
   // 0) 显式凭证（免提权通道，见 LCU_CREDENTIALS_ENV）
+  //
+  // ⚠️ **必须探活后再采用**：缓存文件会随客户端重启而过期（端口变了），
+  // 过期后所有请求都是 ECONNREFUSED —— 真机表现就是"装备推荐完全失效"
+  // 且不删文件永远修不好。探活失败就继续往下走实时探测（而不是直接失败）。
+  /** 缓存凭证过期时的说明（拼进 detail，便于一眼看出原因）。 */
+  let explicitStale: string | null = null;
   const explicit = await resolveExplicitCredentials();
   if (explicit) {
-    return {
-      credentials: explicit,
-      clientRunning: true,
-      detail: explicit.lockfilePath
-        ? `来自显式凭证文件: ${explicit.lockfilePath}`
-        : `来自环境变量 ${LCU_CREDENTIALS_ENV}`,
-    };
+    if (await probePort(explicit.port)) {
+      return {
+        credentials: explicit,
+        clientRunning: true,
+        detail: explicit.lockfilePath
+          ? `来自显式凭证文件: ${explicit.lockfilePath}`
+          : `来自环境变量 ${LCU_CREDENTIALS_ENV}`,
+      };
+    }
+    // 过期：不采用，继续实时探测（detail 里说明，便于排查）
+    explicitStale = `显式凭证已过期（端口 ${explicit.port} 无监听）`;
   }
 
   // 1) 进程命令行（最可靠，但需管理员）
@@ -485,15 +528,20 @@ export async function detectCredentialsDetailed(
   }
 
   // 4) 端口扫描：仅用于诊断（无法取得 token）
+  const staleNote = explicitStale ? `${explicitStale}；` : '';
   const ports = await detectPortByListener();
   if (ports.length === 0) {
-    return { credentials: null, clientRunning: false, detail: '未检测到客户端进程' };
+    return {
+      credentials: null,
+      clientRunning: false,
+      detail: `${staleNote}未检测到客户端进程`,
+    };
   }
 
   const lcu = await findLcuPort(ports);
   const detail = lcu
-    ? `检测到客户端（LCU 端口 ${lcu.port}），但命令行不可读、lockfile 无有效内容`
-    : `检测到客户端进程，但未找到 LCU 服务端口（候选: ${ports.map((p) => p.port).join(', ')}）`;
+    ? `${staleNote}检测到客户端（LCU 端口 ${lcu.port}），但命令行不可读、lockfile 无有效内容`
+    : `${staleNote}检测到客户端进程，但未找到 LCU 服务端口（候选: ${ports.map((p) => p.port).join(', ')}）`;
   return { credentials: null, clientRunning: true, detail };
 }
 

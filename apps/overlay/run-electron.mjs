@@ -12,7 +12,7 @@
 
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -44,6 +44,50 @@ const child = spawn(exe, [entry, ...process.argv.slice(3)], {
   env,
   windowsHide: true,
 });
+
+/**
+ * Ctrl+C 的**接力**（真机教训 2026-10-05）。
+ *
+ * Electron 是 GUI 子系统进程，**不挂控制台** → Windows 的 CTRL_C_EVENT
+ * 根本不会送到它的主进程（`process.on('SIGINT')` 在那边是死代码）。
+ * Ctrl+C 只会送到这一层（Node，挂控制台）。
+ *
+ * 所以：这里收到信号后**写一个哨兵文件**，被录制程序轮询到就自己干净收尾
+ * （写 report.json / api-trigger.csv / 识别结果），然后再等一会儿才退出，
+ * 避免把子进程连带杀掉、白丢一整局数据。
+ */
+const sentinel = join(process.cwd(), 'debug', 'augment', '.stop');
+let stopping = false;
+const requestStop = (signal) => {
+  if (stopping) return;
+  stopping = true;
+  console.log(`\n[launcher] 收到 ${signal} → 通知录制程序收尾（写好产物再退出）…`);
+  try {
+    mkdirSync(dirname(sentinel), { recursive: true });
+    writeFileSync(sentinel, String(Date.now()));
+  } catch (e) {
+    console.error(`[launcher] ⚠ 无法写哨兵文件 ${sentinel}: ${e?.message ?? e}`);
+    child.kill();
+    return;
+  }
+  // 给录制程序 ~4 秒写产物（它每秒轮询一次哨兵）
+  setTimeout(() => {
+    try {
+      child.kill();
+    } catch {
+      /* 已经退出 */
+    }
+  }, 4000);
+};
+process.on('SIGINT', () => requestStop('SIGINT'));
+process.on('SIGTERM', () => requestStop('SIGTERM'));
+process.on('SIGBREAK', () => requestStop('SIGBREAK'));
+
 child.on('exit', (code) => {
   process.exitCode = code ?? 0;
+  try {
+    rmSync(sentinel, { force: true });
+  } catch {
+    /* 无所谓 */
+  }
 });

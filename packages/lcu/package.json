@@ -16,7 +16,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --experimental-strip-types --test src/**/*.test.ts",
-    "probe": "node --experimental-strip-types src/cli.ts"
+    "probe": "node --experimental-strip-types src/cli.ts",
+    "probe:live": "node --experimental-strip-types src/probe-live.ts"
   },
   "devDependencies": {
     "typescript": "^5.7.2"

@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>hexbox augment capture worker</title>
+    <style>
+      body { margin: 0; background: #000; color: #ddd; font: 12px monospace; }
+      #stage { display: none; }
+    </style>
+  </head>
+  <body>
+    <!-- 隐藏窗口：只做截屏与门控检测，不显示任何东西给玩家 -->
+    <video id="video" muted playsinline></video>
+    <canvas id="stage"></canvas>
+    <script src="./worker.js"></script>
+  </body>
+</html>

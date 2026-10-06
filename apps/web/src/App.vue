@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
+import { countChampionSet } from '@hexbox/core';
 import {
   iconUrl,
   MODE_META,
@@ -72,10 +73,17 @@ const stats = computed(() => {
   if (!ds) return null;
   const byMode = new Map<string, number>();
   for (const a of ds.augments) for (const m of a.modes) byMode.set(m, (byMode.get(m) ?? 0) + 1);
+  // ⚠️ **英雄数不是 `champions.length`**（真机数字描述错误）：CommunityDragon 的
+  // `champion-summary.json` 里同一英雄有**两套 ID**（基础 ID + 60000+ 的 `Jade_*`
+  // 变体条目）。实测 245 行 = **173 真实英雄** + 72 变体条目，而官方强度表
+  // （`builds.json` 的 `details`）正好是 173 个英雄 —— 所以展示必须分开：
+  // 英雄显示 173，变体条目**单独说明它是什么**，绝不混进英雄数里。
+  const championCounts = countChampionSet(ds.champions);
   return {
     augments: ds.augments.length,
     cnAugments: ds.hextechs.length,
-    champions: ds.champions.length,
+    champions: championCounts.champions,
+    championVariants: championCounts.variants,
     items: ds.items.length,
     byMode,
     fetchedAt: new Date(ds.meta.fetchedAt).toLocaleString('zh-CN'),
@@ -138,6 +146,10 @@ const championMap = computed(() => {
         <div class="card">
           <div class="num">{{ stats.champions }}</div>
           <div class="dim">英雄</div>
+          <div v-if="stats.championVariants > 0" class="dim small">
+            另有 {{ stats.championVariants }} 条同一英雄的变体条目（图鉴里同一英雄的第二套 ID，
+            不计入英雄数）
+          </div>
         </div>
         <div class="card">
           <div class="num">{{ stats.items }}</div>

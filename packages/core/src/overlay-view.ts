@@ -23,6 +23,8 @@ import type {
   HeroRankEntry,
   HextechStatic,
 } from './types.ts';
+// 「变体 ID」的界与图鉴口径计数**一处定义**（见 champion-set.ts：245 = 173 + 72）
+import { isChampionVariant } from './champion-set.ts';
 
 /* ------------------------------------------------------------------ */
 /* 英雄选择阶段：只显示胜率                                            */
@@ -102,11 +104,11 @@ export function canonicalChampionId(
   champions: readonly Champion[],
 ): number {
   if (championId <= 0) return championId;
-  if (championId < 60000) return championId;
+  if (!isChampionVariant(championId)) return championId;
   const self = champions.find((c) => c.id === championId);
   if (!self) return championId;
   const key = championKey(self.name);
-  const base = champions.find((c) => c.id < 60000 && championKey(c.name) === key);
+  const base = champions.find((c) => !isChampionVariant(c.id) && championKey(c.name) === key);
   return base?.id ?? championId;
 }
 

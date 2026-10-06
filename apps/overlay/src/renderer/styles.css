@@ -16,6 +16,19 @@ body {
   user-select: none;
 }
 
+/*
+ * 全屏标签画布（overlay.html）。
+ * 位图尺寸（canvas.width/height）由渲染端按"窗口内尺寸 × dpr"设置，
+ * 这里只负责把它**钉在窗口原点**：标签坐标是窗口内坐标，
+ * 画布一旦有偏移（margin / 行内基线间隙），字就会整体画错位置。
+ */
+#vision {
+  display: block;
+  position: fixed;
+  top: 0;
+  left: 0;
+}
+
 .panel {
   background: rgba(15, 20, 32, 0.92);
   border: 1px solid rgba(200, 168, 78, 0.35);

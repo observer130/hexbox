@@ -10,6 +10,11 @@
  *      直接当比率会算出 131200% 这种荒谬登场率。
  *   3. `itemout` 是**出门装组合**，与 `itemone_json`（单件）不是一回事；
  *      `itemover_rec`（成型六件套）官方页面不展示，已彻底不采集。
+ *
+ * 另有一组「覆盖度」测试：上游每英雄只给 **100~160 条**（≈ 图鉴 248 的
+ * 43%~57%），经真实请求核对**原始块数 == 解析条数**（不是我们截断）。
+ * 因此那组测试用一个**真实形状**的夹具锁住三件事：不截断、`255` 组就是
+ * 三品质组的并集、`augment_json`（5 列无强度）不得拿来补覆盖率。
  */
 
 import assert from 'node:assert/strict';
@@ -94,6 +99,107 @@ test('parseChampionAugments：跳过脏块与非法 ID，不抛错', () => {
 test('parseChampionAugments：空输入返回空数组', () => {
   assert.deepEqual(parseChampionAugments(undefined), []);
   assert.deepEqual(parseChampionAugments(''), []);
+});
+
+/* ------------------------------------------------------------------ */
+/* 覆盖度：上游给的是「该英雄的池」，不是图鉴全量 —— 我们没有截断      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * **真实形状**的 `augment_json_irank`（2026-10-05 实测 championId=154，
+ * 行内容照抄上游，只把条数删短）。结构性事实全部保留：
+ *
+ *   · 6 列：`排名|英雄ID|海克斯ID|等级|登场率|强度`；
+ *   · 第一个 `&` 段是 `255`（全部品质）组，其后是 `kGold`/`kPrismatic`/`kSilver`；
+ *   · 品质组的 id 是 `255` 组的**子集**，只是名次各自重排
+ *     （现实中 154 是 134 = 49+51+34，见 `parseChampionAugments()` 的覆盖度表）。
+ */
+const IRANK_154_REAL_SHAPE =
+  '255:1|154|1353|255|0.1794|S' +
+  '#2|154|2006|255|0.1409|S' +
+  '#3|154|1041|255|0.1182|S' +
+  '#4|154|1152|255|0.1082|S' +
+  '#5|154|1013|255|0.1053|S' +
+  '#6|154|1015|255|0.1095|S' +
+  '#7|154|1025|255|0.0833|S' +
+  '#8|154|2073|255|0.0829|S' +
+  '#9|154|2076|255|0.0817|B' +
+  '&kGold:1|154|1353|kGold|0.1794|S' +
+  '#2|154|1152|kGold|0.1082|S' +
+  '#3|154|1013|kGold|0.1053|S' +
+  '&kPrismatic:1|154|2006|kPrismatic|0.1409|S' +
+  '#2|154|1041|kPrismatic|0.1182|S' +
+  '#3|154|1015|kPrismatic|0.1095|S' +
+  '&kSilver:1|154|1025|kSilver|0.0833|A' +
+  '#2|154|2073|kSilver|0.0829|B' +
+  '#3|154|2076|kSilver|0.0817|B';
+
+/**
+ * 同一英雄的 `augment_json`（真实形状）：**5 列、没有「强度」列**，
+ * 每品质最多前 10，而且**没有 `255` 组**。
+ */
+const AUGMENT_JSON_154_REAL_SHAPE =
+  'kGold:1|154|1353|kGold|0.1794' +
+  '#2|154|1152|kGold|0.1082' +
+  '&kPrismatic:1|154|2006|kPrismatic|0.1409' +
+  '#2|154|1041|kPrismatic|0.1182' +
+  '&kSilver:1|154|1025|kSilver|0.0833' +
+  '#2|154|2073|kSilver|0.0829';
+
+test('parseChampionAugments：解析条数 == 255 组原始块数（上游给多少解析多少，一条不截断）', () => {
+  // 直接数**原始串**里的块（不经过解析器的列数过滤），两者必须相等。
+  // 实测 8 个英雄（154/43/157/64/99/11/145/222）原始块数 == 解析条数，
+  // 且因列数不足被丢弃的块恒为 0 —— 若哪天解析器开始截断，这里会红。
+  const raw255 = IRANK_154_REAL_SHAPE.split('&')[0] ?? '';
+  const rawBlocks = raw255.split('#').filter((b) => b !== '').length;
+  const out = parseChampionAugments(IRANK_154_REAL_SHAPE);
+  assert.equal(rawBlocks, 9);
+  assert.equal(out.length, rawBlocks);
+});
+
+test('parseChampionAugments：255 组 == 三个品质组的并集（默认分组就是该英雄的完整池）', () => {
+  // 三品质分组之和 3+3+3 = 9 = 255 组；集合级也相等。
+  // 这就是「上游没有第二个更大的口径」的证据（真实数据同样成立）。
+  const base = parseChampionAugments(IRANK_154_REAL_SHAPE);
+  const all = parseChampionAugments(IRANK_154_REAL_SHAPE, 'all-groups');
+  const baseIds = new Set(base.map((a) => a.augmentId));
+  const allIds = new Set(all.map((a) => a.augmentId));
+  assert.equal(baseIds.size, 9);
+  assert.equal(allIds.size, baseIds.size);
+  for (const id of baseIds) assert.ok(allIds.has(id), `${id} 应出现在品质组里`);
+});
+
+test('parseChampionAugments：augment_json（每品质前 10、5 列、无强度）解析出 0 条 —— 不得拿它补覆盖率', () => {
+  // 列数不足 6（没有强度列）→ 全部丢弃；而且它没有 255 组。
+  // 想「提高覆盖率」而改用它，只会得到没有强度的行 → 用这条锁住。
+  assert.equal(parseChampionAugments(AUGMENT_JSON_154_REAL_SHAPE).length, 0);
+  assert.equal(parseChampionAugments(AUGMENT_JSON_154_REAL_SHAPE, 'all-groups').length, 0);
+});
+
+test('parseChampionAugments：字段名就是真机形状（augmentId，不是 id）', () => {
+  // 踩过的坑：夹具写成 `{ id }` 而真实数据是 `augmentId` → 单测绿、真机全灭。
+  // 锁住键名集合，任何一侧改名都会在这里红。
+  const [first] = parseChampionAugments(IRANK_154_REAL_SHAPE);
+  assert.ok(first);
+  assert.deepEqual(Object.keys(first).sort(), [
+    'augmentId',
+    'level',
+    'pickRate',
+    'rank',
+    'tier',
+  ]);
+});
+
+test('parseChampionDetail：强度只来自 augment_json_irank，augment_json 被刻意忽略', () => {
+  const d = parseChampionDetail(154, {
+    augment_json: AUGMENT_JSON_154_REAL_SHAPE,
+    augment_json_irank: IRANK_154_REAL_SHAPE,
+  });
+  assert.equal(d.augments.length, 9);
+  assert.equal(d.augments[0]!.augmentId, 1353);
+  assert.equal(d.augments[0]!.tier, 'S');
+  // 若误用 augment_json：它只有 6 条且 tier 全空
+  assert.ok(d.augments.every((a) => a.tier !== ''));
 });
 
 /* ------------------------------------------------------------------ */

@@ -1,0 +1,297 @@
+/**
+ * 海克斯「何时开截屏」触发状态机（纯函数，可单测）
+ *
+ * 用户定的方案（2026-10-05）：**常态不截屏**，改由 Live Client Data API 触发。
+ *   1. 维护"哪些海克斯还没选"的状态；
+ *   2. 开局触发一次；
+ *   3. API 检测到**死亡** + **等级达标** + **该次海克斯还没选** → 才开截屏；
+ *      选完（截屏里看不到卡片）→ 关。
+ *
+ * ⚠️ 最容易错的一点：**未选的海克斯会累积，一次死亡可能连选多次**。
+ * 例如：开局出门后再没死过，直到 11 级才死亡 —— 此时 7 级和 11 级两次都还没选，
+ * 游戏会**连着弹两次三选一**。所以状态必须是"未选等级集合"（pending），
+ * 而不是"当前等级对应的那一次"。
+ *
+ * ── 为什么用死亡而不是等级 ────────────────────────────────────────────
+ * 面板的出现条件是「等级达标」**且**「死亡回泉水」（外加开局必出一次），
+ * 而"什么时候死"无法预测（见 docs/AUGMENT-PANEL.md §一）。
+ * API 能直接给出 `isDead` / `level`，所以：
+ *   · 死亡是**开截屏的唯一时机**（等级不达标就不开）；
+ *   · 关截屏由**像素门控**决定（看不到卡片 = 选完了）——
+ *     API 不知道面板什么时候消失，只有屏幕知道。
+ *
+ * 两个信号分工明确：**API 决定"什么时候看"，像素决定"看到了什么"。**
+ *
+ * ── 自愈设计（每一条都对应一种真实失败）────────────────────────────────
+ * · 门控漏检面板 → 不会走到"关"，但 `armWindowMs` 到点自动关，pending 保留
+ *   → 下次死亡会再开一次（不会永久卡死）。
+ * · 面板一直开着（玩家在思考）→ **只要门控说还开着就绝不超时**，并顺延窗口。
+ * · 工具在对局中途启动 → 开局那次多半已被选掉，首帧若 gameTime 已超过
+ *   `midGameStartSec` 就把"开局"标记为已选，避免第一次死亡时误判成连选。
+ */
+
+/** 一次 API 采样（只取触发需要的字段）。 */
+export interface AugmentTriggerSample {
+  /** 对局时间（秒）。 */
+  readonly gameTime: number;
+  /** 我的等级。 */
+  readonly level: number;
+  /** 我是否处于死亡状态。 */
+  readonly isDead: boolean;
+  /** 复活剩余秒数（`isDead` 的交叉验证）。 */
+  readonly respawnTimer: number;
+}
+
+export interface AugmentTriggerConfig {
+  /**
+   * 会出现海克斯的等级（**0 = 开局那一次**）。
+   *
+   * 用户实测：开局必出一次，之后是 7 / 11 / 15 级且需死亡回泉水。
+   */
+  readonly offerLevels?: readonly number[];
+  /** 死亡后维持"开截屏"的窗口（ms）。窗口内没等到面板就关，pending 留着下次死亡再试。 */
+  readonly armWindowMs?: number;
+  /**
+   * 关边沿之后的**连选等待**（ms）。
+   *
+   * 选完第一次后，若还有未选的海克斯（本轮死亡够格的），
+   * 游戏会紧接着再弹一次 —— 这段时间保持开截屏，否则会漏掉第二次。
+   */
+  readonly chainGraceMs?: number;
+  /** `gameTime` 小于此值视为"开局"。 */
+  readonly startWindowSec?: number;
+  /** 启动时 `gameTime` 已超过此值 → 认为开局那次已经选过（工具中途启动）。 */
+  readonly midGameStartSec?: number;
+}
+
+export const AUGMENT_TRIGGER_DEFAULTS = {
+  offerLevels: [0, 7, 11, 15] as readonly number[],
+  armWindowMs: 45000,
+  chainGraceMs: 20000,
+  startWindowSec: 25,
+  midGameStartSec: 60,
+} as const;
+
+export type AugmentTriggerStopReason =
+  | 'none'
+  | 'panel-closed-all-consumed'
+  | 'arm-window-expired';
+
+export interface AugmentTriggerDecision {
+  /** 是否应当开截屏（false = 常态不截屏）。 */
+  readonly capture: boolean;
+  /** 相比上一次决策是否变化（主进程据此下发 IPC，避免刷通道）。 */
+  readonly changed: boolean;
+  /** 人读原因（写日志/CSV）。 */
+  readonly reason: string;
+  /** 还没选的海克斯等级（0 = 开局）。 */
+  readonly pending: readonly number[];
+}
+
+export interface AugmentTrigger {
+  /**
+   * 喂一次 API 采样，返回"现在要不要开截屏"。
+   *
+   * @param nowMs 单调时钟（与门控同一时基）
+   */
+  onSample(sample: AugmentTriggerSample, nowMs: number): AugmentTriggerDecision;
+  /** 门控说"看到卡片了"。 */
+  notePanelOpen(nowMs: number): void;
+  /** 门控说"卡片消失了"（= 选完一次）→ 消耗一次并决定是否继续开着。 */
+  notePanelClosed(nowMs: number): AugmentTriggerDecision;
+  /** 当前是否开着截屏。 */
+  readonly capture: boolean;
+  /** 还没选的海克斯等级。 */
+  readonly pending: readonly number[];
+  reset(): void;
+}
+
+export function createAugmentTrigger(config: AugmentTriggerConfig = {}): AugmentTrigger {
+  const offerLevels = [...(config.offerLevels ?? AUGMENT_TRIGGER_DEFAULTS.offerLevels)];
+  const armWindowMs = config.armWindowMs ?? AUGMENT_TRIGGER_DEFAULTS.armWindowMs;
+  const chainGraceMs = config.chainGraceMs ?? AUGMENT_TRIGGER_DEFAULTS.chainGraceMs;
+  const startWindowSec = config.startWindowSec ?? AUGMENT_TRIGGER_DEFAULTS.startWindowSec;
+  const midGameStartSec = config.midGameStartSec ?? AUGMENT_TRIGGER_DEFAULTS.midGameStartSec;
+
+  /** 还没选的海克斯（按等级升序）。 */
+  let pending: number[] = [...offerLevels];
+  let capture = false;
+  /** 开截屏的截止时刻（门控说"还开着"时会顺延）。 */
+  let captureUntil = 0;
+  let panelOpen = false;
+  /** 本轮开的窗口里，是否已经见过面板（用于区分"刚开"与"选完了"）。 */
+  let sawPanel = false;
+  let lastLevel = 0;
+  let lastIsDead = false;
+  let seenFirstSample = false;
+  let lastReason = '常态：不截屏';
+  /**
+   * 是否"开过边沿还没等到关边沿"。
+   *
+   * ⚠️ 用来挡住**重复的关边沿**：消耗必须发生在一个真实的"开 → 关"周期里。
+   * 否则多消耗一次，下次死亡就不会开截屏 —— 直接漏掉一整个海克斯（代价太大）。
+   */
+  let awaitingClose = false;
+  /** 工具中途启动 → 开局那次按"已选"处理（只做一次）。 */
+  let midGameInitDone = false;
+
+  const decision = (changed: boolean, reason: string): AugmentTriggerDecision => {
+    lastReason = reason;
+    return { capture, changed, reason, pending: [...pending] };
+  };
+
+  /** 够格的未选等级（≤ 当前等级）。 */
+  const eligible = (): number[] => pending.filter((lv) => lv <= lastLevel);
+
+  const startCapture = (nowMs: number, reason: string): boolean => {
+    const changed = !capture;
+    capture = true;
+    captureUntil = Math.max(captureUntil, nowMs + armWindowMs);
+    sawPanel = false;
+    // ⚠️ 必须在这里写 reason：否则上报的是上一次的原因字符串（测试抓到过）
+    lastReason = reason;
+    return changed;
+  };
+
+  const stopCapture = (reason: string): boolean => {
+    const changed = capture;
+    capture = false;
+    sawPanel = false;
+    panelOpen = false;
+    lastReason = reason;
+    return changed;
+  };
+
+  return {
+    onSample(sample, nowMs) {
+      const first = !seenFirstSample;
+      seenFirstSample = true;
+      const prevDead = lastIsDead;
+      const prevLevel = lastLevel;
+      lastLevel = sample.level;
+      lastIsDead = sample.isDead;
+
+      // 工具中途启动：开局那次多半已被选掉，避免第一次死亡时把它算成连选
+      //
+      // ⚠️ 这里**不能 return**：首帧可能同时就是一次死亡（工具在死亡瞬间启动），
+      // 提前返回会把这次死亡吞掉 → 那一轮就不开截屏了（写测试时抓到过）。
+      let initNote: string | null = null;
+      if (!midGameInitDone) {
+        midGameInitDone = true;
+        if (sample.gameTime > midGameStartSec) {
+          const before = pending.length;
+          pending = pending.filter((lv) => lv !== 0);
+          if (pending.length !== before) {
+            initNote = `中途启动（对局 ${sample.gameTime.toFixed(0)}s）：开局那次按已选处理`;
+          }
+        }
+      }
+
+      // 1) 开局：开局那一次一定出现
+      if (sample.gameTime <= startWindowSec && pending.includes(0)) {
+        const changed = startCapture(nowMs, `开局（对局 ${sample.gameTime.toFixed(0)}s）：开截屏`);
+        if (changed || first) return decision(changed, lastReason);
+      }
+      // 2) 死亡：等级达标才有意义
+      const died = sample.isDead && !prevDead;
+      if (died) {
+        const ok = eligible();
+        if (ok.length > 0) {
+          const changed = startCapture(
+            nowMs,
+            `死亡（等级 ${sample.level}，待选 [${ok.join(',')}]）：开截屏`,
+          );
+          return decision(changed, lastReason);
+        }
+        // 等级不够 / 都选完了 —— 明确记一笔，便于复盘"为什么没开"
+        if (!capture) {
+          return decision(false, `死亡但无待选（等级 ${sample.level}，待选 [${pending.join(',')}]）：不开`);
+        }
+      }
+
+      // 3) 等级到位但一直没死：只记录，不开（面板要等死亡才出现）
+      if (!capture && sample.level !== prevLevel) {
+        const ok = eligible();
+        if (ok.length > 0) {
+          return decision(false, `等级 ${sample.level}（待选 [${ok.join(',')}]）：等死亡，不开`);
+        }
+      }
+
+      // 4) 超时关闭：窗口内没见到面板就关掉，pending 留着下次死亡再试
+      if (capture && !panelOpen && nowMs > captureUntil) {
+        stopCapture(`窗口超时（未见面板）：关截屏，待选 [${pending.join(',')}] 保留`);
+        return decision(true, lastReason);
+      }
+
+      if (initNote !== null) return decision(false, initNote);
+      return decision(false, lastReason);
+    },
+
+    notePanelOpen(nowMs) {
+      panelOpen = true;
+      sawPanel = true;
+      awaitingClose = true;
+      // 面板还开着 → 顺延窗口，避免玩家思考时被超时打断
+      captureUntil = Math.max(captureUntil, nowMs + armWindowMs);
+    },
+
+    notePanelClosed(nowMs) {
+      panelOpen = false;
+      const wasSaw = sawPanel;
+      sawPanel = false;
+
+      // 没有对应的开边沿 → 重复/多余的关边沿，忽略（否则会多消耗一次待选）
+      if (!awaitingClose) {
+        return decision(false, `多余的关边沿（忽略，待选 [${pending.join(',')}] 不变）`);
+      }
+      awaitingClose = false;
+
+      // 消耗一次：取最小的够格未选等级（游戏按等级从低到高给）。
+      //
+      // 这里**不检查 capture**：门控既然报过"面板出现过"，就说明确实弹过一次 ——
+      // 哪怕当时因为状态机的别的原因没在开截屏（例如工具刚启动的那一帧），
+      // 也不该把这次当成"没发生"（否则 pending 记多，下次死亡会误判连选）。
+      const ok = eligible();
+      const consumed = ok[0] ?? pending[0];
+      if (consumed !== undefined) {
+        pending = pending.filter((lv) => lv !== consumed);
+      }
+      if (!capture) return decision(false, lastReason);
+
+      // 选完后游戏可能紧接着再弹一次（连选）→ 保持开截屏
+      if (eligible().length > 0) {
+        captureUntil = Math.max(captureUntil, nowMs + chainGraceMs);
+        return decision(
+          false,
+          `选完一次（等级 ${lastLevel}）：还有 [${eligible().join(',')}] 未选，保持开截屏等连选`,
+        );
+      }
+      stopCapture(
+        wasSaw
+          ? `选完（等级 ${lastLevel}）：本次待选已清空，关截屏`
+          : `未见面板即关闭：关截屏，待选 [${pending.join(',')}] 保留`,
+      );
+      return decision(true, lastReason);
+    },
+
+    get capture() {
+      return capture;
+    },
+    get pending() {
+      return [...pending];
+    },
+    reset() {
+      pending = [...offerLevels];
+      capture = false;
+      captureUntil = 0;
+      panelOpen = false;
+      sawPanel = false;
+      lastLevel = 0;
+      lastIsDead = false;
+      seenFirstSample = false;
+      awaitingClose = false;
+      midGameInitDone = false;
+      lastReason = '常态：不截屏';
+    },
+  };
+}

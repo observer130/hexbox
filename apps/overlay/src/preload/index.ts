@@ -43,7 +43,48 @@ const api = {
 
 export type OverlayApi = typeof api;
 
+/**
+ * 截屏 worker（`src/capture/worker.ts`）专用接口。
+ *
+ * 单独暴露最小集合而不是复用 overlay api：worker 只该做"取帧 → 检测 → 上报"
+ * 这一件事，拿不到窗口显隐/状态推送这些与它无关的能力（contextIsolation 下
+ * 这才是真正的边界，而不是靠自觉）。
+ */
+const augmentWorkerApi = {
+  /** 主进程下发/更新配置（搜索区、间隔、画布宽）。 */
+  onConfig: (cb: (c: unknown) => void): void => {
+    ipcRenderer.on('augment:worker-config', (_e, c: unknown) => cb(c));
+  },
+  /** 主进程发指令：start（带配置）/ stop / cadence（只改间隔）/ recognize（识别；带 `only` = 只重认那几张卡）/ unwatch（取消冻结的取样矩形）。 */
+  onCommand: (
+    cb: (cmd: 'start' | 'stop' | 'cadence' | 'recognize' | 'unwatch', cfg?: unknown) => void,
+  ): void => {
+    ipcRenderer.on(
+      'augment:worker-command',
+      (_e, cmd: 'start' | 'stop' | 'cadence' | 'recognize' | 'unwatch', cfg?: unknown) => cb(cmd, cfg),
+    );
+  },
+  /** 每帧的检测结果（小 JSON，不含像素）。 */
+  report: (frame: unknown): void => {
+    ipcRenderer.send('augment:worker-frame', frame);
+  },
+  /** 状态/错误（终端可见，便于真机排查）。 */
+  status: (s: { readonly message: string; readonly error?: boolean }): void => {
+    ipcRenderer.send('augment:worker-status', s);
+  },
+  /**
+   * 全分辨率识别结果。
+   *
+   * 识别在**渲染端**做（从已有的屏幕流取原生分辨率帧），所以像素不过 IPC，
+   * 只回传"哪张卡是哪颗海克斯 + 分数"，主进程据此画标签/记日志。
+   */
+  recognized: (r: unknown): void => {
+    ipcRenderer.send('augment:worker-recognized', r);
+  },
+} as const;
+
 // 覆盖窗口（overlay-canvas.ts）以独立名字访问,避免与侧边窗 renderer.ts
 // 的 `overlay` 声明在打包后全局作用域冲突（IIFE 无模块隔离的真实坑）。
 contextBridge.exposeInMainWorld('overlay', api);
 contextBridge.exposeInMainWorld('visionOverlayApi', api);
+contextBridge.exposeInMainWorld('augmentWorkerApi', augmentWorkerApi);
