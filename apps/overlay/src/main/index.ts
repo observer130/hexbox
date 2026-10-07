@@ -224,6 +224,9 @@ app.on('web-contents-created', (_event, contents) => {
  *   hexbox.exe --no-augment                  # 关掉局内海克斯链路（选人标签照常）
  *   hexbox.exe --no-draw                     # 只识别不画（排查用）
  *   hexbox.exe --tray-autotest 8000          # 托盘/退出路径自测：8s 后模拟关窗口，再过 3s 模拟托盘退出
+ *   hexbox.exe --update-check-test update    # 「检查更新」自测：跑一次检查并弹真实的确认窗
+ *                                            #   档位：offline / up-to-date / update / download
+ *   hexbox.exe --update-api-base http://127.0.0.1:5188  # 把检查更新指向本机桩服务（自测/排查）
  *
  * ⚠️ 必须在**日志接管与数据解析之前**调用：`--log-file` / `--data-dir`
  * 影响的就是那两处的解析结果。
@@ -241,6 +244,10 @@ function applyCliOverrides(argv: readonly string[] = process.argv.slice(1)): voi
     '--no-draw': { env: 'HEXBOX_AUGMENT_DRAW', value: '0' },
     // 托盘/退出路径自测（机器人点不了托盘菜单，见 runTrayAutotest）
     '--tray-autotest': { env: 'HEXBOX_TRAY_AUTOTEST_MS' },
+    // 「检查更新」自测（档位见 update-flow.ts / vision 的 parseUpdateSelfTestMode）
+    '--update-check-test': { env: 'HEXBOX_UPDATE_CHECK_TEST' },
+    // 把检查更新指向本机桩服务（自测/排查；正常用户不设）
+    '--update-api-base': { env: 'HEXBOX_UPDATE_API_BASE' },
   };
   for (let i = 0; i < argv.length; i++) {
     const raw = argv[i] ?? '';
@@ -506,7 +513,12 @@ import {
   credentialNoticeText,
   decideCredentialNotice,
   INITIAL_CREDENTIAL_NOTICE_STATE,
+  // 托盘「数据更新时间」的口径 + 「检查更新」的判据（纯函数，单测在 @hexbox/vision）
+  dataUpdateStamp,
+  parseUpdateSelfTestMode,
+  UPDATE_PHASE_IDLE,
   type AugmentChainState,
+  type DataUpdateStamp,
   type LabelProducer,
   type NameFingerprint,
   type PreparedTemplate,
@@ -540,6 +552,7 @@ import {
   quitApp,
   type TrayHandle,
 } from './tray.ts';
+import { createUpdateFlow, type UpdateFlow } from './update-flow.ts';
 import { packagedDataDir, packagedLogFile } from './user-paths.ts';
 
 // ---------------------------------------------------------------------------
@@ -679,6 +692,28 @@ let lastConnected = false;
  * 托盘是**唯一**的交互入口与**唯一**的退出方式（用户已拍板）。
  */
 let tray: TrayHandle | null = null;
+
+/**
+ * 托盘菜单「数据更新时间」那一行（纯函数 `dataUpdateStamp()` 的结果）。
+ *
+ * ⚠️ 在 `loadDataset()` 里**定型一次**：数据在一次运行内不变，而托盘每 2 秒
+ * 刷新一次菜单 —— 放进刷新里就等于每 2 秒 statSync 一次，并且会在数据目录
+ * 找不到时把 `resolveDataDir()` 的警告刷屏。
+ */
+let dataStamp: DataUpdateStamp = dataUpdateStamp({});
+
+/**
+ * 「检查更新」流程（`main/update-flow.ts`）。
+ *
+ * ⚠️ **唯一**会联网的地方，且只在两种情况下触发：
+ *   ① 用户点托盘菜单的「检查更新」；
+ *   ② 自测开关 `--update-check-test <mode>` / `HEXBOX_UPDATE_CHECK_TEST`（正常用户不会设）。
+ * 启动时**不检查、不轮询、不自动下载**（用户明确要求）。
+ */
+let updateFlow: UpdateFlow | null = null;
+
+/** 自测：启动后等多久再跑「检查更新」（让托盘/数据先就绪；避免自测日志与启动日志交错）。 */
+const UPDATE_SELFTEST_DELAY_MS = 4000;
 
 /**
  * 「读不到 LCU 凭证」一次性气泡的**判定状态**（纯函数 `decideCredentialNotice()`）。
@@ -913,6 +948,32 @@ async function loadDataset(): Promise<void> {
     console.warn('[hexbox] 英雄详情读取失败:', e instanceof Error ? e.message : e);
     builds = null;
   }
+
+  // ── 托盘菜单「数据更新时间」的那一行（**在数据读完这一刻定型**）──────────
+  // 口径（纯函数 `dataUpdateStamp()`，有单测）：
+  //   ① `meta.dataDate`（官方统计日期，形如 20261005）—— 用户问"数据更新到几号"要的是它；
+  //   ② 拿不到才退回 `dataset.json` 的文件 mtime（**并在菜单文案里标成"文件时间"**，
+  //      否则用户会把它当成官方统计日期）；
+  //   ③ 两个都没有 → "未知"。
+  // ⚠️ 只算一次（数据在一次运行内不会变），别在每 2 秒的托盘刷新里去 statSync ——
+  //    那会把"数据目录找不到"的警告刷屏（resolveDataDir 每次失败都打一行）。
+  dataStamp = dataUpdateStamp({
+    dataDate: builds?.meta.dataDate ?? rankings?.meta.dataDate ?? null,
+    mtimeMs: datasetFileMtimeMs(dir),
+  });
+  console.log(`[hexbox] 数据更新时间：${dataStamp.date === '' ? '未知' : dataStamp.date}（${dataStamp.detail}）`);
+
+  // 数据读完立刻刷一次托盘：否则菜单里那一行要等下一轮 2 秒轮询才出现
+  tray?.refresh();
+}
+
+/** `dataset.json` 的 mtime（毫秒）；读不到 → `null`（不是 0：0 会被当成 1970 年）。 */
+function datasetFileMtimeMs(dir: string): number | null {
+  try {
+    return statSync(join(dir, 'dataset.json')).mtimeMs;
+  } catch {
+    return null;
+  }
 }
 
 /** 把出装槽位转为推送结构。 */
@@ -1118,7 +1179,10 @@ async function pollOnce(): Promise<void> {
   });
   credentialNotice = notice.state;
   if (notice.show) {
-    const text = credentialNoticeText(probeClientRunning);
+    // 气泡里带上**本次运行真的在用的**日志绝对路径（打包版 = %LOCALAPPDATA%\hexbox\logs\overlay.log，
+    // 开发版没设 HEXBOX_LOG_FILE 时为 null → 文案改说"本次运行未落盘"）。
+    // ⚠️ 别再指向托盘菜单里的「打开日志」：那一项已按用户要求移除。
+    const text = credentialNoticeText(probeClientRunning, logFile);
     console.log(`[hexbox] 🔔 ${notice.reason}`);
     tray?.notify(text.title, text.content);
   } else if (notice.rearmed) {
@@ -1579,6 +1643,39 @@ function trayAutotestMs(): number {
 }
 
 /**
+ * 把当前**托盘菜单的完整清单**打进日志（文本 + 是否禁用 + 类型）。
+ *
+ * 为什么必须有这个：托盘菜单在自动化里点不了（机器人没有鼠标），而这次改动
+ * 全部落在菜单形态上 —— "到底是哪几项、哪几项是灰的、`打开日志`/`打开数据目录`
+ * 是不是真的没了"是唯一能被机器证明的部分。用户点名要的六条逐条对照也在这里。
+ */
+function logTrayMenuItems(what: string): void {
+  if (tray === null) {
+    console.error(`[hexbox] ⚠ ${what}：没有托盘（菜单清单打不出来）`);
+    return;
+  }
+  const items = tray.menuItems();
+  console.log(`[hexbox] ${what}：托盘菜单逐项（共 ${items.length} 项）`);
+  items.forEach((item, i) => {
+    const kind = item.type === 'separator' ? '分隔线' : item.enabled ? '可点' : '禁用';
+    console.log(`         ${String(i + 1).padStart(2)}. [${kind}] ${item.label}`);
+  });
+  // 用户原话的六条 → 逐条核对（移除的两项**必须不在**）
+  const labels = items.map((i) => i.label).join(' | ');
+  const checks: [string, boolean][] = [
+    ['1 状态：xxx（保留、禁用）', items.some((i) => i.label.startsWith('状态：') && !i.enabled)],
+    ['2 数据更新时间（新增、禁用）', items.some((i) => i.label.startsWith('数据更新时间：') && !i.enabled)],
+    ['3 打开日志（**已移除**）', !labels.includes('打开日志')],
+    ['4 打开数据目录（**已移除**）', !labels.includes('打开数据目录')],
+    ['5 检查更新（新增、可点）', items.some((i) => i.label.startsWith('检查更新') && i.enabled)],
+    ['6 退出（保留、可点）', items.some((i) => i.label === '退出' && i.enabled)],
+  ];
+  for (const [name, ok] of checks) {
+    console.log(`         ${ok ? '✅' : '❌'} ${name}`);
+  }
+}
+
+/**
  * 托盘/退出路径自测：模拟「关窗口」→ 断言进程还活着 → 模拟「托盘菜单退出」。
  *
  * ⚠️ `win.close()` 走的是**与点 X 完全同一条** `close` 事件路径（Electron 对
@@ -1590,7 +1687,10 @@ function runTrayAutotest(delayMs: number): void {
   console.log(
     `[hexbox] 自测（--tray-autotest）：${delayMs}ms 后模拟"关窗口"，再过 3 秒模拟"托盘菜单退出"`,
   );
+  // 菜单清单在**自测一开始**就打（不必等关窗口那一步）——它是本次改动的主要证据
+  logTrayMenuItems('自测');
   setTimeout(() => {
+    logTrayMenuItems('自测（关窗口之前、状态已刷新若干轮之后）');
     console.log('[hexbox] 自测：模拟关闭窗口（win.close()/overlayWin.close()，与点 X 同一条 close 事件路径）');
     win?.close();
     overlayWin?.close();
@@ -1628,6 +1728,24 @@ app.whenReady().then(() => {
   createWindow();
   createOverlayWindow();
 
+  // ── 「检查更新」流程（**唯一**联网处；只在点菜单/自测开关时触发）─────────
+  // 先建流程再建托盘：托盘的菜单项文案要读流程的实时阶段（正在检查/下载 x%）。
+  updateFlow = createUpdateFlow({
+    // 打包后 = package.json 的 version；开发时也是同一个（electron . 读 apps/overlay/package.json）
+    currentVersion: () => app.getVersion(),
+    // 阶段变化 → 重建菜单（`refresh()` 自己判断内容变没变）
+    onPhaseChange: () => tray?.refresh(),
+    notify: (title, content) => {
+      if (tray === null) {
+        console.warn(`[hexbox] ⚠ 没有托盘 → 弹不出气泡「${title}」（日志里仍有这条消息）`);
+        return;
+      }
+      tray.notify(title, content);
+    },
+    // 自测结束走**唯一**的退出入口（与托盘「退出」同一条清理路径）
+    quit: (reason) => quitApp(reason),
+  });
+
   // ── 托盘：常驻覆盖层**唯一**的交互入口（本体没有可见窗口）──────────────
   // 必须在建窗口之后、pollLoop 之前：pollLoop 每轮会刷新托盘状态。
   tray = createTray({
@@ -1638,11 +1756,12 @@ app.whenReady().then(() => {
         // 局内"面板开没开"是"为什么没标签"的第一个分叉（控制器还没建时 = unknown）
         panel: augment?.panelState,
       }),
-    // 日志文件：显式 --log-file/HEXBOX_LOG_FILE，或打包后默认的
-    // %LOCALAPPDATA%\hexbox\logs\overlay.log；开发时没设就是 null（菜单项禁用）
-    logFile: () => logFile,
-    // 数据目录用**现有**的解析结果（用户覆盖目录 / extraResources 快照 / 向上遍历）
-    dataDir: () => resolveDataDir(),
+    // 数据更新时间：在 loadDataset() 里定型（官方统计日期优先、文件 mtime 回退）
+    dataUpdate: () => dataStamp,
+    // 检查更新的实时阶段（菜单项文案 + 是否可点）
+    updatePhase: () => updateFlow?.phase() ?? UPDATE_PHASE_IDLE,
+    // 点「检查更新」→ 交给流程（联网只在这一刻之后发生）
+    onCheckUpdate: () => updateFlow?.check(),
   });
   // 关窗口 = 最小化到托盘（只有托盘菜单的「退出」才真退出）。
   // ⚠️ 只挂常驻覆盖层自己这两扇窗：截屏 worker 窗口是故意 destroy() 的
@@ -1678,6 +1797,28 @@ app.whenReady().then(() => {
   // 托盘/退出路径自测（默认不开；见 runTrayAutotest）
   const autotestMs = trayAutotestMs();
   if (autotestMs > 0) runTrayAutotest(autotestMs);
+
+  // ── 「检查更新」自测（默认不开；档位见 vision 的 UpdateSelfTestMode）──────
+  // 用途：真机上"有更新 / 没更新 / 断网"这三种前提很难造，而这三条路径的
+  // 用户可见反馈（弹窗文案、失败提示、下载校验）恰恰是最该被验证的地方。
+  // ⚠️ 这里只是**跑一次检查**，不改变任何默认行为：正常用户不设这个开关 → 永不联网。
+  const updateTestRaw = process.env['HEXBOX_UPDATE_CHECK_TEST'];
+  if (updateTestRaw !== undefined) {
+    const mode = parseUpdateSelfTestMode(updateTestRaw);
+    if (mode === null) {
+      // 非法档位**绝不静默**（否则自测"跑过了"却什么也没测）
+      console.error(
+        `[hexbox] ⚠ 自测开关 HEXBOX_UPDATE_CHECK_TEST=${JSON.stringify(updateTestRaw)} ` +
+          '不是有效档位（offline / up-to-date / update / download）→ 不跑自测',
+      );
+    } else {
+      console.warn(
+        `[hexbox] ⚠ 自测：${UPDATE_SELFTEST_DELAY_MS}ms 后跑一次「检查更新」（档位 ${mode}）` +
+          '（正常用户不会设这个变量）',
+      );
+      setTimeout(() => updateFlow?.runSelfTest(mode), UPDATE_SELFTEST_DELAY_MS);
+    }
+  }
 });
 
 /**

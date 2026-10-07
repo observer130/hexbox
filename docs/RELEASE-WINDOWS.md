@@ -253,6 +253,8 @@ $ …\Riot Client Data\User Data\Config\lockfile  Length = 51   ← 那是 Riot 
 & …\hexbox.exe --data-dir D:\hexbox-data                                      # 指定数据目录
 & …\hexbox.exe --no-augment                                                   # 只关局内链路（选人标签照常）
 & …\hexbox.exe --no-draw                                                      # 只识别不画（排查用）
+& …\hexbox.exe --tray-autotest 8000                                           # 托盘/退出路径自测（打印菜单逐项）
+& …\hexbox.exe --update-check-test update                                     # 检查更新自测（offline/up-to-date/update/download，见 §十五）
 ```
 
 实测（打包后的程序）：
@@ -332,6 +334,10 @@ pnpm --filter @hexbox/overlay package:win
 | `%LOCALAPPDATA%\hexbox\logs\overlay.log` | 打包后**默认开启**的运行日志（>4 MB 自动轮转成 `.1`） |
 | `%LOCALAPPDATA%\hexbox\logs\selftest\` | `--label-overlay-test` 的截图与结论 |
 | `%LOCALAPPDATA%\hexbox\data\` | （可选）用户放进去的数据快照 |
+| `%TEMP%\hexbox-update\` | 「检查更新」下载下来的安装包（启动安装程序后可以删） |
+
+> 托盘菜单里的 `打开日志` / `打开数据目录` **已按用户要求移除** ——
+> 上面这张表与启动日志第一行的绝对路径就是唯一入口（见 §十四）。
 
 为什么默认要落日志：安装包出来的是 **GUI 子系统进程，没有控制台**，
 `console.log` 谁都不看 —— 不落文件就等于"出问题什么都没有"。
@@ -363,7 +369,7 @@ pnpm --filter @hexbox/overlay package:win
 | 1 | **UAC 级别** | `requireAdministrator`（已实现） | 改成 `asInvoker` = 每次启动不弹窗，但国服下选人/局内标签全部不可用 |
 | 2 | **安装形态** | NSIS 每用户为主 + 便携版附带（已实现） | 只出便携版：免安装但每次自解压、且用户数据不跨次保留 |
 | 3 | **诊断入口是否随包** | 不随包，自测改成主入口的 `--label-overlay-test`（已实现） | 想要真机录制进安装版：删 2 行 `files` 排除并改 `output`，同时要把 `debug-augment.ts` 的产物目录从 `cwd\debug` 改到 `%LOCALAPPDATA%` |
-| 4 | **首次运行反馈** | 建议加：读不到凭证时弹**一次性**系统通知 + 常驻托盘图标（含"打开日志/退出"） | 现在的行为是"什么都看不到"；不加就等于用户必须知道日志路径 |
+| 4 | **首次运行反馈** | 建议加：读不到凭证时弹**一次性**系统通知 + 常驻托盘图标（含"打开日志/退出"） | 现在的行为是"什么都看不到"；不加就等于用户必须知道日志路径。**已实现**：托盘菜单 = 状态 / 数据更新时间 / 检查更新 / 退出（见 §十四；`打开日志`与`打开数据目录`按用户要求**已移除**） |
 | 5 | **代码签名** | 暂不签名（无证书），按 §六 的文案提示用户 | 签名后才能免 SmartScreen 警告、企业环境可用 |
 | 6 | **数据自更新** | 暂不做（快照 + 用户目录覆盖） | 做的话要先解决 §三-② 的三个坑 |
 
@@ -560,4 +566,163 @@ for (const name of HEXBOX_GRAPHICS_SWITCHES) app.commandLine.appendSwitch(name)
   （只有"自测 ✅ + 真机局内标签照常出"的定性结论）；
 * 便携版（`hexbox-portable-*.exe`）与安装包**没有逐个点开跑过**（它们内嵌同一份
   `app.asar`，而免安装目录那一份已经验过）。
+
+## 十四、托盘菜单（用户 2026-10 拍板的最终形态）
+
+覆盖层**没有可见窗口**，托盘是它唯一的交互入口与唯一的退出方式。菜单**就这四项**
+（中间两条分隔线），顺序与可点性都是用户逐条点名的：
+
+| # | 菜单项 | 可点 | 来源 |
+|---|---|---|---|
+| 1 | `状态：选人中 / 局内 / 等待客户端 …` | ❌ 灰 | 已有（`vision/overlay-status.ts` 的 `trayStatus()`，保留） |
+| 2 | `数据更新时间：2026-10-05（统计日期）` | ❌ 灰 | **新增**（`vision/data-update-stamp.ts`） |
+| — | 分隔线 | — | |
+| 3 | `检查更新` | ✅ | **新增**（`main/update-flow.ts`，见 §十五） |
+| — | 分隔线 | — | |
+| 4 | `退出` | ✅ | 已有（复用 `quitApp()`，**唯一**真退出入口） |
+
+**用户明确要求移除的两项**（原来在 1 与 3 之间）：`打开日志`、`打开数据目录`。
+移除后支持路径改为：① 日志**绝对路径在启动日志第一行打印**（保留，见 §九）；
+② `README.md` 的「安装与发布」与本文 §九 写明日志/数据目录在哪（**不新增菜单项**）。
+
+### 2 号项的口径（**必须能看出它是哪种日期**）
+
+| 来源 | 何时用 | 菜单文案 |
+|---|---|---|
+| `meta.dataDate`（`rankings.json` / `builds.json`，形如 `20261005`） | 有就用（**优先**） | `数据更新时间：2026-10-05（统计日期）` |
+| `dataset.json` 的文件 mtime | 没有官方统计日期时回退 | `数据更新时间：2026-10-06（文件时间）` |
+| 两个都没有 | 数据没同步过 | `数据更新时间：未知` |
+
+为什么优先官方统计日期：`meta.dataDate` 是**腾讯官方那份榜单统计的是哪一天**
+（启动日志里那行"统计日期 20261005"就是它），用户拿它对照官方页能对上；
+而 mtime 只是"这台机器什么时候同步过"，重新同步一次或拷一份旧数据都会变。
+两者含义不同，所以回退口径**在菜单里明写**`（文件时间）`，不让它冒充官方日期。
+实现在 `vision/data-update-stamp.ts`（纯函数 + 单测；日期切片与回退优先级都被锁住），
+主进程只在 `loadDataset()` 里**定型一次**（不在每 2 秒的托盘刷新里 statSync）。
+
+### 自测（**托盘菜单在自动化里点不了**，所以必须能打印出来）
+
+```powershell
+& …\hexbox.exe --tray-autotest 8000        # 打印菜单逐项（文本 + 禁用/可点 + 类型）+ 六条对照 ✅/❌
+```
+
+证据（打包版实测，见 §十六）：
+
+```text
+[hexbox] 自测：托盘菜单逐项（共 6 项）
+          1. [禁用] 状态：等待客户端
+          2. [禁用] 数据更新时间：2026-10-05（统计日期）
+          3. [分隔线] (separator)
+          4. [可点] 检查更新
+          5. [分隔线] (separator)
+          6. [可点] 退出
+          ✅ 1 状态：xxx（保留、禁用）
+          ✅ 2 数据更新时间（新增、禁用）
+          ✅ 3 打开日志（**已移除**）
+          ✅ 4 打开数据目录（**已移除**）
+          ✅ 5 检查更新（新增、可点）
+          ✅ 6 退出（保留、可点）
+```
+
+## 十五、发布与更新（「检查更新」）
+
+### 仓库 slug 的**单一来源**（没有猜）
+
+```text
+$ git remote -v
+origin  git@github.com:observer130/hexbox.git (fetch)
+```
+
+→ `GITHUB_REPO = 'observer130/hexbox'`，写在
+**`apps/overlay/src/main/update-config.ts`**（整个仓库只有这一处字符串）。
+根 `package.json` 里**没有** `repository` 字段，所以 git remote 是唯一可信来源；
+若换发布仓库，改这一行即可（`electron-builder.yml` 的 `publish` 不是必需的，见下）。
+
+本机用匿名 API 核实过（2026-10，**用户需要知道的结论**）：
+
+```text
+GET https://api.github.com/repos/observer130/hexbox                → 200, "private": false   （仓库公开，读 Release 不需要 token）
+GET https://api.github.com/repos/observer130/hexbox/releases/latest → 404                     （**还没有发布过任何 Release**）
+```
+
+**所以现在点「检查更新」会明确告诉你"读不到最新 Release（HTTP 404）……可能这个仓库
+还没有发布过 Release"**，并给一个"打开下载页"按钮 —— 这不是 bug，先按下面发一次即可。
+
+### 方案选型：**自己走 GitHub API**（不引入 `electron-updater`）
+
+| | ① `electron-updater` | ② 自己走 GitHub API（**采用**） |
+|---|---|---|
+| 新增依赖 | 有（+ `publish` 配置） | **无** |
+| 发布时要带 | 每版都要 electron-builder 生成的 `latest.yml`（+ blockmap） | 只要 Release 里带 `hexbox-setup-<ver>-x64.exe` |
+| NSIS 安装版 | ✅ 一键下载+静默安装（体验最好） | 下载 + 启动安装程序，用户走一遍向导 |
+| **便携版** | ❌ **不支持自助更新** | ✅ 同一条路（装一次，或手动下新的便携包） |
+| 无代码签名 | 可用，但差分更新对未签名包更敏感 | 无影响 |
+| 网络/代理 | Electron 内置下载 | `net.fetch()`（Chromium 网络栈，**跟随系统代理**） |
+
+选 ② 的理由：**没有任何新依赖**（不改 `package.json`、不动 `electron-builder.yml`，
+因而不碰 `requestedExecutionLevel: requireAdministrator`）、对**两种发布形态是同一条路**、
+发布流程最简单。代价如实说：**没有静默/一键体验**（用户要自己点安装向导），
+也没有增量更新（每次都整包 ~77 MB）。想升级到一键体验时再考虑 `electron-updater`，
+那时**要接受便携版无法自助更新**。
+
+### 发一版要做什么（发布清单）
+
+1. 改版本号：**`apps/overlay/package.json` 的 `version`**（`app.getVersion()` 读的就是它）；
+2. 打包（记得设镜像，见 §八）：
+   `pnpm --filter @hexbox/overlay package:win`；
+3. 建 Release，**tag 必须是合法的语义化版本**（`v0.2.0` / `0.2.0` 都认；`nightly-2026` 这种会被判"不是版本号"）：
+
+   ```powershell
+   gh release create v0.2.0 `
+     release/hexbox-setup-0.2.0-x64.exe `
+     release/hexbox-portable-0.2.0-x64.exe `
+     --title "hexbox 0.2.0" --notes-file docs/CHANGELOG-0.2.0.md
+   ```
+
+   * **必须**带 `hexbox-setup-<ver>-x64.exe`：更新流程只认它
+     （`^hexbox-setup-.*\.exe$`，优先 `-x64`）；只发便携版会被判成
+     "有新版本但没有安装包"并提示去发布页手动下载；
+   * `hexbox-setup-*.exe.blockmap`、便携版可发可不发（更新流程不读）；
+   * Release 不能是 **draft / prerelease** —— 我们查的是 `/releases/latest`，
+     GitHub 的语义是"最新的**非预发布**正式版"；
+   * GitHub 若给了资产的 `digest: sha256:…`（2025 起的发布会有），更新流程**会校验**；
+     没有就只校验字节数并把实测 sha256 打进日志（**没有签名可校验，如实说**）。
+
+### 用户点「检查更新」之后发生什么
+
+```text
+点菜单 → 菜单项变「正在检查更新…」（禁用）→ GET /releases/latest（15 s 超时）
+  ├─ 没有更新 → 弹窗「已是最新版本 v0.1.0」
+  ├─ 有更新   → 弹窗「检测到版本 v0.2.0，是否下载更新？」（按钮：确认 / 取消）
+  │              ├─ 取消 → 什么都不做（日志一行「用户取消」）
+  │              └─ 确认 → 菜单项变「正在下载更新… 42%」（每 5% 刷新一次）+ 气泡
+  │                        → 下载到 %TEMP%\hexbox-update\（校验字节数 + sha256）
+  │                        → shell.openPath() 启动 hexbox-setup-0.2.0-x64.exe
+  │                        → 弹窗「更新已下载，按向导完成安装」
+  └─ 失败     → 弹窗「检查更新失败」+ 原因 + 手动下载页 + 「打开下载页」按钮
+```
+
+* **只在点菜单时联网**：启动不检查、无后台轮询、无自动下载（用户明确要求）；
+* 查版本超时 **15 s**、下载超时 **30 min**（国内网络访问 GitHub 慢/不通时的兜底）；
+* **便携版**：更新流程下载并启动的是 **NSIS 安装包** → 装成正式安装版；
+  想继续用便携版，就用失败/确认弹窗里的下载页手动取新的 `hexbox-portable-*.exe`；
+* **安装版**：安装程序会提示关闭正在运行的 hexbox（NSIS 行为），按提示走即可；
+* **管理员权限**：本程序以 `requireAdministrator` 运行，安装包由管理员进程启动，
+  所以安装向导本身不会再弹一次 UAC；
+* **无签名**：安装包是"未知发布者"，SmartScreen 可能拦一次（§六）；
+  我们能校验的只有**传输完整性**，没有任何可校验的发布者签名 —— 如实写在这里。
+
+### 自测档位（**不依赖 GitHub，也不真的下 77 MB**）
+
+```powershell
+--update-check-test offline     # 网络失败路径：请求指向本机不可达地址 → 弹失败窗（有手动下载页）
+--update-check-test up-to-date  # 没有更新 → 弹「已是最新版本 vX.Y.Z」
+--update-check-test update      # 有更新 → 弹「检测到版本 vX.Y.Z，是否下载更新？」
+--update-check-test download    # 自动确认 → 真的下载（桩资产）→ 校验 → **不启动安装程序**
+--update-api-base http://127.0.0.1:5188   # 把 API 指到本机桩服务（正常用户不设）
+```
+
+`offline / up-to-date / update` 三档弹的是**真实的对话框**（可截图核对逐字文案），
+`download` 档不弹确认窗、**绝不启动安装程序**（下的是桩资产，跑完自己退出）。
+
 

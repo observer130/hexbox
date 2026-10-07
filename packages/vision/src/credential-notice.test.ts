@@ -137,6 +137,17 @@ test('气泡文案：两种情形都说清"为什么"且给出可操作步骤', 
   const hasClient = credentialNoticeText(true);
   assert.match(hasClient.content, /检测到客户端，但读不到 LCU 凭证/);
   assert.equal(hasClient.title, noClient.title);
-  // 两段文案都必须指向可操作的去处（托盘菜单里的日志）
-  assert.match(hasClient.content, /打开日志/);
+  // 两段文案都必须指向可操作的去处 —— **日志文件本身**，而不是托盘菜单项：
+  // `打开日志` 那一项已按用户要求从菜单里移除（见 tray.ts 的菜单注释）
+  assert.match(hasClient.content, /日志/);
+  assert.doesNotMatch(hasClient.content, /打开日志/);
+});
+
+test('气泡文案：给了日志绝对路径就带上它（打包版）；没给就说清日志在哪', () => {
+  const withPath = credentialNoticeText(true, 'C:\\Users\\x\\AppData\\Local\\hexbox\\logs\\overlay.log');
+  assert.match(withPath.content, /C:\\Users\\x\\AppData\\Local\\hexbox\\logs\\overlay\.log/);
+
+  const packagedDefault = credentialNoticeText(false, null);
+  assert.match(packagedDefault.content, /%LOCALAPPDATA%\\hexbox\\logs\\overlay\.log/);
+  assert.match(credentialNoticeText(false, '   ').content, /LOCALAPPDATA/);
 });

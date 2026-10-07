@@ -44,5 +44,10 @@ export * from './augment-presence.ts';
 export * from './augment-close-confirm.ts';
 // 常驻覆盖层的**用户可见状态文案**（托盘菜单那一行 + tooltip；纯函数）
 export * from './overlay-status.ts';
+// 托盘菜单「数据更新时间」的口径（官方 meta.dataDate 优先、文件 mtime 回退）
+export * from './data-update-stamp.ts';
+// 「检查更新」的判据：版本比较 + GitHub Release 解析/资产挑选 + 菜单文案（纯函数）
+export * from './update-version.ts';
+export * from './update-check.ts';
 // 「读不到 LCU 凭证」的**一次性气泡**判定（连续 N 轮才提示、每个连接会话最多一次）
 export * from './credential-notice.ts';

@@ -74,6 +74,23 @@ pnpm dev:overlay    # 需要：管理员权限 + 真实桌面会话
 以**管理员**启动，否则读不到本地 LCU 凭证；它不能在没有真实桌面的环境里跑。
 启动后进选人阶段就会自动出现胜率标签，不需要额外操作。
 
+### 托盘菜单（它唯一的入口）
+
+覆盖层**没有可见窗口**（全屏透明、点击穿透），所以托盘图标是它唯一能点的地方：
+**关窗口只是最小化，只有托盘菜单的「退出」才是真退出**。右键（或左键）图标可见：
+
+| 菜单项 | 能点 | 说明 |
+|---|---|---|
+| `状态：选人中 / 局内 / 等待客户端 …` | ❌ | 它现在在干什么（判断"为什么没有标签"的第一现场依据） |
+| `数据更新时间：2026-10-05（统计日期）` | ❌ | 当前数据是哪天的**官方统计**；没有官方日期时退回 `dataset.json` 的文件时间并标成`（文件时间）` |
+| `检查更新` | ✅ | **只有点了才会联网**：查 GitHub Release 最新版本；没更新会明确告诉你，有更新会问"是否下载更新？" |
+| `退出` | ✅ | 唯一的真退出入口 |
+
+> **日志与数据目录去哪找**：托盘菜单里**没有**「打开日志」和「打开数据目录」
+> （按用户要求移除了）。日志位置写在下面 §安装与发布 的**日志**一条，
+> 而且**每次启动的日志第一行就是它的绝对路径**（例：
+> `[hexbox] 日志文件（绝对路径）：C:\Users\<你>\AppData\Local\hexbox\logs\overlay.log`）。
+
 ### 不用开游戏就能验证的两条命令
 
 ```powershell
@@ -147,6 +164,12 @@ pnpm --filter @hexbox/overlay package:dir      # 只出免安装目录，最快
   点「更多信息」→「仍要运行」即可；企业环境（AppLocker 等）可能直接拦截。
 - **日志**（GUI 进程没有控制台，排查只能看这里）：
   `%LOCALAPPDATA%\hexbox\logs\overlay.log`（超过 4 MB 自动轮转成 `.log.1`）。
+  开发时用 `HEXBOX_LOG_FILE=<绝对路径>` 指定；**启动日志第一行就是它的绝对路径**。
+  （托盘菜单里的「打开日志」已按用户要求移除 —— 要看日志请按上面这个路径去找。）
+- **更新**：托盘菜单 →「检查更新」查 GitHub Release 的最新 tag，有更新就下载
+  `hexbox-setup-<版本>-x64.exe` 并启动安装程序。**不会自动检查、不会后台下载**。
+  发布时要附带什么、便携版/安装版各自的行为、国内网络与无签名的代价：
+  见 [docs/RELEASE-WINDOWS.md](docs/RELEASE-WINDOWS.md) §发布与更新。
 - **打包版自带的诊断开关**（等价于开发期的环境变量）：
 
   ```powershell
@@ -154,6 +177,8 @@ pnpm --filter @hexbox/overlay package:dir      # 只出免安装目录，最快
   & …\hexbox.exe --log-file D:\logs\hexbox.log                                  # 指定日志文件
   & …\hexbox.exe --data-dir D:\hexbox-data                                      # 指定数据目录
   & …\hexbox.exe --no-augment                                                   # 只关局内链路
+  & …\hexbox.exe --tray-autotest 8000                                           # 托盘/退出路径自测（打印菜单逐项）
+  & …\hexbox.exe --update-check-test offline                                    # 检查更新自测：offline/up-to-date/update/download
   ```
 
 - **数据站 `apps/web` 不打包**：它是独立部署的静态站点，与覆盖层没有运行时耦合。
@@ -218,7 +243,7 @@ docs/                         设计文档（路线 / 阶段 / 局内识别 / �
 data/                         sync 产物（gitignored）
 ```
 
-开发者三闸门：`pnpm test`（当前 718 项，以实际输出为准）/ `pnpm typecheck` / `pnpm build`。
+开发者三闸门：`pnpm test`（当前 743 项，以实际输出为准）/ `pnpm typecheck` / `pnpm build`。
 
 ## 进一步阅读
 

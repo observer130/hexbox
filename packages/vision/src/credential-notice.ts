@@ -126,15 +126,28 @@ export interface CredentialNoticeText {
  * 用户看到的是"双击之后什么都没有"，所以第一句必须先回答"为什么没东西"，
  * 再给**照做就能好**的三步（与 `pollOnce()` 里那段 `warnedNoCreds` 终端提示同一口径，
  * 但这里更短 —— 气泡放不下长文）。
+ *
+ * ⚠️ **不要再指向托盘菜单里的「打开日志」**：那一项已按用户要求移除
+ * （用户 2026-10 的菜单决定，见 `apps/overlay/src/main/tray.ts`）。
+ * 现在指向**日志文件本身**（调用方把解析后的绝对路径传进来；打包版默认
+ * `%LOCALAPPDATA%\hexbox\logs\overlay.log`，开发版没设 `HEXBOX_LOG_FILE` 时没有文件）。
  */
-export function credentialNoticeText(clientRunning: boolean): CredentialNoticeText {
+export function credentialNoticeText(
+  clientRunning: boolean,
+  logFile?: string | null,
+): CredentialNoticeText {
   const head = clientRunning
     ? '检测到客户端，但读不到 LCU 凭证。'
     : '未检测到英雄联盟客户端。';
+  const where =
+    typeof logFile === 'string' && logFile.trim() !== ''
+      ? `详见日志文件：${logFile}`
+      : '详见日志文件（本次运行未落盘；打包版默认 %LOCALAPPDATA%\\hexbox\\logs\\overlay.log，' +
+        '开发时用 HEXBOX_LOG_FILE 指定）。';
   return {
     title: 'hexbox 未读取到客户端凭证',
     content:
       `${head}请确认已以管理员身份运行、且客户端（含 WeGame）已启动；` +
-      '否则选人/局内标签都不会显示。详见托盘菜单「打开日志」。',
+      `否则选人/局内标签都不会显示。${where}`,
   };
 }

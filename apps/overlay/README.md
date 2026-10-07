@@ -405,8 +405,12 @@ node --experimental-strip-types scripts/preview-augment-labels.mts `
 src/main/index.ts       主进程：LCU 轮询、数据读取、窗口定位/穿透
                         + 阶段启停局内链路 + 画布归属（选人/局内）交接
                         + **单实例锁** + 托盘接线 + 「关窗口 = 最小化到托盘」
-src/main/tray.ts        **托盘图标**（常驻覆盖层唯一的交互入口）：菜单（状态/打开日志/
-                        打开数据目录/退出）、气泡、退出标志 `quitting`、`close → hide` 拦截
+src/main/tray.ts        **托盘图标**（常驻覆盖层唯一的交互入口）：菜单（状态/数据更新时间/
+                        检查更新/退出）、气泡、退出标志 `quitting`、`close → hide` 拦截
+src/main/update-config.ts 「检查更新」的**单一来源配置**：GitHub 仓库 slug（来自 git remote）、
+                        API 根（自测可覆盖）、超时
+src/main/update-flow.ts 「检查更新」流程：只在点菜单时联网 → 判定 → 弹窗（确认/取消）
+                        → 下载安装包到 %TEMP% → 校验字节数/sha256 → 启动安装程序
 src/main/augment-controller.ts **局内海克斯链路控制器**（S5.4d）：
                         采集几何 → 常驻屏幕流 → 2999 触发 → 门控边沿 → 识别
                         → 该英雄强度表 → 标签（行基准锁）→ 单卡刷新编排
@@ -483,10 +487,15 @@ data/builds.json   ─┘
 
 | 托盘菜单项 | 作用 |
 |---|---|
-| `状态：等待客户端 / 选人中 / 局内 / …`（**只读**） | 当前状态；来自**现成**阶段读数（纯函数 `vision/overlay-status.ts` 的 `trayStatus()`）|
-| `打开日志` | 资源管理器**定位**到日志文件（还没生成时打开目录）；开发模式未落日志时该项禁用 |
-| `打开数据目录` | 打开 `resolveDataDir()` 的解析结果（用户覆盖目录 / `resources/data` 快照）|
+| `状态：等待客户端 / 选人中 / 局内 / …`（**只读、灰**） | 当前状态；来自**现成**阶段读数（纯函数 `vision/overlay-status.ts` 的 `trayStatus()`）|
+| `数据更新时间：2026-10-05（统计日期）`（**只读、灰**） | 当前数据是哪天的：优先官方统计日期 `meta.dataDate`，没有才退回 `dataset.json` 的文件时间（**文案里标明口径**）。纯函数 `vision/data-update-stamp.ts` |
+| `检查更新` | 查 GitHub Release 最新版本 → 有更新就下载 `hexbox-setup-*.exe` 并启动安装程序。**只在点它时才联网**（启动不检查、不自动下载）；阶段直接写在菜单文案里（`正在检查更新…` / `正在下载更新… 42%`）。见 `main/update-flow.ts` |
 | `退出` | **唯一的真退出**：`quitApp()` 置 `quitting` → `app.quit()` → 复用既有 `before-quit` 清理（停屏幕流 + 销毁 worker + 清标签）|
+
+> **`打开日志` 与 `打开数据目录` 已按用户要求移除**（2026-10）。日志位置改由
+> **启动日志第一行打印的绝对路径**与 `README.md` / `docs/RELEASE-WINDOWS.md` 承担
+> （打包版 `%LOCALAPPDATA%\hexbox\logs\overlay.log`，开发版 `HEXBOX_LOG_FILE`）。
+> **不要**因为"方便"再把它们加回菜单。
 
 - **关窗口 = 最小化到托盘**：常驻覆盖层自己的两扇窗（侧边面板、全屏标签画布）都挂了
   `attachCloseToTrayHide()` —— 非退出状态下 `preventDefault()` + `hide()`。
@@ -509,10 +518,13 @@ data/builds.json   ─┘
 
 ```powershell
 # 自测：8s 后模拟"关窗口"（应最小化到托盘、进程仍在），再过 3s 模拟"托盘菜单退出"
-# 日志里应看到：两行「已最小化到托盘」→「关窗口之后进程仍在运行 = true」→「退出清理…」
+# 日志里应看到：菜单逐项清单（文本 + 禁用/可点）→ 六条对照 ✅
+#              → 两行「已最小化到托盘」→「关窗口之后进程仍在运行 = true」→「退出清理…」
 cd apps/overlay
 node run-electron.mjs . --tray-autotest 8000 --log-file D:\hexbox-dev.log   # 开发入口（实测可用）
 # 打包版同理：hexbox.exe --tray-autotest 8000 --log-file D:\hexbox.log
+# 「检查更新」自测（档位 offline / up-to-date / update / download；见 docs/RELEASE-WINDOWS.md §十五）
+node run-electron.mjs . --update-check-test update --log-file D:\hexbox-dev.log
 # 一次性气泡的验证注入（把"读不到凭证"喂给判据；正常用户不会设）：
 $env:HEXBOX_NOTICE_TEST='1'; pnpm dev:overlay
 ```

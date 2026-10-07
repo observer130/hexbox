@@ -21,13 +21,34 @@
  *   ③ `app.quit()` 期间若还有窗口 `preventDefault()`，退出会被**中止** ——
  *      所以 `quitting` 必须在 `app.quit()` **之前**置真（`quitApp()` 就是干这个的），
  *      冒烟模式那种"直接 app.quit()"的老写法必须改走 `quitApp()`。
+ *
+ * ── 菜单形态（用户 2026-10 拍板，**别再改**）─────────────────────────────
+ *   `状态：xxx` / `数据更新时间：yyyy-mm-dd`（都是灰、不可点）/ 分隔 /
+ *   `检查更新` / 分隔 / `退出`。
+ *   **用户明确移除了 `打开日志` 与 `打开数据目录`** —— 排查入口改由文档与
+ *   启动日志承担（日志绝对路径在启动第一行打印，位置见 README / RELEASE-WINDOWS）。
+ *   逐条理由见下面 `menuTemplate()` 的注释。
+ *
+ * ── 「检查更新」只在这里转发 ─────────────────────────────────────────────
+ *   真正联网/弹窗/下载的逻辑在 `main/update-flow.ts`：**只有用户点菜单才会联网**
+ *   （不在启动时检查、不后台轮询、不自动下载 —— 用户明确要求）。
+ *   菜单项文案直接来自流程的实时阶段（`正在检查更新…` / `正在下载更新… 42%`），
+ *   这是"点完立刻有反应"的载体，别把它换成静态文字。
  */
 
-import { app, Menu, nativeImage, shell, Tray } from 'electron';
-import { existsSync, mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { app, Menu, nativeImage, Tray } from 'electron';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 
-import { TRAY_TOOLTIP_HINT, trayTooltipText, type TrayStatus } from '@hexbox/vision';
+import {
+  TRAY_TOOLTIP_HINT,
+  trayTooltipText,
+  updateMenuEnabled,
+  updateMenuText,
+  type DataUpdateStamp,
+  type TrayStatus,
+  type UpdatePhase,
+} from '@hexbox/vision';
 
 /* ------------------------------------------------------------------ */
 /* 托盘图标：开发/打包两条路径都要能找到                                  */
@@ -183,10 +204,23 @@ export function attachCloseToTrayHide(win: Electron.BrowserWindow, what: string)
 export interface TrayDeps {
   /** 当前状态（纯函数 `trayStatus()` 的结果；只读菜单项与 tooltip 同一个源）。 */
   readonly status: () => TrayStatus;
-  /** 日志文件绝对路径（`null` = 本次运行不落日志 → 菜单项禁用）。 */
-  readonly logFile: () => string | null;
-  /** 数据目录（`resolveDataDir()` 的结果 = 现有解析口径）。 */
-  readonly dataDir: () => string;
+  /**
+   * 数据更新时间（纯函数 `dataUpdateStamp()` 的结果）。
+   *
+   * ⚠️ 口径（官方 `meta.dataDate` 优先、`dataset.json` 的 mtime 回退）由
+   * `@hexbox/vision/data-update-stamp.ts` 决定并在**菜单文案里标明**；
+   * 这里只负责把那一行显示成灰色、不可点。
+   */
+  readonly dataUpdate: () => DataUpdateStamp;
+  /**
+   * 「检查更新」当前阶段（决定菜单项文案/是否可点）。
+   *
+   * 阶段文案本身就是"点了之后有反应"的载体（`正在检查更新…` / `正在下载更新… 42%`），
+   * 所以它必须来自流程的**实时**状态，而不是这里自己维护一份。
+   */
+  readonly updatePhase: () => UpdatePhase;
+  /** 点「检查更新」→ 交给 `main/update-flow.ts`（联网只在这一次点击之后发生）。 */
+  readonly onCheckUpdate: () => void;
 }
 
 export interface TrayHandle {
@@ -196,62 +230,48 @@ export interface TrayHandle {
   notify(title: string, content: string): boolean;
   /** 当前菜单项文字（自测把它打进日志 = "托盘存在且菜单完整"的证据）。 */
   menuLabels(): string[];
+  /**
+   * 当前菜单的**逐项**清单（文本 + 是否禁用 + 类型）。
+   *
+   * 为什么要有它：托盘菜单在自动化里点不了（机器人没有鼠标），而"菜单里到底是哪几项、
+   * 哪几项是灰的"正是这次改动唯一能被机器证明的部分（见 `runTrayAutotest`）。
+   */
+  menuItems(): { readonly label: string; readonly enabled: boolean; readonly type: string }[];
 }
 
-/** 菜单项文字（自测/日志用；顺序与真实菜单一致）。 */
+/**
+ * 菜单模板（用户 2026-10 拍板的**六条**，逐条对应）。
+ *
+ *   1. `状态：xxx`            —— 保留（灰、不可点）
+ *   2. `数据更新时间：yyyy-mm-dd`—— **新增**（灰、不可点；口径写在文案里）
+ *   3. ~~打开日志~~           —— **移除**（用户明确要求；日志绝对路径在启动时打印，
+ *                                位置见 README/RELEASE-WINDOWS；**不新增菜单项**）
+ *   4. ~~打开数据目录~~        —— **移除**（同上）
+ *   5. `检查更新`             —— **新增**（可点；只在点击后才联网）
+ *   6. `退出`                 —— 保留（**唯一**的真退出入口 → `quitApp()`）
+ *
+ * ⚠️ 移除那两项是**用户决策**，不是遗漏：它们占用了菜单里最显眼的位置，而
+ * 排查用的路径（日志/数据目录）已经写在文档与启动日志里。别"顺手加回来"。
+ */
 function menuTemplate(deps: TrayDeps): Electron.MenuItemConstructorOptions[] {
   const status = deps.status();
-  const logPath = deps.logFile();
+  const data = deps.dataUpdate();
+  const phase = deps.updatePhase();
   return [
-    // 只读状态项：用户判断"它到底在干什么 / 为什么没有标签"的唯一现场依据
+    // 两条只读信息：用户判断"它到底在干什么 / 数据是哪天的"的唯一现场依据
     { label: `状态：${status.text}`, enabled: false },
+    { label: data.label, enabled: false },
     { type: 'separator' },
     {
-      label: logPath === null ? '打开日志（本次未落盘）' : '打开日志',
-      enabled: logPath !== null,
-      click: () => openLogs(logPath),
+      label: updateMenuText(phase),
+      enabled: updateMenuEnabled(phase),
+      click: () => deps.onCheckUpdate(),
     },
-    { label: '打开数据目录', click: () => openDataDir(deps.dataDir()) },
     { type: 'separator' },
     { label: '退出', click: () => quitApp('托盘菜单') },
   ];
 }
 
-/** 资源管理器定位到日志（文件在 = 选中它；还没生成 = 打开目录）。 */
-function openLogs(logPath: string | null): void {
-  if (logPath === null) {
-    console.warn('[hexbox] 托盘菜单「打开日志」：本次运行没有日志文件（开发模式未设 HEXBOX_LOG_FILE）');
-    return;
-  }
-  const dir = dirname(logPath);
-  try {
-    mkdirSync(dir, { recursive: true });
-  } catch {
-    /* 建不出来就按原路径试 */
-  }
-  if (existsSync(logPath)) {
-    shell.showItemInFolder(logPath);
-    console.log(`[hexbox] 托盘菜单「打开日志」→ 资源管理器定位到 ${logPath}`);
-    return;
-  }
-  console.log(`[hexbox] 托盘菜单「打开日志」→ 打开目录 ${dir}（日志文件尚未生成）`);
-  void shell.openPath(dir).then((err) => {
-    if (err !== '') console.warn(`[hexbox] ⚠ 打开日志目录失败：${err}`);
-  });
-}
-
-/** 打开数据目录（不存在就建出来 —— 用户往里放数据覆盖时要先有它）。 */
-function openDataDir(dir: string): void {
-  try {
-    mkdirSync(dir, { recursive: true });
-  } catch {
-    /* 打不开也不影响功能 */
-  }
-  console.log(`[hexbox] 托盘菜单「打开数据目录」→ ${dir}`);
-  void shell.openPath(dir).then((err) => {
-    if (err !== '') console.warn(`[hexbox] ⚠ 打开数据目录失败：${err}`);
-  });
-}
 
 /**
  * 创建托盘（必须 `app.whenReady()` 之后）。
@@ -274,18 +294,38 @@ export function createTray(deps: TrayDeps): TrayHandle | null {
 
   let lastKey: string | null = null;
   const labels = (): string[] => menuTemplate(deps).map((item) => item.label ?? `(${item.type})`);
+  const items = (): { label: string; enabled: boolean; type: string }[] =>
+    menuTemplate(deps).map((item) => ({
+      label: item.label ?? `(${item.type})`,
+      // 没写 enabled 的项在 Electron 里默认是**可点**的，这里如实还原
+      enabled: item.enabled ?? item.type !== 'separator',
+      type: item.type ?? 'normal',
+    }));
   const buildMenu = (): Electron.Menu => Menu.buildFromTemplate(menuTemplate(deps));
 
   const refresh = (): void => {
     const status = deps.status();
+    const update = deps.updatePhase();
     tray.setToolTip(trayTooltipText(status));
     // 每 2 秒轮询都会调一次 refresh：只有内容真的变了才重建菜单并打日志
     //（Menu 对象每次都重建会白造垃圾；日志每 2 秒一行会把真机日志淹掉）
-    const key = `${status.text}\u0000${status.detail}\u0000${deps.logFile() ?? ''}`;
+    // ⚠️ 检查更新的阶段（正在检查/正在下载 x%）也在 key 里：它一变菜单就得重建，
+    //    否则用户点了「检查更新」看不到任何反应（download 进度就靠这一行）。
+    const key = [
+      status.text,
+      status.detail,
+      deps.dataUpdate().label,
+      update.kind,
+      updateMenuText(update),
+    ].join('\u0000');
     if (key === lastKey) return;
     lastKey = key;
     tray.setContextMenu(buildMenu());
-    console.log(`[hexbox] 托盘状态：${status.text}（${status.detail}）`);
+    console.log(
+      `[hexbox] 托盘状态：${status.text}（${status.detail}）` +
+        // 非空闲时把菜单项文案也打出来：这条日志是"点了之后菜单真的变了"的证据
+        (update.kind === 'idle' ? '' : `；检查更新菜单项=${updateMenuText(update)}`),
+    );
   };
 
   // 左键也给菜单（Windows 上左键默认什么都不做，用户会以为图标是死的）
@@ -301,6 +341,7 @@ export function createTray(deps: TrayDeps): TrayHandle | null {
   return {
     refresh,
     menuLabels: labels,
+    menuItems: items,
     notify: (title, content) => {
       try {
         tray.displayBalloon({ title, content, iconType: 'info', noSound: true, largeIcon: false });

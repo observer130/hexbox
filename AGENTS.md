@@ -163,7 +163,7 @@ pnpm --filter @hexbox/web typecheck
 Tests use Node's built-in runner: `node --experimental-strip-types --test ...`.
 **Make the suite green before committing.** New behavior should include tests.
 
-Current tests: **718** — `core` 55 / `vision` 494 / `lcu` 87 /
+Current tests: **743** — `core` 55 / `vision` 519 / `lcu` 87 /
 `provider-communitydragon` 12 / `provider-tencent` 43 / `data-store` 17 /
 `data-cli` 10 (measured locally; **treat `pnpm test` output as the source of
 truth** — this number moves whenever a suite is touched). `provider-registry`
