@@ -17,9 +17,11 @@ import { desktopCapturer, screen } from 'electron';
 
 import {
   cardLabelFor,
+  chooseChampSelectCards,
   countOccupiedSlots,
   decideChampSelectStage,
   detectCards,
+  detectChampSelectCards,
   detectTopBarCandidates,
   extractGrayRaw,
   extractNameStrip,
@@ -35,6 +37,8 @@ import {
   NAME_STRIP,
   type Bitmap,
   type CardLabel,
+  type ChampSelectCardMode,
+  type ChampSelectCardsResult,
   type NameFingerprint,
   type PhysicalRect,
   type PreparedTemplate,
@@ -104,6 +108,15 @@ export interface VisionLoopDeps {
    * 标签（像素占用判不准就会这样），所以主进程应尽量提供本字段。
    */
   readonly pickState?: () => 'picking' | 'locked' | 'unknown';
+  /**
+   * 第一阶段卡片几何的来源（`HEXBOX_CHAMP_SELECT_CARDS`）。
+   *
+   * 不传 = `geometry`（真机标定布局 + 边框判据，见 `vision/champ-select-cards.ts`）。
+   * 为什么默认换掉旧的 `detectCards`：真机帧上它在同一套"选择你的英雄"界面上
+   * 0 张 / 2 张 / 3 张之间抖动（宽度 ±2% 聚桶遇上边框带合并差异），
+   * 且在第二阶段大立绘帧上会给出**位置错误**的 2 个矩形。
+   */
+  readonly champSelectCards?: () => ChampSelectCardMode;
   /** 识别结果的消费方（主进程推给覆盖窗口）。 */
   readonly onResult: (msg: VisionOverlayMsg, display: Electron.Display) => void;
 }
@@ -229,7 +242,9 @@ export async function runVisionRound(
   );
   if (!windowPhysical) void logWindowCandidatesOnce();
 
-  const det = detectCards(bmp);
+  // ⚠️ 卡片检出**不在这里**做：它要等阶段判定（顶栏占用 + LCU 的 pickState）
+  //    决定"这一轮到底该不该看卡片"之后再跑 —— 二阶段跑它纯属浪费
+  //    （旧的 `detectCards` 在这里无条件跑了一次，真机上每轮多花几十毫秒）。
 
   // ── 先扫顶栏：它是"处于哪个阶段"的判据 ───────────────────────────
   //
@@ -308,12 +323,46 @@ export async function runVisionRound(
     return { msg: { active: labels.length > 0, labels, diag }, display, stage: 'topbar' };
   }
 
+  // ── 第一阶段：卡片下方显示胜率 ──
+  //
+  // 卡片矩形有两个来源（开关 `HEXBOX_CHAMP_SELECT_CARDS`）：
+  //   · `geometry`（默认）—— `detectChampSelectCards`：真机标定的"居中一行 2 或 3 张"
+  //     布局 + 四边框判据（吸附到象牙白高亮线的**外缘**）。真机 6 帧正样本全过、
+  //     13 个阴性帧（第二阶段大立绘 / 局内海克斯面板）一张都不出。
+  //   · `legacy` —— 旧的 `detectCards`（自由搜索）：真机同一套界面上 0/2/3 张抖动，
+  //     且在大立绘帧上给出位置错误的 2 个矩形。只作对照。
+  // 两套都**不**互相兜底：几何没拿到就是没拿到（宁可少画，绝不画错位置）。
+  const cardMode = deps.champSelectCards?.() ?? 'geometry';
+  const emptyGeo: ChampSelectCardsResult = {
+    cards: [],
+    confident: false,
+    reason: '（未启用几何检出器）',
+    count: 0,
+    probes: [],
+  };
+  const emptyLegacy = { cards: [] as readonly Rect[], confident: false, reason: '（未启用旧检出器）' };
+  const geometric =
+    cardMode === 'geometry'
+      ? detectChampSelectCards(bmp, {
+          // 窗口在截屏里的归一化矩形：窗口快照形态下是恒等，显示器快照形态下做平移缩放
+          region: windowRectToCapture({ x: 0, y: 0, w: 1, h: 1 }, bmp, windowPhysical, display),
+        })
+      : emptyGeo;
+  const choice = chooseChampSelectCards({
+    mode: cardMode,
+    geometric,
+    legacy: cardMode === 'legacy' ? detectCards(bmp) : emptyLegacy,
+  });
+  const det = { cards: choice.cards, confident: choice.confident, reason: choice.reason };
+
   if (!det.confident || det.cards.length === 0) {
     return {
       msg: {
         active: false,
         labels: [],
-        diag: `第一阶段(${pickState})但未检出卡片: ${det.reason ?? '?'}（顶栏占用 ${topBarOccupiedCount}）`,
+        diag:
+          `第一阶段(${pickState})但未检出卡片[${choice.source}]: ${det.reason ?? '?'}` +
+          `（顶栏占用 ${topBarOccupiedCount}）`,
       },
       display,
       // 阶段判定是**明确的**（顶栏没占用、LCU 也没说 locked）→ 就是一阶段，
@@ -322,7 +371,6 @@ export async function runVisionRound(
     };
   }
 
-  // ── 第一阶段：卡片下方显示胜率 ──
   const workArea = display.workArea;
   const labels: CardLabel[] = [];
   const nameLibrary = resolveDeps(deps.nameLibrary);
@@ -387,11 +435,12 @@ export async function runVisionRound(
       active: true,
       labels,
       diag:
-        `第一阶段(${pickState}): 卡片 ${det.cards.length} 张 → 出标签 ${labels.length} 个` +
+        `第一阶段(${pickState})[${choice.source}]: 卡片 ${det.cards.length} 张 → 出标签 ${labels.length} 个` +
         ` [得分/分差 ${perCard.join(' ')}]` +
         (labels[0] && firstCard
           ? ` 标签0@(${labels[0].x.toFixed(0)},${labels[0].y.toFixed(0)}) ${labels[0].w}x${labels[0].h}` +
-            ` 卡0 y=${(firstCard.y + firstCard.h).toFixed(3)}(归一)→CSS ${((firstCard.y + firstCard.h) * geo.windowHeight).toFixed(0)}`
+            ` 卡0 x=${firstCard.x.toFixed(4)} w=${firstCard.w.toFixed(4)}` +
+            ` y=${(firstCard.y + firstCard.h).toFixed(3)}(归一)→CSS ${((firstCard.y + firstCard.h) * geo.windowHeight).toFixed(0)}`
           : ''),
     },
     display,

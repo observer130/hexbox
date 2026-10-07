@@ -71,7 +71,13 @@ packages/
                               / augment-cadence (idle/active throttling policy
                                 + apiCaptureInterval: api-mode interval, panel
                                 state outranks the trigger state machine)
-                              / augment-trigger (API trigger state machine)
+                              / augment-trigger (API trigger state machine:
+                                death + **level-up crossing an unpicked offer
+                                level** + the not-yet-picked set)
+                              / champ-select-stage (pickState + which producer
+                                owns this round) + champ-select-cards
+                                (champ-select candidate-card geometry, calibrated
+                                on real frames: centered row of 2 or 3)
                               / augment-reroll + augment-reroll-retry (single-card
                                 reroll: fingerprints/thresholds + retry-once
                                 bookkeeping and the non-regressing baseline)
@@ -163,7 +169,7 @@ pnpm --filter @hexbox/web typecheck
 Tests use Node's built-in runner: `node --experimental-strip-types --test ...`.
 **Make the suite green before committing.** New behavior should include tests.
 
-Current tests: **775** — `core` 55 / `vision` 551 / `lcu` 87 /
+Current tests: **796** — `core` 55 / `vision` 572 / `lcu` 87 /
 `provider-communitydragon` 12 / `provider-tencent` 43 / `data-store` 17 /
 `data-cli` 10 (measured locally; **treat `pnpm test` output as the source of
 truth** — this number moves whenever a suite is touched). `provider-registry`
@@ -335,7 +341,7 @@ the match; `HEXBOX_OVERLAY_AUGMENT=0` disables just the in-game chain.
 
 | Group | Variable | Meaning |
 |---|---|---|
-| Trigger | `HEXBOX_AUGMENT_TRIGGER` | `api` = no frames in the normal state, open capture on death + level + not-yet-picked; anything else = `pixel` cadence (default) |
+| Trigger | `HEXBOX_AUGMENT_TRIGGER` | `api` = no frames in the normal state, open capture on death + **level-up crossing an unpicked offer level** + not-yet-picked; anything else = `pixel` cadence (default) |
 | Trigger | `HEXBOX_AUGMENT_API_POLL_MS` | Live Client Data polling interval (default 1000) |
 | Capture | `HEXBOX_AUGMENT_CAPTURE` | `stream` (default) or `oneshot` (comparison / fallback path) |
 | Capture | `HEXBOX_AUGMENT_THUMB_SCALE` | gating canvas scale, clamped to a 0.25 floor (default 0.25) |
@@ -358,6 +364,7 @@ the match; `HEXBOX_OVERLAY_AUGMENT=0` disables just the in-game chain.
 | Self-test | `HEXBOX_LABEL_OVERLAY_TEST_MS` | how long that self-test stays (default 5000 ms) |
 | Self-test | `HEXBOX_DEBUG_FORCE` | `1` = skip the LCU phase check in the debug tools |
 | Overlay | `HEXBOX_OVERLAY_AUGMENT` | `0` / `false` / `off` = disable the in-game augment chain in the **resident** overlay (champ-select labels keep working); anything else = enabled |
+| Overlay | `HEXBOX_CHAMP_SELECT_CARDS` | champ-select stage-1 card geometry source: `geometry` (default, calibrated layout + border criterion in `vision/champ-select-cards.ts`), `legacy` (old free-search `detectCards` — unstable on champ-select frames and wrong on stage-2 frames), `off` (draw no card labels, top bar only). Unknown value → `geometry` |
 | Overlay | `HEXBOX_DATA_DIR` | explicit `data/` directory (otherwise resolved by walking up to `dataset.json`) |
 | Overlay | `HEXBOX_LOG_FILE` | tee console output to this file as UTF-8 (never via PowerShell redirection) |
 | Overlay | `HEXBOX_SMOKE` | `1` = auto-quit after 4 s (smoke run) |

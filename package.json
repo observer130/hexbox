@@ -1,6 +1,6 @@
 {
   "name": "hexbox",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "英雄联盟海克斯乱斗助手：数据查询站 + 国服游戏内悬浮窗辅助（不读内存 / 不注入 / 不解析封包）",
   "license": "MIT",

@@ -509,6 +509,8 @@ import {
   augmentClearLogLine,
   // 选人阶段的子阶段解析（找不到"我的 pick 动作" → unknown，交给顶栏占用兜底）
   parsePickState,
+  // 选人第一阶段候选卡的检出来源（默认标定几何；legacy/off 见 champ-select-cards.ts）
+  champSelectCardMode,
   // 托盘：状态文案 + 「读不到凭证」的一次性气泡（都是纯函数，单测在 @hexbox/vision）
   TRAY_TOOLTIP_HINT,
   trayStatus,
@@ -653,6 +655,17 @@ const AUGMENT_ENABLED = overlayAugmentEnabled(process.env['HEXBOX_OVERLAY_AUGMEN
  * 面板判据挡住了 / 是不是标签本身有问题"时用；常驻覆盖层的选人标签不受影响。
  */
 const AUGMENT_DRAW = process.env['HEXBOX_AUGMENT_DRAW'] !== '0';
+/**
+ * 选人第一阶段「候选卡」的检出来源（`HEXBOX_CHAMP_SELECT_CARDS`）。
+ *
+ * · 默认 `geometry` = 真机标定布局 + 边框判据（`vision/champ-select-cards.ts`）；
+ * · `legacy` = 旧的自由搜索 `detectCards`（真机实测在选人帧上 0/2/3 张之间抖，
+ *   且在第二阶段大立绘帧上给出**位置错误**的 2 个矩形 —— 只作为对照开关保留）；
+ * · `off` = 一张都不画（只出顶栏标签）。
+ *
+ * 解析是纯函数（有单测），这里只负责读环境变量。
+ */
+const CHAMP_SELECT_CARDS = champSelectCardMode(process.env['HEXBOX_CHAMP_SELECT_CARDS']);
 /**
  * **验证用注入**（只影响"一次性气泡"的判据输入，不影响任何真实链路）：
  * `HEXBOX_NOTICE_TEST=1` → 每轮都把"读不到凭证"喂给气泡判据。
@@ -1780,6 +1793,8 @@ app.whenReady().then(() => {
     // 识别可能给出 60000+ 的高 ID，而排行榜/LCU 用基础 ID —— 归一化后再 join
     canonicalId: (id) => canonicalChampionId(id, dataset?.champions ?? []),
     pickState: () => champSelectPickState,
+    // 第一阶段卡片几何的来源（默认标定几何；见 CHAMP_SELECT_CARDS）
+    champSelectCards: () => CHAMP_SELECT_CARDS,
     onResult: pushOverlayVision,
   });
   void pollLoop();

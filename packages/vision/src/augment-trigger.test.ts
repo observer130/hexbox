@@ -51,13 +51,103 @@ function startOffer(t: ReturnType<typeof createAugmentTrigger>, atMs = 1000): vo
 /* 常态与开局                                                          */
 /* ------------------------------------------------------------------ */
 
-test('常态：不死亡就绝不开截屏（等级涨到 18 也不开）', () => {
-  const t = createAugmentTrigger(NO_MIDGAME);
-  for (const level of [1, 3, 5, 7, 9, 11, 14, 15, 18]) {
-    const d = t.onSample(sample({ level, gameTime: 60 + level * 30 }), level * 30000);
-    assert.equal(d.capture, false, `等级 ${level} 未死亡不应开截屏`);
+test('常态：升级未跨越待选等级 → 绝不开截屏', () => {
+  // 关掉开局分支（startWindowSec: 0）以便只观察"升级"这一条规则
+  const t = createAugmentTrigger({ midGameStartSec: Number.MAX_SAFE_INTEGER, startWindowSec: 0 });
+  for (const level of [1, 3, 5, 6, 6]) {
+    const d = t.onSample(sample({ level, gameTime: 60 + level * 30 }), level * 30000 + 1);
+    assert.equal(d.capture, false, `等级 ${level} 未跨待选等级不应开截屏`);
   }
-  assert.deepEqual(t.pending, [0, 7, 11, 15], '未死亡不消耗任何待选');
+  assert.deepEqual(t.pending, [0, 7, 11, 15], '不开窗就不消耗任何待选');
+});
+
+/* ------------------------------------------------------------------ */
+/* 升级定向开窗（2026-10-12 用户裁决；真机证据见 augment-trigger.ts 头注）   */
+/* ------------------------------------------------------------------ */
+
+test('升级到待选等级（未死亡）→ 定向开窗，reason 明确写出待选等级', () => {
+  const t = createAugmentTrigger({ midGameStartSec: Number.MAX_SAFE_INTEGER, startWindowSec: 0 });
+  const before = t.onSample(sample({ level: 6, gameTime: 200 }), 1000);
+  assert.equal(before.capture, false, '6 级还没到待选等级');
+  const up = t.onSample(sample({ level: 7, gameTime: 210 }), 11000);
+  assert.equal(up.capture, true, '升级跨过 7 级 → 必须开一次窗');
+  assert.equal(up.changed, true);
+  assert.match(up.reason, /升级到待选等级 7/);
+  assert.match(up.reason, /6→7/);
+  assert.deepEqual(t.pending, [0, 7, 11, 15], '只是看一眼，不消耗待选');
+});
+
+test('升级窗口：没见到面板 → 到点自动关，pending 一个都不少（不许误消耗）', () => {
+  const t = createAugmentTrigger({
+    midGameStartSec: Number.MAX_SAFE_INTEGER,
+    startWindowSec: 0,
+    armWindowMs: 5000,
+  });
+  assert.equal(t.onSample(sample({ level: 7, gameTime: 200 }), 1000).capture, true);
+  const late = t.onSample(sample({ level: 8, gameTime: 260 }), 30000);
+  assert.equal(late.capture, false, '窗口到点必须自愈关闭');
+  assert.deepEqual(t.pending, [0, 7, 11, 15], '未见到面板绝不允许消耗待选');
+});
+
+test('升级窗口：面板还开着时继续升级 → 保持开截屏，且不重置"见过面板"', () => {
+  const t = createAugmentTrigger({ midGameStartSec: Number.MAX_SAFE_INTEGER, startWindowSec: 0 });
+  assert.equal(t.onSample(sample({ level: 7, gameTime: 200 }), 1000).capture, true);
+  t.notePanelOpen(1500);
+  // 面板还开着时又升到 11 级（跨过 11）——不得重新 startCapture（那会清掉 sawPanel）
+  const more = t.onSample(sample({ level: 11, gameTime: 220 }), 2000);
+  assert.equal(more.capture, true);
+  assert.match(more.reason, /已在开截屏/);
+  const closed = t.notePanelClosed(3000);
+  assert.match(closed.reason, /^选完/, `关边沿必须报"选完"：${closed.reason}`);
+  // 关边沿消耗的是**最小够格**那次（这里是 0 = 开局那次，11 级时它够格）
+  assert.deepEqual(t.pending, [7, 11, 15], '只消耗最小够格那一次');
+});
+
+test('升级开窗：没有未选 offer 时永不因升级开窗', () => {
+  const t = createAugmentTrigger({
+    offerLevels: [],
+    midGameStartSec: Number.MAX_SAFE_INTEGER,
+    startWindowSec: 0,
+  });
+  for (const level of [7, 11, 15, 18]) {
+    const d = t.onSample(sample({ level, gameTime: 300 }), level * 1000);
+    assert.equal(d.capture, false, `待选为空时等级 ${level} 不该开窗`);
+  }
+  assert.deepEqual(t.pending, []);
+});
+
+test('升级开窗：该等级已经选完 → 升级不再开窗（只记录）', () => {
+  // 用 [7,11,15]（不含开局那次）以便"7 级选掉"以后待选里真的没有 7
+  const t = createAugmentTrigger({
+    offerLevels: [7, 11, 15],
+    midGameStartSec: Number.MAX_SAFE_INTEGER,
+    startWindowSec: 0,
+  });
+  t.onSample(sample({ level: 7, isDead: true, gameTime: 200 }), 1000);
+  t.notePanelOpen(1500);
+  t.notePanelClosed(2000); // 7 级选掉
+  assert.deepEqual(t.pending, [11, 15]);
+  // 升到 11：跨过待选等级 11 → 照常开窗（这是"该等级"本身还没选）
+  const up11 = t.onSample(sample({ level: 11, gameTime: 260 }), 10000);
+  assert.equal(up11.capture, true);
+  assert.match(up11.reason, /升级到待选等级 11/);
+  // 窗口一直没见到面板 → 到点自愈关闭（同等级再采一次即可触发超时判定）
+  const expired = t.onSample(sample({ level: 11, gameTime: 320 }), 100000);
+  assert.equal(expired.capture, false);
+  assert.match(expired.reason, /窗口超时/);
+  assert.deepEqual(t.pending, [11, 15], '超时不得消耗待选');
+  // 已选掉的等级不再制造窗口：12 级不跨任何待选等级 → 只记录
+  const d = t.onSample(sample({ level: 12, gameTime: 340 }), 200000);
+  assert.equal(d.capture, false, '12 级不跨任何待选等级');
+  assert.match(d.reason, /未跨待选等级/);
+});
+
+test('升级开窗：中途启动首帧就已在待选等级之上 → 开一次（覆盖"工具刚起就在 11 级"）', () => {
+  const t = createAugmentTrigger(); // 默认 midGameStartSec=60
+  const d = t.onSample(sample({ level: 11, gameTime: 420 }), 1000);
+  assert.equal(d.capture, true);
+  assert.match(d.reason, /升级到待选等级 7,11/);
+  assert.deepEqual(t.pending, [7, 11, 15], '开局那次按已选处理（中途启动）');
 });
 
 test('开局：对局早期直接开截屏，选完关掉且消耗"开局"那一次', () => {

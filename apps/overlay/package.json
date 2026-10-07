@@ -1,6 +1,6 @@
 {
   "name": "@hexbox/overlay",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "游戏内悬浮窗（不注入 / 不读内存 / 不打开游戏进程句柄）",

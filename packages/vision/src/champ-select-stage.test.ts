@@ -81,3 +81,33 @@ test('阶段：负数/小数占用不产生怪判定', () => {
   assert.equal(decideChampSelectStage({ pickState: 'unknown', topBarOccupiedCount: -3 }).stage, 'cards');
   assert.equal(decideChampSelectStage({ pickState: 'unknown', topBarOccupiedCount: 1.8 }).stage, 'topbar');
 });
+
+/* ------------------------------------------------------------------ */
+/* ② 收尾：`第二阶段(picking)` 必须**构造上不可能**                     */
+/* ------------------------------------------------------------------ */
+
+test('★ 不变量：任何 pickState × 任何占用数，都不会在 picking 下走顶栏分支', () => {
+  // 真机日志（打包版 0.1.0，修前）里出现过 30 行 `第二阶段(picking): 顶栏占用 N 格`
+  // —— 那 30 行全部来自 `isPhase2 = 顶栏占用>0 || locked` 这个旧口径。
+  // 现在 `vision-loop.ts` 只在 `stage === 'topbar'` 的分支里打印那一行，
+  // 所以这条不变量成立 = `第二阶段(picking)` 在代码里不可达。
+  const states = ['picking', 'locked', 'unknown'] as const;
+  for (const pickState of states) {
+    for (const occupied of [-1, 0, 1, 3, 9, 10, 99]) {
+      const d = decideChampSelectStage({ pickState, topBarOccupiedCount: occupied });
+      assert.ok(
+        !(pickState === 'picking' && d.stage === 'topbar'),
+        `picking + 占用 ${occupied} 竟然走了顶栏分支：${d.reason}`,
+      );
+    }
+  }
+});
+
+test('★ 队友锁满 10 格也不能把"我还在选"翻成顶栏（与日志 701/706 同形）', () => {
+  // 日志原样：`第二阶段(picking): 顶栏占用 1 格 … 3 格 … 10 格`（修前）
+  for (const occupied of [0, 1, 2, 3, 9, 10]) {
+    const d = decideChampSelectStage({ pickState: 'picking', topBarOccupiedCount: occupied });
+    assert.equal(d.stage, 'cards', `占用 ${occupied} 格时被翻阶段了`);
+    assert.equal(d.reason.includes('队友'), true, '原因必须写明"那是队友锁的"');
+  }
+});

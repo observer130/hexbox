@@ -21,6 +21,9 @@ export * from './augment-open-recognize.ts';
 export * from './augment-log-diag.ts';
 // 选人阶段的子阶段解析（pickState）与"这一轮谁出标签"的判定（纯函数）
 export * from './champ-select-stage.ts';
+// 选人第一阶段**候选卡**的专用几何与检出（真机标定：居中一行，2 或 3 张；
+// 与局内海克斯面板的布局无关，勿混用）+ 来源开关
+export * from './champ-select-cards.ts';
 export * from './augment-label.ts';
 export * from './augment-tier-label.ts';
 // 面板停留在期间的**单卡刷新（reroll）**检测：指纹 / 距离 / 判定 / 合并（纯函数）
