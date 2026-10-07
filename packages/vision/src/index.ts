@@ -15,6 +15,12 @@ export * from './augment-panel.ts';
 export * from './augment-cadence.ts';
 export * from './augment-ocr.ts';
 export * from './augment-trigger.ts';
+// 开边沿整批识别的两个纯决策（原生重检失败 → 门控矩形兜底；失败后**有界**重试）
+export * from './augment-open-recognize.ts';
+// 常驻路径的轻量诊断（日志时间偏移 + 采样窗口汇总与裁决；无行为变化）
+export * from './augment-log-diag.ts';
+// 选人阶段的子阶段解析（pickState）与"这一轮谁出标签"的判定（纯函数）
+export * from './champ-select-stage.ts';
 export * from './augment-label.ts';
 export * from './augment-tier-label.ts';
 // 面板停留在期间的**单卡刷新（reroll）**检测：指纹 / 距离 / 判定 / 合并（纯函数）

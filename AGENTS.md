@@ -163,7 +163,7 @@ pnpm --filter @hexbox/web typecheck
 Tests use Node's built-in runner: `node --experimental-strip-types --test ...`.
 **Make the suite green before committing.** New behavior should include tests.
 
-Current tests: **743** — `core` 55 / `vision` 519 / `lcu` 87 /
+Current tests: **775** — `core` 55 / `vision` 551 / `lcu` 87 /
 `provider-communitydragon` 12 / `provider-tencent` 43 / `data-store` 17 /
 `data-cli` 10 (measured locally; **treat `pnpm test` output as the source of
 truth** — this number moves whenever a suite is touched). `provider-registry`
@@ -345,6 +345,8 @@ the match; `HEXBOX_OVERLAY_AUGMENT=0` disables just the in-game chain.
 | Capture | `HEXBOX_AUGMENT_CLOSED_SAMPLES` | how many closed-state samples to keep (default 0) |
 | Cadence | `HEXBOX_AUGMENT_IDLE_MS` / `_ACTIVE_MS` / `_PROBE_MS` / `_TAIL_MS` | throttling intervals (1000 / 250 / 6000 / 20000) |
 | Cadence | `HEXBOX_AUGMENT_CLOSE_HEAL_PROBE` | `1` = enable the low-frequency **post-close self-heal probe** in api mode (1 frame / 6 s for 20 s after a confirmed close). **Off by default**: the user chose strict zero frames; see §十七 of `docs/AUGMENT-PANEL.md` |
+| Cadence | `HEXBOX_AUGMENT_PENDING_PROBE_MS` | `>0` = while an augment offer is still unpicked, sample one frame every N ms (verifies whether a panel can appear **outside** a death window). **Off by default (0)** = strict zero frames; see `pendingProbeMs` in `vision/augment-cadence.ts` |
+| Diagnosis | `HEXBOX_AUGMENT_API_TRACE` | `1` = log **every** 2999 poll sample (gameTime / level / isDead / respawnTimer / capture / pending) — non-changed trigger decisions are otherwise invisible. Off by default |
 | Recording | `HEXBOX_AUGMENT_SECONDS` | fixed recording length; `0` = follow the game (default) |
 | Recording | `HEXBOX_AUGMENT_MAX_MINUTES` | follow-mode cap in minutes (default 45) |
 | Recording | `HEXBOX_AUGMENT_OUT` | artifact subdirectory under `debug/`, or an absolute path |

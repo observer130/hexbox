@@ -137,11 +137,39 @@ function apiInput(over: Partial<Parameters<typeof apiCaptureInterval>[0]> = {}) 
     panelOpen: false,
     capture: false,
     rechecking: false,
+    offerOutstanding: false,
     lastConfirmedCloseAtMs: null,
     nowMs: 0,
     ...over,
   };
 }
+
+test('api 间隔：待选探针**默认关闭** —— 还有未选海克斯也仍然一帧不取（用户裁决）', () => {
+  assert.equal(API_CADENCE_DEFAULTS.pendingProbeMs, 0, '回退点：默认严格零取帧');
+  assert.equal(apiCaptureInterval(apiInput({ offerOutstanding: true })).intervalMs, 0);
+});
+
+test('api 间隔：待选探针（显式打开时）—— 只有"还有未选海克斯"才低频取帧', () => {
+  const opts = { pendingProbeMs: 6000 };
+  const d = apiCaptureInterval(apiInput({ offerOutstanding: true }), opts);
+  assert.equal(d.intervalMs, 6000);
+  assert.match(d.reason, /待选探针/);
+  // 都选完了 → 回到严格零取帧
+  assert.equal(apiCaptureInterval(apiInput({ offerOutstanding: false }), opts).intervalMs, 0);
+  // 面板在屏 / 已开截屏 / 复检窗口 三条**都比探针优先**
+  assert.equal(
+    apiCaptureInterval(apiInput({ offerOutstanding: true, panelOpen: true }), opts).intervalMs,
+    API_CADENCE_DEFAULTS.rerollPollMs,
+  );
+  assert.equal(
+    apiCaptureInterval(apiInput({ offerOutstanding: true, capture: true }), opts).intervalMs,
+    API_CADENCE_DEFAULTS.activeMs,
+  );
+  assert.equal(
+    apiCaptureInterval(apiInput({ offerOutstanding: true, rechecking: true }), opts).intervalMs,
+    API_CADENCE_DEFAULTS.activeMs,
+  );
+});
 
 test('api 间隔：面板在屏时**即使 capture=false** 也必须 >0（面板状态优先）', () => {
   const d = apiCaptureInterval(apiInput({ panelOpen: true, capture: false }));

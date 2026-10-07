@@ -18,6 +18,7 @@ import { desktopCapturer, screen } from 'electron';
 import {
   cardLabelFor,
   countOccupiedSlots,
+  decideChampSelectStage,
   detectCards,
   detectTopBarCandidates,
   extractGrayRaw,
@@ -256,17 +257,22 @@ export async function runVisionRound(
     }
   }
 
-  // 阶段判定：**顶栏有内容就是二阶段**（物理事实，真机两阶段都验证过：
-  // 一阶段 10 格全空 → 占用 0；二阶段有头像 → 占用 4）。
-  // LCU 的 pickState 只作为**补充**：它说 locked 就算二阶段，但它说 picking
-  // **不能**推翻占用证据。
+  // 阶段判定：**我的 pick 动作是否完成**说了算（`parsePickState` 在 `index.ts` 里解析）。
   //
-  // ⚠️ 真机 bug（本行曾写错）：上一版把 pickState 当权威 →
-  //   `isPhase2 = pickState==='locked' || (pickState==='unknown' && 占用>0)`
-  // 一旦 LCU 会话里的 pick 动作解析不到（字段与假设不一致），pickState 就是
-  // 'picking'，于是二阶段**仍走一阶段分支**：detectCards 在美术图上检出假卡片，
-  // 标签被画到屏幕左侧、且每轮位置几乎不变（用户报告的第 4 条）。
-  const isPhase2 = topBarOccupiedCount > 0 || pickState === 'locked';
+  // ⚠️ 真机 bug（2026-10-11，选人段）：原判据是
+  //   `isPhase2 = topBarOccupiedCount > 0 || pickState === 'locked'`
+  // —— 顶栏占用**单独**就能翻阶段。而顶栏（备选区）在我还在三选一时就会被**队友**
+  // 锁定的英雄填满（真机日志：`第二阶段(picking): 顶栏占用 3 格 …`），
+  // 于是这一轮的生产者从"我的三张卡"被抢到"顶栏"：
+  // 我的卡片一个标签都没有，屏幕上反而出现队友的顶栏标签，下一轮阶段又切回去 →
+  // 标签记忆被反复 reset → 用户看到的正是"三选一阶段识别准确率非常低"。
+  //
+  // 现在的口径（纯函数 + 单测 `packages/vision/src/champ-select-stage.ts`）：
+  //   · `locked`（我选完了）→ 顶栏；
+  //   · `picking`（我还在选）→ **卡片**（顶栏占用是队友的，不作依据）；
+  //   · `unknown`（LCU 读不到我的动作）→ 才用顶栏占用兜底。
+  const stageDecision = decideChampSelectStage({ pickState, topBarOccupiedCount });
+  const isPhase2 = stageDecision.stage === 'topbar';
 
   if (isPhase2) {
     // ── 第二阶段：顶栏备选区逐格胜率 ──

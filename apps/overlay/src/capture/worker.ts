@@ -33,6 +33,8 @@ import {
   detectPanelPresenceInRegions,
   gateCanvasWidth,
   readAugmentName,
+  resolveOpenRecognizeCards,
+  PANEL_THRESHOLDS,
   type AugmentCardFingerprint,
   type AugmentNameFingerprint,
   type Bitmap,
@@ -207,6 +209,14 @@ let frozenRects: Rect[] | null = null;
 /** 最近一帧检出的卡片（重随重识别要用它的矩形与亮度字段）。 */
 let latestCards: readonly PanelCard[] = [];
 /**
+ * 最近一次**卡片判据命中**的那一帧检出的卡片（`det.found === true`）。
+ *
+ * 与 `latestCards`（每帧都更新）的区别：这里只在门控"确认面板在屏"的帧上更新，
+ * 所以它天然是"门控验过的卡片矩形" —— 整批识别的原生重检失败时用它兜底
+ * （见 `vision/augment-open-recognize.ts`；真机：门控 39 命中 / 原生 40 失败）。
+ */
+let lastHitCards: readonly PanelCard[] = [];
+/**
  * 最近一帧的**门控画布像素**（指纹基线也在它上面算 —— 与后续帧同一分辨率，
  * 否则"原生分辨率算基线、门控分辨率比后续帧"会引入一层无谓的差异）。
  */
@@ -299,6 +309,10 @@ function tick(): void {
   //    这里只负责把画布像素与"本帧检测结果"喂进去 —— 两个入口
   //    （录制工具 / 常驻覆盖层）共用本文件，所以这条保护不可能只在一条路径上生效。
   latestCards = det.cards;
+  // ⚠️ 只记**卡片判据命中**的那一帧：它是"门控确认过面板在屏"的证据，
+  //    也是整批识别原始重检失败时的兜底矩形（`resolveOpenRecognizeCards`）。
+  //    未命中帧的 `det.cards` 可能只有候选、甚至为空，不能当兜底依据。
+  if (det.found && det.cards.length > 0) lastHitCards = det.cards;
   latestGatingBmp = bmp;
   latestFingerprints = augmentWatchFingerprints(bmp, watchRects, det);
 
@@ -468,10 +482,24 @@ async function recognize(opts: { readonly only?: readonly number[] } = {}): Prom
   if (config.altRegion) regions.push(config.altRegion);
   const hit = detectAugmentPanelInRegions(bmp, regions);
   const library = config.library ?? [];
-  if (!hit.detection.found) {
+  // ⚠️ 真机回归（2026-10-11）：**同一块面板、两个分辨率、同一条阈值**会打架 ——
+  //    门控在 1/3 分辨率上量到 39（< 40 → 命中，于是开出"面板出现"开边沿），
+  //    原生重检在 1:1 上量到 **40**（`>= 40` → 失败）→ 整批识别"未命中"、
+  //    面板在屏 25.7 秒一个标签都没有（日志：`卡片内部不够暗(40 ≥ 40)`）。
+  //    门控才是"面板在屏"的权威（开边沿由它给出，且要求连续 2 帧命中），
+  //    原生重检只负责**更精确的矩形** —— 它说"不"的时候退回门控刚验过的矩形继续
+  //    OCR（矩形是归一化的，1/3 分辨率下同样可用），而不是把整块面板丢掉。
+  const plan = resolveOpenRecognizeCards({
+    native: hit.detection,
+    // `lastHitCards` = 最近一次**卡片判据命中**的那一帧检出的卡片（见 `tick()`）。
+    gating: lastHitCards,
+    minCards: PANEL_THRESHOLDS.minCards,
+  });
+  if (plan.source === 'gating') log(`⚠ ${plan.reason}`);
+  if (plan.source === 'none') {
     api?.recognized?.({
       ok: false,
-      reason: hit.detection.reason,
+      reason: plan.reason,
       cards: [],
       regionIndex: hit.regionIndex,
       tookMs: performance.now() - t0,
@@ -480,7 +508,7 @@ async function recognize(opts: { readonly only?: readonly number[] } = {}): Prom
     });
     return;
   }
-  const cards = hit.detection.cards.map((c) => {
+  const cards = plan.cards.map((c) => {
     const m = library.length > 0 ? readAugmentName(bmp, c.rect, library) : null;
     return {
       rect: c.rect,
@@ -636,6 +664,7 @@ function unwatch(): void {
   watchRects = null;
   frozenRects = null;
   latestCards = [];
+  lastHitCards = [];
   latestGatingBmp = null;
   latestFingerprints = [];
 }

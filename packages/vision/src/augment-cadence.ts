@@ -175,7 +175,9 @@ export function createCadencePolicy(options: Partial<CadenceOptions> = {}): Cade
  *      结果间隔被压回 0 → 一帧不取 → 面板上的标签永远不更新（也永远关不掉）。
  *   2. 触发状态机说在开截屏 → `activeMs`（等面板/等连选）。
  *   3. 关闭待确认的复检窗口 → `activeMs`（没有帧就不可能有开边沿，自愈无从谈起）。
- *   4. 其余 → `0`（严格常态零取帧）。
+ *   4. **待选未选**（`offerOutstanding`）且 `pendingProbeMs > 0`（**默认 0 = 关闭**）
+ *      → `pendingProbeMs`：验证"面板是否出现在死亡窗口之外"（见 `pendingProbeMs`）。
+ *   5. 其余 → `0`（严格常态零取帧）。
  *
  * ── 关后自愈探针（**默认关闭**，见 `API_CADENCE_DEFAULTS.healProbe`）─────────
  *
@@ -202,6 +204,14 @@ export interface ApiCadenceInput {
   /** 是否处于"关闭待确认"的复检窗口（`closeConfirm.state.rechecking`）。 */
   readonly rechecking: boolean;
   /**
+   * 是否**还有没选的海克斯**（`trigger.pending.length > 0`）。
+   *
+   * 只喂给"待选未选时的低频探针"（`pendingProbeMs`，**默认关闭**）：见本文件
+   * `ApiCadenceOptions.pendingProbeMs` 的说明 —— 2026-10-11 真机两局里
+   * "第 2 次海克斯"都出现在**死亡窗口之外**，光靠死亡触发根本看不到它。
+   */
+  readonly offerOutstanding: boolean;
+  /**
    * 上一次"确认关闭"的时刻（ms，与 `nowMs` 同一时基）；
    * `null` = 本局还没有确认过关闭（或已复位）。
    */
@@ -221,6 +231,24 @@ export interface ApiCadenceOptions {
   readonly healWindowMs: number;
   /** 关后自愈探针总开关（**默认关闭**：用户选择严格零取帧）。 */
   readonly healProbe: boolean;
+  /**
+   * **待选未选时**的低频探针间隔（ms；`0` = 关闭，默认）。
+   *
+   * ── 为什么要有（2026-10-11 真机两局的直接产物）──────────────────────────
+   *
+   * 严格零取帧（`0`）只在"海克斯一定出现在死亡窗口内"这个前提下才安全。
+   * 两局真机日志都不满足：`pending [7]` 时玩家在 7/8/9 级各死了一次，
+   * 每次 45 秒窗口里门控**一条判据都没看见面板**（另一局同样）；
+   * 而同一个状态机在 10/11 级、14/15 级的死亡窗口里都抓到了面板。
+   *
+   * 所以"面板到底会不会出现在死亡窗口之外（例如活着的时候）"必须能**验证**：
+   * 打开这个探针（`HEXBOX_AUGMENT_PENDING_PROBE_MS=6000`）就退化成
+   * "还有未选海克斯时，每 6 秒扫一帧"。代价与收益与关后自愈探针同量级
+   * （一局 20 分钟约 200 帧 ≈ 4 秒 CPU），但**它是产品取舍**：
+   * 用户 2026-10-11 明确选了"严格零取帧"，所以这里**默认 0（关闭）**，
+   * 要改默认值只需要改这一个常量。
+   */
+  readonly pendingProbeMs: number;
 }
 
 export const API_CADENCE_DEFAULTS: ApiCadenceOptions = {
@@ -231,6 +259,9 @@ export const API_CADENCE_DEFAULTS: ApiCadenceOptions = {
   // ⚠️ 回退点：用户裁决"严格常态零取帧"，所以这条探针**默认不启用**。
   //    打开它 = 误判关闭后最多 6 秒自愈（代价：关闭后 20 秒内 1 帧/6 秒）。
   healProbe: false,
+  // ⚠️ 回退点：同上（用户裁决"严格零取帧"）。打开它 = 还有未选海克斯时
+  //    每 N 毫秒采一帧，用来验证"面板会出现在死亡窗口之外"（见上面长注）。
+  pendingProbeMs: 0,
 };
 
 export interface ApiCadenceDecision {
@@ -265,6 +296,18 @@ export function apiCaptureInterval(
     return {
       intervalMs: o.activeMs,
       reason: `关闭待确认 → 复检取帧 ${o.activeMs}ms（面板若还在就会自己回来）`,
+      healProbe: false,
+    };
+  }
+  // 待选未选时的低频探针（**默认关闭**，见 `pendingProbeMs`）：
+  // 面板可能出现在死亡窗口之外，这条分支是"验证它"的唯一手段。
+  // 它**不改**触发状态机的 `capture`（消耗/开窗仍然只由死亡决定），只是取帧看一眼。
+  if (o.pendingProbeMs > 0 && input.offerOutstanding) {
+    return {
+      intervalMs: o.pendingProbeMs,
+      reason:
+        `还有未选海克斯 → 待选探针 ${o.pendingProbeMs}ms` +
+        `（验证"面板是否出现在死亡窗口之外"；capture=false 不变）`,
       healProbe: false,
     };
   }

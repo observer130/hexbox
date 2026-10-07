@@ -75,9 +75,12 @@ import {
   createCadencePolicy,
   createCloseConfirm,
   createPanelTracker,
+  decideOpenRecognitionRetry,
   decideRerollRetry,
   fingerprintDistance,
   findGameWindowRectCached,
+  formatApiTraceLine,
+  formatCaptureWindowLine,
   lookupAugmentPickRate,
   lookupAugmentTier,
   makeScreenGeometry,
@@ -87,16 +90,18 @@ import {
   rerolledCardIndices,
   shouldAdoptReportedBaseline,
   toScreenTierLabels,
+  withLogOffset,
   PANEL_ROW_REGION,
   type AugmentBadgeAlign,
   type AugmentBadgeSize,
-  type AugmentCardFingerprint,
   type AugmentClearReason,
+  type AugmentCardFingerprint,
   type CadenceMode,
   type CloseConfirmDecision,
   type LabelRowLock,
   type PanelDetection,
   type PanelPresence,
+  type PanelReading,
   type PhysicalRect,
   type Rect,
   type RerollCardState,
@@ -162,6 +167,33 @@ const REROLL_POLL_MS = ((): number => {
  */
 const CLOSE_HEAL_PROBE = ((): boolean => {
   const v = (process.env['HEXBOX_AUGMENT_CLOSE_HEAL_PROBE'] ?? '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'on';
+})();
+
+/**
+ * **待选未选时的低频探针**（`HEXBOX_AUGMENT_PENDING_PROBE_MS`，**默认 0 = 关闭**）。
+ *
+ * 严格零取帧只在"海克斯一定出现在死亡窗口内"这个前提下才安全；2026-10-11 两局真机
+ * 都不满足（见 `vision/augment-cadence.ts` 的 `pendingProbeMs` 长注）。要验证
+ * "面板会不会出现在死亡窗口之外"，把这一项设成 6000 跑一局即可：还有未选海克斯时
+ * 每 6 秒采一帧（一局约 200 帧 ≈ 4 秒 CPU）。**默认关闭是产品取舍**（用户明确选过
+ * 严格零取帧），要改默认值只需要改这一个常量。
+ */
+const PENDING_PROBE_MS = ((): number => {
+  const v = Number(process.env['HEXBOX_AUGMENT_PENDING_PROBE_MS'] ?? 0);
+  if (!Number.isFinite(v) || v <= 0) return 0;
+  return Math.max(500, Math.round(v));
+})();
+
+/**
+ * 每次 2999 采样都写一行日志（`HEXBOX_AUGMENT_API_TRACE=1`，**默认关闭**）。
+ *
+ * 触发状态机的**非变化决策不写日志**，所以"玩家什么时候死的、几级、待选是什么"
+ * 在常驻日志里看不到 —— 而这正是"第 2 次海克斯为什么没抓到"要回答的问题。
+ * 一局 20 分钟约 1200 行（≈100KB，日志 4MB 才轮转）。
+ */
+const API_TRACE = ((): boolean => {
+  const v = (process.env['HEXBOX_AUGMENT_API_TRACE'] ?? '').trim().toLowerCase();
   return v === '1' || v === 'true' || v === 'on';
 })();
 
@@ -659,6 +691,28 @@ export class AugmentController {
   private roundMs: number[] = [];
   private sincePrevMs: number[] = [];
 
+  /* ── 开边沿整批识别的重试记账（真机：面板在屏 25.7 秒、一次识别失败就一个标签都没有）── */
+  /** 开边沿时刻（ms；null = 当前没有在开着的面板）。 */
+  private openEdgeAtMs: number | null = null;
+  /** 本块面板已发起过几次整批识别（含开边沿那一次）。 */
+  private openAttempts = 0;
+  /** 最近一次整批识别是否还在飞行中（渲染端还没回传）。 */
+  private openAttemptPending = false;
+  /** 最近一次整批识别的发起时刻（ms）。 */
+  private openLastAttemptAtMs: number | null = null;
+  /** 开边沿那一帧门控检出的卡片数（重试的"目标张数"）。 */
+  private openExpectedCards = 0;
+  /** 本批里**认出了名字**的卡数（0 = 这一批什么都不能画）。 */
+  private openNamedCards = 0;
+
+  /* ── 采样窗口统计（诊断：把"没取帧"和"取帧了但没看到面板"分开）── */
+  private winOpenedAtMs: number | null = null;
+  private winSamples = 0;
+  private winHits = 0;
+  private winPresence = 0;
+  private winOpenEdges = 0;
+  private winCloseEdges = 0;
+
   /* ── 强度表与英雄身份 ── */
   private dataset: Dataset | null = null;
   private builds: ChampionDetailSet | null = null;
@@ -734,6 +788,11 @@ export class AugmentController {
     this.deps = deps;
     this.logLine = deps.log ?? ((line: string): void => console.log(line));
     this.warnLine = deps.warn ?? ((line: string): void => console.warn(line));
+    // 诊断（无行为变化）：每条 [augment]/[hexbox] 日志带上"链路建立以来的秒数"。
+    // 真机复盘的硬伤：这份日志没有时间戳，"开截屏 → 关截屏"之间是一个采样周期
+    // 还是 45 秒（armWindowMs）根本分不出来（2026-10-11 差点因此定错根因）。
+    const rawLog = this.logLine;
+    this.logLine = (line: string): void => rawLog(withLogOffset(line, Date.now() - this.startedAt));
     const envTrigger = process.env['HEXBOX_AUGMENT_TRIGGER'] === 'api' ? 'api' : 'pixel';
     this.triggerMode = deps.trigger ?? envTrigger;
   }
@@ -1363,6 +1422,12 @@ export class AugmentController {
     this.samples++;
     if (reading.found) this.foundFrames++;
     if (reading.state === 'open') this.openStateFrames++;
+    // 采样窗口统计（诊断；见 `vision/augment-log-diag.ts`）：窗口开着才计。
+    if (this.winOpenedAtMs !== null) {
+      this.winSamples++;
+      if (reading.found) this.winHits++;
+      if (reading.presenceHolds > 0) this.winPresence++;
+    }
     this.detectMs.push(timing.detectMs);
     this.grabMs.push(timing.grabMs);
     this.roundMs.push(timing.detectMs + timing.grabMs);
@@ -1412,6 +1477,8 @@ export class AugmentController {
           panelOpen: reading.state === 'open',
           capture: on,
           rechecking,
+          // "还有未选海克斯" → 待选探针（默认关闭）的唯一输入（见 `PENDING_PROBE_MS`）。
+          offerOutstanding: (this.apiTrigger?.pending.length ?? 0) > 0,
           lastConfirmedCloseAtMs: this.lastConfirmedCloseAtMs,
           nowMs,
         },
@@ -1421,6 +1488,7 @@ export class AugmentController {
           probeMs: PROBE_MS,
           healWindowMs: TAIL_MS,
           healProbe: CLOSE_HEAL_PROBE,
+          pendingProbeMs: PENDING_PROBE_MS,
         },
       );
       this.applyInterval(
@@ -1448,6 +1516,7 @@ export class AugmentController {
 
     if (reading.edge === 'open') {
       this.openCount++;
+      this.winOpenEdges++;
       this.logLine(
         `[augment] ▶ 面板出现 #${this.openCount} @${((nowMs - this.startedAt) / 1000).toFixed(1)}s — ${reading.reason}`,
       );
@@ -1466,9 +1535,20 @@ export class AugmentController {
       // 整排行基准的锁也在这里清掉：新面板 = 新的一排（"基准在**开边沿**锁定"）。
       this.rowLock = null;
       this.rowLockAtMs = 0;
+      // 整批识别的重试记账（见 `maybeRetryOpenRecognize`）：额度是**每块面板一份**。
+      this.openEdgeAtMs = nowMs;
+      this.openAttempts = 1;
+      this.openAttemptPending = true;
+      this.openLastAttemptAtMs = nowMs;
+      this.openExpectedCards = reading.cards.length;
+      this.openNamedCards = 0;
       this.stream?.recognize();
     } else if (reading.edge === 'close') {
       this.closeCount++;
+      this.winCloseEdges++;
+      // 关闭边沿之后不再对这块面板做任何识别（`onRecognized` 里还有一道 isRunning 门）。
+      this.openEdgeAtMs = null;
+      this.openAttemptPending = false;
       // ⚠️ 关闭判定的**依据一次打全**（哪几个信号、各自连续几次、阈值多少）：
       // 用户报"面板开着标签却没了"时，唯一能回答"凭什么说面板不在"的就是这一行。
       this.logLine(
@@ -1488,6 +1568,8 @@ export class AugmentController {
       // 这一行就是"刚才那几帧不是面板关了、是卡片在动"的直接证据。
       this.logLine(`[augment] 🛡 面板信号托底：${reading.reason}`);
     }
+    // 开边沿整批识别失败（一个名字都没认出来）→ 在有界预算内、只在稳定帧上重试。
+    this.maybeRetryOpenRecognize(reading, nowMs);
 
     this.deps.onReading?.({
       atMs: nowMs,
@@ -1515,6 +1597,41 @@ export class AugmentController {
   }
 
   /**
+   * **开边沿整批识别的有界重试**（真机回归 2026-10-11：面板在屏 25.7 秒、一个标签都没画）。
+   *
+   * 真机证据（game B 第一块面板）：
+   * ```
+   * ▶ 面板出现 #1 @18.5s — 3 张卡片：内部暗(30/25/39)      ← 门控（1/3 分辨率）判据命中
+   * 🔎 全分辨率识别 未命中（79ms，?x?）：卡片内部不够暗(40 ≥ 40)   ← 原生重检（1:1）同一帧判"不在"
+   * 🧹 清空强度标签：原因=重识别失败（…）                    ← 之后 25.7 秒再没有任何识别
+   * ```
+   * 两个分辨率量到 39 / 40（阈值就是 40）——边界抖动 + 一次识别机会 = 整块面板空白。
+   *
+   * 这里只做"**再试一次**"，而且只在门控判据命中的**稳定帧**上（翻牌动画帧上重试
+   * 只会再失败一次，真机日志里"认不准"的两次尝试都落在动画帧上）。额度、间隔、
+   * 预算全部由纯函数决定（`vision/augment-open-recognize.ts`，有单测）。
+   */
+  private maybeRetryOpenRecognize(reading: PanelReading, nowMs: number): void {
+    const d = decideOpenRecognitionRetry({
+      panelOpen: reading.state === 'open',
+      settledFrame: reading.found,
+      namedCards: this.openNamedCards,
+      expectedCards: this.openExpectedCards,
+      attempts: this.openAttempts,
+      pending: this.openAttemptPending,
+      openEdgeAtMs: this.openEdgeAtMs ?? nowMs,
+      lastAttemptAtMs: this.openLastAttemptAtMs,
+      nowMs,
+    });
+    if (!d.retry) return;
+    this.openAttempts++;
+    this.openAttemptPending = true;
+    this.openLastAttemptAtMs = nowMs;
+    this.logLine(`[augment] ♻ 开边沿整批识别重试：${d.reason}`);
+    this.stream?.recognize();
+  }
+
+  /**
    * 全分辨率识别结果 → 当前这批卡片 → **强度标签**（打印 + 落盘 + 画）。
    *
    * ⚠️ `cards` 是**当前整批**（不是增量）：重随之后由 `mergeRefreshedCards()`
@@ -1533,6 +1650,11 @@ export class AugmentController {
     const cards: readonly RecognizedCard[] = rep.cards ?? [];
     // 旧渲染端不带 origin（回退成"开边沿整批"，行为与接线前一致）
     const origin: RecognizeOrigin = rep.origin ?? 'open';
+    if (origin === 'open') {
+      // 整批识别的重试记账：这一次回来了（成功/失败都算），以及这一批认出了几张名字。
+      this.openAttemptPending = false;
+      this.openNamedCards = cards.filter((c) => c.name !== null).length;
+    }
     this.logLine(
       `[augment] 🔎 ${origin === 'reroll' ? '单卡重随重识别' : '全分辨率识别'} ` +
         `${rep.ok ? '成功' : '未命中'}（${rep.tookMs.toFixed(0)}ms，` +
@@ -1996,6 +2118,23 @@ export class AugmentController {
         //（真机事故：开局前 API 不可用 → 退回像素节流 → API 恢复后又把间隔改成 0，
         //  结果面板期间一帧都不取）。此时只记录，不下发。
         if (!this.apiFallback && d.changed) this.applyApiDecision(d);
+        // 可选：每一次采样都写一行（`HEXBOX_AUGMENT_API_TRACE=1`）——
+        // "非变化的决策不写日志"让"玩家什么时候死的/几级/待选是什么"在常驻日志里
+        // 完全看不到，而那正是"某一次海克斯为什么没抓到"必须回答的问题。
+        if (API_TRACE) {
+          this.logLine(
+            formatApiTraceLine({
+              offsetMs: now - this.startedAt,
+              gameTime: state.gameTime,
+              level: state.level,
+              isDead: state.isDead,
+              respawnTimer: state.respawnTimer,
+              capture: d.capture,
+              pending: d.pending,
+              reason: d.reason,
+            }),
+          );
+        }
         this.apiRows.push(
           [
             String(now - this.startedAt),
@@ -2018,8 +2157,49 @@ export class AugmentController {
 
   /** 触发决策 → 下发（开=高频取帧，关=一帧不取）。 */
   private applyApiDecision(d: { capture: boolean; reason: string }): void {
+    if (!d.capture) this.closeCaptureWindow(d.reason);
     this.logLine(`[augment] 🔌 ${d.capture ? '开截屏' : '关截屏'}：${d.reason}`);
     this.applyInterval(d.capture ? ACTIVE_MS : 0, d.reason);
+    if (d.capture) this.openCaptureWindow(Date.now());
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 内部：采样窗口统计（诊断，无行为变化）                                  */
+  /* ------------------------------------------------------------------ */
+
+  private openCaptureWindow(nowMs: number): void {
+    this.winOpenedAtMs = nowMs;
+    this.winSamples = 0;
+    this.winHits = 0;
+    this.winPresence = 0;
+    this.winOpenEdges = 0;
+    this.winCloseEdges = 0;
+  }
+
+  /**
+   * 关窗时打一行统计与**裁决**（`vision/augment-log-diag.ts` 的纯函数）。
+   *
+   * 这一行是"这次到底取到帧没有"的唯一答案：`采样 0 帧` = 取帧链路/定时器没跑；
+   * `采样 178 帧、命中 0 帧、托底 0 帧` = 帧在跑，门控两条判据都没看到面板
+   * （面板不在这一窗里）—— 2026-10-11 复盘"第 2 次海克斯为什么没抓到"时，
+   * 正因为没有这一行，只能靠代码算术去推窗口长度。
+   */
+  private closeCaptureWindow(reason: string): void {
+    if (this.winOpenedAtMs === null) return;
+    this.logLine(
+      formatCaptureWindowLine(
+        {
+          ms: Date.now() - this.winOpenedAtMs,
+          samples: this.winSamples,
+          hits: this.winHits,
+          presenceFrames: this.winPresence,
+          openEdges: this.winOpenEdges,
+          closeEdges: this.winCloseEdges,
+        },
+        reason,
+      ),
+    );
+    this.winOpenedAtMs = null;
   }
 }
 

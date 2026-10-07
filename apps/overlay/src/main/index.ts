@@ -507,6 +507,8 @@ import {
   AUGMENT_CLEAR_REASONS,
   AUGMENT_CHAIN_PHASES,
   augmentClearLogLine,
+  // 选人阶段的子阶段解析（找不到"我的 pick 动作" → unknown，交给顶栏占用兜底）
+  parsePickState,
   // 托盘：状态文案 + 「读不到凭证」的一次性气泡（都是纯函数，单测在 @hexbox/vision）
   TRAY_TOOLTIP_HINT,
   trayStatus,
@@ -1240,19 +1242,17 @@ async function pollOnce(): Promise<void> {
       //   第一阶段：卡片已发出、还没选 → 卡片下方显示胜率
       //   第二阶段：选中后未选的英雄进顶栏 → 顶栏逐格显示，且不再画卡片标签
       // 用「我方 pick 动作是否 completed」判定，比像素占用可靠得多。
+      //
+      // ⚠️ 口径在 `vision/champ-select-stage.ts`（纯函数 + 单测）：**找不到我的
+      // pick 动作 = unknown**（不是 picking）。真机回归（2026-10-11）：动作列表
+      // 非空但里面没有我的那条时，旧口径报 `picking` → 顶栏占用会不会翻阶段这件事
+      // 就完全由"队友锁得快不快"决定（日志 `第二阶段(picking): 顶栏占用 3 格`）。
       const localCell = cs?.localPlayerCellId;
-      const acts = (cs?.actions ?? []).flat();
-      if (acts.length === 0 || typeof localCell !== 'number') {
-        champSelectPickState = 'unknown';
-      } else {
-        const done = acts.some(
-          (a) =>
-            a.type === 'pick' &&
-            a.completed === true &&
-            (typeof localCell !== 'number' || a.actorCellId === localCell),
-        );
-        champSelectPickState = done ? 'locked' : 'picking';
-      }
+      champSelectPickState = parsePickState({
+        localPlayerCellId: typeof localCell === 'number' ? localCell : null,
+        actions: (cs?.actions ?? []).flat(),
+      }).state;
+
     }
 
     // ── 「我这局用哪个英雄」：以"我自己"为唯一权威来源 ──────────────────

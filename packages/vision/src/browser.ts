@@ -20,6 +20,8 @@ export * from './augment-panel.ts';
 export * from './augment-presence.ts';
 export * from './augment-ocr.ts';
 export * from './augment-trigger.ts';
+// 开边沿整批识别的**矩形来源**决策（渲染端 worker 用：原生重检失败 → 门控矩形兜底）
+export * from './augment-open-recognize.ts';
 export * from './augment-label.ts';
 // 面板停留期间的**单卡刷新**检测（指纹在渲染端算：只有它拿得到门控画布像素）
 export * from './augment-reroll.ts';
