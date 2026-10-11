@@ -6,8 +6,9 @@
 #   2. 保证 test / typecheck / build 三项在任何提交上都成立。
 #
 # 说明：
-#   - 悬浮窗（apps/overlay）**不在 CI 中运行**：它需要管理员权限 + 真实桌面会话，
-#     无法在 headless runner 上启动。这里只做它的 typecheck 与 build（打包）。
+#   - 悬浮窗（apps/overlay）的**Electron 运行**不在 CI 中：它需要管理员权限 + 真实桌面会话，
+#     无法在 headless runner 上启动。但它的**纯逻辑单测会跑**（例如会话录制格式的往返，
+#     见 apps/overlay/src/main/session-recorder.test.ts），加上 typecheck 与 build（打包）。
 #   - `pnpm sync` 不在此运行：数据目录是 gitignored 的生成物，
 #     且 CI 不应依赖外部上游（CommunityDragon / 腾讯）的可用性。
 

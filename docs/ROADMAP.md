@@ -16,7 +16,7 @@
 | 局内海克斯 | 🚧 进行中 | S5：门控**已用真机帧标定并验证**（3 正样本全中 / 8 负样本全拒，1/4 分辨率成立）；截屏已从"每次 0.9s 的一次性截屏"改为**常驻截屏流**（本地自测 ~18ms/帧）；名字 OCR（渲染端全分辨率）与**强度标签绘制**均已实现（S5.4c，录制工具能真机画）。⚠️ 真机复盘发现两个缺陷并已修（见 S5.4c-1/c-2）：**英雄身份取成了队友**（剑圣→154 Zac、酒桶→43 Karma）、**标签画了但屏幕上没有**（窗口可见性）。**S5.4d 已接线**：常驻 overlay（`pnpm dev:overlay`）与录制工具跑**同一份控制器**，选人/局内两个生产者的画布归属是纯函数（+19 项单测），并有降级开关 `HEXBOX_OVERLAY_AUGMENT=0`；**真机复验（S5.5）待做** |
 | 配装方案 | ✅ 可用 | 出装写入客户端「配装方案」，游戏内查看 |
 | LCU | ✅ 可用 | 探测 + REST + 模式识别 + 配装方案写入 |
-| 工程基线 | ✅ 全绿 | **743 项测试** + typecheck（10 个项目）+ build，CI 已接入 |
+| 工程基线 | ✅ 全绿 | **850 项测试** + typecheck（10 个项目）+ build，CI 已接入 |
 
 ### 数据集实测规模（`data/*.json`）
 
@@ -128,6 +128,7 @@ pnpm --filter @hexbox/overlay debug:overlay-test   # 覆盖层渲染自测（不
 | S5.4c-2 | **覆盖窗可见性**：推送后重申置顶 + 1s 心跳重推 + `backgroundThrottling:false`；新增**不需要游戏**的自测 `HEXBOX_LABEL_OVERLAY_TEST=1`（左/中/右三个大字母，5 秒退出）| ✅ 自测逻辑纯函数 6 项单测；**待真机自测 + 对局复验** |
 | S5.4d | 同一条链路接进常驻 overlay（`pnpm dev:overlay`，局内 `InProgress`/`Reconnect` 时）| ✅ 抽出公共控制器 `main/augment-controller.ts`（录制工具与常驻覆盖层**共用**）；画布归属 `labelProducerFor()` + 启停 `augmentChainTransition()`（+19 项单测）；降级开关 `HEXBOX_OVERLAY_AUGMENT=0`；常态零取帧、退出干净（AUGMENT-PANEL §十六）|
 | S5.5 | 真机复验（延迟 / 不误画 / 性能）| ⏳ |
+| S5.7 | **会话录制 + 离线回放基建**：一局录成（帧库 + 2999 采样 + 边沿 + 身份），用**虚拟时钟**驱动**线上同一个控制器**重跑 —— 一局 20 分钟几秒跑完、确定性、不需要游戏/管理员/Electron。决策回放（`replay-api-trigger.mts`）+ 识别回放 + 闭环回放（`replay-session.mts`）；识别核心抽成 `vision/augment-recognize.ts`（worker 与回放共用）；控制器改为**不依赖 Electron**（时钟/截屏源/几何/2999/身份全部注入）| ✅ 见 [SESSION-REPLAY.md](SESSION-REPLAY.md)；+54 项单测（真机 2999 留档不变量、真机帧 fixture、识别核心、虚拟时钟、录制⇄回放往返）|
 
 ```bash
 pnpm --filter @hexbox/overlay debug:augment           # 在一局真实对局中录制
@@ -165,6 +166,12 @@ pnpm templates   # 重建头像/名字模板包（联网）
 
 pnpm --filter @hexbox/web dev      # 数据站 :5273
 pnpm --filter @hexbox/overlay dev  # 悬浮窗（需管理员 + 真实桌面）
+
+# 会话录制 + 离线回放（不需要游戏/管理员/Electron）：
+$env:HEXBOX_AUGMENT_RECORD='1'; pnpm dev:overlay      # 打一局就录到 debug/sessions/
+node --experimental-strip-types scripts/replay-session.mts                    # 合成会话闭环回放
+node --experimental-strip-types scripts/replay-session.mts debug/sessions/<目录>   # 真机会话闭环回放
+node --experimental-strip-types scripts/replay-api-trigger.mts                # 2999 触发记账回放
 
 # 局内海克斯：门控 + 识别 + 强度标签（需管理员 + 真实对局；产物在 debug/augment/）
 $env:HEXBOX_AUGMENT_TRIGGER='api'; pnpm --filter @hexbox/overlay debug:augment

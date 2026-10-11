@@ -89,6 +89,13 @@ packages/
                               / label-letter + label-letter-outlines (real A–Z font
                                 outlines, generated) + label-cjk (选取率 bitmaps)
                               / label-overlay-coords + label-selftest
+                              / augment-session + augment-session-replay
+                                (session format: parsers + coordinate mapping +
+                                deterministic replay engines for trigger/gating)
+                              / augment-recognize (full-resolution recognition
+                                CORE: worker and offline replay share this one)
+                              / virtual-clock (deterministic timers for replay)
+                              fixtures/ (real-machine frames + a real 2999 trace)
   provider-communitydragon/  static data source (global static definitions)
   provider-tencent/           CN first-party source (statics + rankings + hero detail)
   provider-registry/          registry (all enabled providers registered here)
@@ -106,6 +113,11 @@ apps/
                                 panel gating + full-resolution recognition)
                               src/main/augment-stream.ts, label-overlay.ts,
                               label-selftest.ts, vision-loop.ts
+                              src/main/augment-geometry.ts   (Electron-side geometry)
+                              src/main/augment-capture-stream.ts (AugmentStream factory)
+                              src/main/session-recorder.ts   (session recording)
+                              src/replay/session-replay.ts   (frame-store driven
+                                closed-loop replay of the SAME controller)
                               src/debug-augment.ts / debug-capture.ts /
                               debug-overlay-test.ts
 data/                         generated data (gitignored): dataset / rankings /
@@ -116,7 +128,8 @@ scripts/                      one-off diagnostic scripts + the game-free augment
                               replay (diag-augment-frames.mts)
 docs/                         ROADMAP / OVERLAY-STAGES / build-slots / SCREENSHOT-DEV
                               / SESSION-NOTES / AUGMENT-PANEL (in-game augment
-                              recognition: plan + calibration)
+                              recognition: plan + calibration) / SESSION-REPLAY
+                              (record a match → replay it offline)
 ```
 
 ## First-time setup
@@ -169,10 +182,13 @@ pnpm --filter @hexbox/web typecheck
 Tests use Node's built-in runner: `node --experimental-strip-types --test ...`.
 **Make the suite green before committing.** New behavior should include tests.
 
-Current tests: **796** — `core` 55 / `vision` 572 / `lcu` 87 /
+Current tests: **854** — `core` 55 / `vision` 623 / `lcu` 87 / `overlay` 7 /
 `provider-communitydragon` 12 / `provider-tencent` 43 / `data-store` 17 /
 `data-cli` 10 (measured locally; **treat `pnpm test` output as the source of
-truth** — this number moves whenever a suite is touched). `provider-registry`
+truth** — this number moves whenever a suite is touched). `overlay` has a test
+script now: it covers the replay-safe parts only (session-recording format
+round-trip, and the **closed-loop replay** itself — including "a session with a
+champion archive really draws labels") — the Electron runtime still cannot run in CI. `provider-registry`
 has no tests (pure registry wiring).
 CI (`.github/workflows/ci.yml`) runs `typecheck` → `test` → `build` on every push/PR,
 on `windows-latest`, with `pnpm install --frozen-lockfile`.
@@ -217,6 +233,10 @@ screen stream (getDisplayMedia) → capture/worker.ts
    → vision/augment-tier-label.ts (labels) → main/label-overlay.ts → overlay:vision
    → renderer/overlay-canvas.ts draws via vision/label-draw.ts (labelBoxPlan)
 ```
+
+Offline replay: the controller is **Electron-free** (geometry / capture source / 2999 /
+identity are injected), so `scripts/replay-session.mts` drives the *same* controller from a
+recorded session — see `docs/SESSION-REPLAY.md` and the S5.7 section below.
 
 Wiring status: **both** entry points run the **same** controller —
 `apps/overlay/src/main/augment-controller.ts`: the record/verify tool
@@ -337,6 +357,51 @@ the match; `HEXBOX_OVERLAY_AUGMENT=0` disables just the in-game chain.
 > were generated from, `LABEL_CAP_RATIO` *is* `TIER_LETTERS_CAP_RATIO`, and unit
 > tests lock ink height / baseline / stroke + glow reach on both sides.
 
+### Session recording & offline replay (S5.7) — read `docs/SESSION-REPLAY.md`
+
+The long verification chain ("every check needs a real match") is now split in three:
+decision replay (recorded 2999 samples → the online trigger state machine),
+recognition replay (real frames → the online detector/OCR), and **closed-loop replay**
+(the SAME `AugmentController`, driven by a session's frame store + a virtual clock).
+
+```powershell
+$env:HEXBOX_AUGMENT_RECORD='1'; pnpm dev:overlay          # record a match (default OFF)
+node --experimental-strip-types scripts/replay-api-trigger.mts [csv|sessionDir] [--json]
+node --experimental-strip-types scripts/replay-session.mts [sessionDir] [--json]
+node --experimental-strip-types scripts/make-frame-fixtures.mts   # rebuild frame fixtures
+```
+
+Rules that must not be broken:
+- **Replay drives, it never re-implements.** Every judgement comes from the online pure
+  functions; `vision/augment-recognize.ts` is the *single* recognition core shared by the
+  renderer worker and the replay (a second implementation is the failure mode this repo has
+  already paid for once).
+- **`AugmentController` must not import Electron.** Four environment dependencies are
+  injected: clock, capture source, capture geometry, 2999 client (plus the identity
+  resolver). Entry points wire the real ones (`augment-geometry.ts`,
+  `augment-capture-stream.ts`); the replay wires the session ones.
+- **The recording stores the frames the gate actually saw** (not a timed screen recording)
+  — that sequence *is* the online input sequence. Grayscale only (every judgement is
+  luma-only), full gate canvas (never cropped: cropped archives invite silent
+  coordinate-mapping offsets).
+- **`atMs` is absolute everywhere**; the recorder normalises all four artifacts against one
+  zero point (frames / 2999 / edges / phases). Two normalisations = "the edge is a few
+  seconds off the frame", which is invisible.
+- `metrics.missedRecorded` must stay **0** (the replay may open *more* windows than the
+  recording — historical state machine — but never miss one that was open).
+- **The recorder must persist the champion identity** (`observer.onIdentity` →
+  `setMeta({champion})`) — the replay builds the strength table from it, so a session
+  without it silently draws **zero** labels. The recorder must also exist **before**
+  `controller.start()` (otherwise the first gate frame / first 2999 sample is lost) —
+  geometry/champion are patched in afterwards via `setMeta()`.
+- **Replay honesty markers**: a frame's `atMs` is its *capture* time (so repeated delivery
+  shows up as `frameReuses` and stale frames get dropped by the controller's
+  `STALE_FRAME_MS`), and a stale native frame (> `MAX_NATIVE_FRAME_AGE_MS`) must report
+  `ok:false` + "原生帧过期" instead of silently re-OCR'ing the pre-reroll picture.
+- Window/compositor concerns (always-on-top, DWM stalls, `getDisplayMedia` frame rate,
+  multi-display DPI, LCU credentials, packaging) are **not** replayable: one real match per
+  milestone is still required — but not per code change.
+
 ### Environment variables (all real; the chain knobs default in `apps/overlay/src/main/augment-controller.ts`, the recording-only ones in `apps/overlay/src/debug-augment.ts`)
 
 | Group | Variable | Meaning |
@@ -356,6 +421,8 @@ the match; `HEXBOX_OVERLAY_AUGMENT=0` disables just the in-game chain.
 | Recording | `HEXBOX_AUGMENT_SECONDS` | fixed recording length; `0` = follow the game (default) |
 | Recording | `HEXBOX_AUGMENT_MAX_MINUTES` | follow-mode cap in minutes (default 45) |
 | Recording | `HEXBOX_AUGMENT_OUT` | artifact subdirectory under `debug/`, or an absolute path |
+| Recording | `HEXBOX_AUGMENT_RECORD` | `1`/`true`/`on` = record a **replayable session** (frame store + 2999 samples + edges + identity) under `debug/sessions/`. **Off by default** |
+| Recording | `HEXBOX_AUGMENT_RECORD_DIR` | session root directory (default `<repo>/debug/sessions`) |
 | Recording | `HEXBOX_AUGMENT_BENCH` | `1` = ~30 s capture benchmark (`bench.json`) |
 | Labels | `HEXBOX_AUGMENT_DRAW` | `0` = recognize/print/persist only, draw nothing (default draws) |
 | Labels | `HEXBOX_AUGMENT_BADGE` | `small` / `medium` / `large` preset (unknown value → default preset) |
@@ -387,6 +454,11 @@ node --experimental-strip-types scripts/preview-augment-labels.mts <帧.png> --f
 
 # Replay real machine frames through the online gating code:
 node --experimental-strip-types scripts/diag-augment-frames.mts <帧.png...> --annotate
+
+# Replay a recorded match through the SAME controller (no game / no Electron):
+node --experimental-strip-types scripts/replay-session.mts
+node --experimental-strip-types scripts/replay-session.mts debug/sessions/<dir>
+node --experimental-strip-types scripts/replay-api-trigger.mts debug/augment/api-trigger.csv
 
 # Cadence IPC round-trip self-test (prints the measured frame intervals):
 $env:HEXBOX_DEBUG_FORCE='1'; $env:HEXBOX_AUGMENT_SELFTEST_CADENCE='1'; pnpm --filter @hexbox/overlay debug:augment
