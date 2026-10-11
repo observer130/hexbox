@@ -371,6 +371,25 @@ node --experimental-strip-types scripts/replay-session.mts [sessionDir] [--json]
 node --experimental-strip-types scripts/make-frame-fixtures.mts   # rebuild frame fixtures
 ```
 
+Verifying a matter of record — what replay replaces, and what each report line means:
+
+| 原本要真打一局的检查 | 回放怎么替 | 要读的数 |
+|---|---|---|
+| 某一次海克斯为什么没抓到 | `replay-api-trigger.mts <csv\|会话目录>` | `结束时仍欠 [...]`、窗口表 |
+| 改了 2999 触发记账会变哪几局 | 同上 + 差异清单 | **漏开必须 0**；多开是预期的（历史版本 + 无边沿时只能靠 45s 超时） |
+| 面板开/关判定、翻牌假关闭 | `replay-session.mts <会话目录>` | `边沿：▶/◀`、`假关闭作废` |
+| api 模式常态是不是真的零取帧 | 同上 | `门控：采样 N 帧`（常态应为 0）+ 触发窗口占比 |
+| 单卡刷新多久被发现、阈值会不会误报 | 同上 | `单卡刷新：检出 N 次`（`atMs` + 结构距离） |
+| 标签为什么没画 | 同上 | `识别：调用 N 次…` + `标签：推送/清空` + 逐卡原因行 |
+| 检测器/识别核心还成立吗 | `pnpm test` | `augment-panel-fixtures`（2 正/4 负）、`augment-recognize`（10 项） |
+
+报告三行要**连着读**（单看一行会得出错结论）：
+`门控：采样 N 帧（帧库唯一 U / 重复投递 R / 缺口 K / 过期丢弃 D）`、
+`触发：…待选 [...]`、`识别：…无法重跑（缺原生帧/原生帧过期）`。
+排查：`未认出英雄` ⇒ 录制器没写身份；`缺原生帧/原生帧过期` ⇒ 录制侧（渲染端→IPC→落盘，**本环境无法执行验证**）；
+`R` 很大 ⇒ 帧库比采样节奏稀疏，**改节奏的结论要打折**；`漏开 > 0` ⇒ 触发回归；
+`truncated` ⇒ 报告尾部可能少一段。
+
 Rules that must not be broken:
 - **Replay drives, it never re-implements.** Every judgement comes from the online pure
   functions; `vision/augment-recognize.ts` is the *single* recognition core shared by the
