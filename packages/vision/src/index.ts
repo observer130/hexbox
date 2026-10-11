@@ -26,6 +26,11 @@ export * from './champ-select-stage.ts';
 // 选人第一阶段**候选卡**的专用几何与检出（真机标定：居中一行，2 或 3 张；
 // 与局内海克斯面板的布局无关，勿混用）+ 来源开关
 export * from './champ-select-cards.ts';
+// 选人阶段**截屏形态**（窗口快照 vs 显示器快照）的两个候选与形态选择：
+// 选人截屏来自窗口源（一定是窗口内容），而 snapshotKind 的"三者同比"退化判据是给
+// 局内 screen 源标定的 —— 16:9 显示器 + 默认客户端窗口会被判成显示器快照，搜索区与
+// 标签几何整体错位（本机真机帧复现）。处置与局内一致：两个形态都试，region 与 geo 成对。
+export * from './champ-select-capture-form.ts';
 export * from './augment-label.ts';
 export * from './augment-tier-label.ts';
 // 面板停留在期间的**单卡刷新（reroll）**检测：指纹 / 距离 / 判定 / 合并（纯函数）

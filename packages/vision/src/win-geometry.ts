@@ -475,6 +475,25 @@ export function captureScale(
 }
 
 /**
+ * 截屏形态（**显式**给定时不再靠 `snapshotKind` 猜）。
+ *
+ * · `window`  —— 截屏就是**窗口内容**：`desktopCapturer({types:['window']})` 的产物
+ *   （选人阶段走的就是这条，真机帧可证：帧比例 = 窗口比例、卡片行在帧里居中、
+ *   逐列亮度没有"桌面↔窗口"跳变）；
+ * · `display` —— 截屏是**整块显示器**：`getDisplayMedia` 的 screen 源（局内链路），
+ *   窗口只是其中一块子矩形，归一化坐标必须平移缩放。
+ *
+ * ⚠️ 为什么要能显式给：`snapshotKind` 的"三者同比"退化判据（`winShare < 0.9 → display`）
+ * 是给**局内 screen 源**标定出来的，用在**选人窗口源**上会反 —— 16:9 显示器 +
+ * 默认 1600×900 客户端窗口（0.83 < 0.9）会被判成"含桌面的显示器快照"，
+ * 于是搜索区被缩到 0.083+0.833、标定几何偏 90~130px → 候选卡 0 张、顶栏一格认不出。
+ * 选人路径因此**两个形态都试**（见 `champ-select-capture-form.ts`），
+ * 而这里只是把"形态"变成一个可以显式指定的入参 —— **不传时的默认行为一个字都不许改**
+ * （局内链路依赖它，`win-geometry.test.ts` 的退化用例锁着）。
+ */
+export type CaptureForm = 'window' | 'display';
+
+/**
  * 判断截屏内容是「窗口快照」还是「显示器快照」。
  *
  * 真机教训（S2 验收两轮）：desktopCapturer 的行为有两种实测形态，
@@ -539,6 +558,10 @@ export function makeScreenGeometry(
     readonly scaleFactor: number;
     readonly workArea: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
   },
+  /**
+   * 显式形态（来源已知时传；**不传 = 按 `snapshotKind` 自动判**，旧行为不变）。
+   */
+  form?: CaptureForm,
 ): {
   readonly geo: CaptureGeometry;
   readonly kind: 'window' | 'display';
@@ -549,7 +572,7 @@ export function makeScreenGeometry(
   const dispH = display.bounds.height;
   // GetWindowRect 直出逻辑坐标（勿除 scaleFactor）—— 窗口占比用逻辑口径
   const winShare = windowRect ? windowRect.width / dispW : 1;
-  const kind = snapshotKind(capture, {
+  const kind: CaptureForm = form ?? snapshotKind(capture, {
     width: Math.round(dispW * display.scaleFactor),
     height: Math.round(dispH * display.scaleFactor),
   }, windowRect, winShare);
@@ -682,6 +705,8 @@ export function windowRectToCapture(
     readonly bounds: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
     readonly scaleFactor: number;
   },
+  /** 显式形态（不传 = 按 `snapshotKind` 自动判，旧行为不变）。 */
+  form?: CaptureForm,
 ): Rect {
   const dispW = Math.max(1, display.bounds.width);
   const dispH = Math.max(1, display.bounds.height);
@@ -690,7 +715,7 @@ export function windowRectToCapture(
   const nw = windowRect ? windowRect.width / dispW : 1;
   const nh = windowRect ? windowRect.height / dispH : 1;
   // 窗口纵横比与截屏不一致时（window 快照形态）,窗口归一化即截屏归一化
-  const kind = snapshotKind(
+  const kind: CaptureForm = form ?? snapshotKind(
     capture,
     { width: Math.round(dispW * display.scaleFactor), height: Math.round(dispH * display.scaleFactor) },
     windowRect,

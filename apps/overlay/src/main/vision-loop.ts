@@ -17,7 +17,9 @@ import { desktopCapturer, screen } from 'electron';
 
 import {
   cardLabelFor,
+  chooseChampSelectCaptureForm,
   chooseChampSelectCards,
+  champSelectCaptureForms,
   countOccupiedSlots,
   decideChampSelectStage,
   detectCards,
@@ -36,6 +38,9 @@ import {
   windowRectToCapture,
   NAME_STRIP,
   type Bitmap,
+  type CaptureFormReading,
+  type CaptureFormView,
+  type CaptureGeometry,
   type CardLabel,
   type ChampSelectCardMode,
   type ChampSelectCardsResult,
@@ -225,20 +230,33 @@ export async function runVisionRound(
   }
   const { bmp, display, windowPhysical } = grabbed;
 
-  // 统一换算：自动区分「显示器快照」与「窗口快照」两种形态
-  // （S2 真机验收教训：二者混淆导致标签横向错位）
-  const { geo, kind, scale } = makeScreenGeometry(bmp, windowPhysical, {
-    bounds: display.bounds,
-    scaleFactor: display.scaleFactor,
-    workArea: display.workArea,
-  });
+  // ── 截屏形态：**不猜**，两个形态都算出来（真机复现的整链路失效，见
+  //    `vision/champ-select-capture-form.ts` 的头注）────────────────────────
+  //
+  // 选人截屏来自 `desktopCapturer({types:['window']})` → 一定是**窗口内容**；
+  // 而 `makeScreenGeometry` 的自动判据在"截屏/显示器/窗口三者同比"时会退化成
+  // `winShare < 0.9 → display` —— **16:9 显示器 + 默认 1600×900 客户端窗口**
+  // 正好落进它 → 搜索区被缩到 0.083+0.833、标定几何偏 90~130px →
+  // 候选卡 0 张、顶栏一格认不出（本机用真机帧复现）。
+  // 处置与局内 `region` + `altRegion` 同一套规矩：两个形态都试，谁看出内容用谁，
+  // 且 `region`（识别）与 `geo`（标签坐标）**必须同出一个形态**。
+  const forms = champSelectCaptureForms(bmp, windowPhysical, display);
+  const primaryForm = forms[0]!;
+  const formOf = (form: string): CaptureFormView =>
+    forms.find((f) => f.form === form) ?? primaryForm;
   console.log(
     `[hexbox:vision] 截屏 ${bmp.width}x${bmp.height} 窗口` +
       `${windowPhysical ? `${windowPhysical.width}x${windowPhysical.height}@${windowPhysical.x},${windowPhysical.y}` : '未知'}` +
       ` 显示器${display.bounds.width}x${display.bounds.height}@${display.scaleFactor}` +
       ` 工作区${display.workArea.width}x${display.workArea.height}@${display.workArea.x},${display.workArea.y}` +
-      ` 判定=${kind} scale=${scale.toFixed(3)}` +
-      ` geo=${geo.windowWidth.toFixed(0)}x${geo.windowHeight.toFixed(0)}@${geo.windowX.toFixed(0)},${geo.windowY.toFixed(0)}`,
+      ` 形态候选=${forms.map((f) => f.form).join('/')}` +
+      ` 主形态(${primaryForm.form}) scale=${primaryForm.scale.toFixed(3)}` +
+      ` geo=${primaryForm.geo.windowWidth.toFixed(0)}x${primaryForm.geo.windowHeight.toFixed(0)}` +
+      `@${primaryForm.geo.windowX.toFixed(0)},${primaryForm.geo.windowY.toFixed(0)}` +
+      (forms.length > 1
+        ? ` 备形态(${forms[1]!.form}) region=${forms[1]!.region.x.toFixed(4)},` +
+          `${forms[1]!.region.y.toFixed(4)} ${forms[1]!.region.w.toFixed(4)}x${forms[1]!.region.h.toFixed(4)}`
+        : ' 备形态=（几何等价，无需再试）'),
   );
   if (!windowPhysical) void logWindowCandidatesOnce();
 
@@ -257,20 +275,61 @@ export async function runVisionRound(
   // 用"顶栏是否有头像"来区分阶段，这个歧义就消失了。
   const portraits = (resolveDeps(deps.portraits) ?? []) as readonly PreparedTemplate[];
   const rankings = resolveDeps(deps.rankings) as RankingSnapshot | null;
-  // ⚠️ `pickState` 由**调用方**每 tick 只读一次并传进来（本函数不再自己读）：
-  //    否则"换阶段清记忆"与"阶段判定"会用两次读取的结果，中间隔着截屏 await。
-  let topBarOccupiedCount = 0;
-  let cands: ReturnType<typeof detectTopBarCandidates> = [];
-  let captureSlots: Rect[] = [];
-  if (portraits.length > 0) {
-    captureSlots = topBarSlotRects().map(
-      (r) => windowRectToCapture(r, bmp, windowPhysical, display),
-    );
-    topBarOccupiedCount = countOccupiedSlots(bmp, captureSlots);
-    if (topBarOccupiedCount > 0) {
-      cands = detectTopBarCandidates(bmp, captureSlots, portraits);
+
+  /** 某个形态下顶栏 11 格的**截屏归一化**矩形（形态必须显式传入）。 */
+  const slotsOfForm = (f: CaptureFormView): Rect[] =>
+    topBarSlotRects().map((r) => windowRectToCapture(r, bmp, windowPhysical, display, f.form));
+
+  /**
+   * 逐形态扫顶栏（**早退**：认出 ≥1 格的形态立刻停 —— 常态只付主形态的成本）。
+   *
+   * 形态错了会怎样（真机实测）：占用检测读到 6~10 格噪声，但 NCC **一个都认不出**
+   * —— 所以"认出格数"是判形态的**最强证据**，占用格数不是。
+   */
+  const scanTopBar = (): {
+    readonly readings: CaptureFormReading[];
+    readonly slots: Rect[];
+    readonly cands: ReturnType<typeof detectTopBarCandidates>;
+  } => {
+    const readings: CaptureFormReading[] = [];
+    let slots = slotsOfForm(primaryForm);
+    let cands: ReturnType<typeof detectTopBarCandidates> = [];
+    if (portraits.length === 0) return { readings, slots: [], cands: [] };
+    for (const f of forms) {
+      slots = slotsOfForm(f);
+      const occupied = countOccupiedSlots(bmp, slots);
+      cands = occupied > 0 ? detectTopBarCandidates(bmp, slots, portraits) : [];
+      readings.push({ form: f.form, occupied, identified: cands.length, cardsConfident: false });
+      if (cands.length > 0) break;
     }
-  }
+    return { readings, slots, cands };
+  };
+
+  /**
+   * 逐形态试候选卡（**早退**：第一个判据全过的形态）。返回的 `view` 就是
+   * 标签该用的 `geo` 的来源 —— 两者绝不许分家。
+   */
+  const scanCards = (): {
+    readonly readings: CaptureFormReading[];
+    readonly results: readonly { readonly form: string; readonly result: ChampSelectCardsResult }[];
+    readonly chosen: { readonly view: CaptureFormView; readonly result: ChampSelectCardsResult } | null;
+  } => {
+    const readings: CaptureFormReading[] = [];
+    const results: { form: string; result: ChampSelectCardsResult }[] = [];
+    for (const f of forms) {
+      const result = detectChampSelectCards(bmp, { region: f.region });
+      results.push({ form: f.form, result });
+      readings.push({ form: f.form, occupied: 0, identified: 0, cardsConfident: result.confident });
+      if (result.confident) return { readings, results, chosen: { view: f, result } };
+    }
+    return { readings, results, chosen: null };
+  };
+
+  // 阶段判定用**主形态**的占用读数（与接线前的语义一致：不让错形态的噪声占用
+  // 把关卡推歪；真正"哪个形态对"由下面的证据决定）。
+  const primarySlots = portraits.length > 0 ? slotsOfForm(primaryForm) : [];
+  const topBarOccupiedCount =
+    portraits.length > 0 ? countOccupiedSlots(bmp, primarySlots) : 0;
 
   // 阶段判定：**我的 pick 动作是否完成**说了算（`parsePickState` 在 `index.ts` 里解析）。
   //
@@ -289,11 +348,21 @@ export async function runVisionRound(
   const stageDecision = decideChampSelectStage({ pickState, topBarOccupiedCount });
   const isPhase2 = stageDecision.stage === 'topbar';
 
-  if (isPhase2) {
-    // ── 第二阶段：顶栏备选区逐格胜率 ──
+  /**
+   * 顶栏逐格标签（**形态的 `geo` 必须与槽位同源**）。
+   *
+   * 抽出来是因为两个分支都要用：顶栏分支本身，以及"卡片两形态都不过"时
+   * 的**对称兜底**（LCU 说 `unknown` 时占用噪声可能把关卡推成一阶段，
+   * 而屏幕上其实是二阶段）。
+   */
+  function topBarLabelPlan(input: {
+    readonly slots: readonly Rect[];
+    readonly cands: ReturnType<typeof detectTopBarCandidates>;
+    readonly geo: CaptureGeometry;
+  }): { readonly labels: CardLabel[]; readonly identified: string[] } {
     const labels: CardLabel[] = [];
     const identified: string[] = [];
-    for (const cand of cands) {
+    for (const cand of input.cands) {
       // ⚠️ 识别可能给出高 ID（60000+），而排行榜只有基础 ID —— 必须归一化，
       // 否则顶栏每个英雄都会显示「暂无数据」（真机实测过）。
       const cid = deps.canonicalId(cand.championId);
@@ -301,7 +370,7 @@ export async function runVisionRound(
       const sub = deps.championName(cid);
       identified.push(`${sub}=${cand.score.toFixed(2)}`);
       labels.push(
-        slotLabelFor(captureSlots[cand.slotIndex]!, geo, display.workArea, {
+        slotLabelFor(input.slots[cand.slotIndex]!, input.geo, display.workArea, {
           name: sub,
           winRate: row?.winRate ?? 0,
           hasData: row !== undefined,
@@ -309,17 +378,50 @@ export async function runVisionRound(
         }),
       );
     }
+    return { labels, identified };
+  }
+
+  if (isPhase2) {
+    // ── 第二阶段：顶栏备选区逐格胜率 ──
+    const scan = scanTopBar();
+    const picked = chooseChampSelectCaptureForm(scan.readings);
+    const form = formOf(picked.form);
+    const { labels, identified } = topBarLabelPlan({
+      slots: scan.slots,
+      cands: scan.cands,
+      geo: form.geo,
+    });
+    const formTrace =
+      `形态=${picked.form}（${picked.reason}）` +
+      `[${scan.readings.map((r) => `${r.form}:占用${r.occupied}/识别${r.identified}`).join(' ')}]`;
     const diag =
       `第二阶段(${pickState}): 顶栏占用 ${topBarOccupiedCount} 格, 识别成功 ${labels.length} 格` +
+      ` ${formTrace}` +
       (identified.length > 0 ? ` [${identified.join(' ')}]` : '') +
       (labels[0]
         ? ` 标签0@(${labels[0].x.toFixed(0)},${labels[0].y.toFixed(0)}) ${labels[0].w}x${labels[0].h}` +
           // ⚠️ 槽位 x 是**窗口内归一化**坐标，换成屏幕 CSS 必须加窗口原点
           //    `geo.windowX`（真机日志打 439 而真实屏幕 x 是 784 = 439+345 →
           //    少了这一项，这条日志一直在把人往"坐标算错"的方向带）。
-          ` 槽0 x=${captureSlots[0]!.x.toFixed(3)}(归一)→CSS ${(captureSlots[0]!.x * geo.windowWidth + geo.windowX).toFixed(0)}`
+          ` 槽0 x=${scan.slots[0]!.x.toFixed(3)}(归一)→CSS ${(scan.slots[0]!.x * form.geo.windowWidth + form.geo.windowX).toFixed(0)}`
         : '');
-    // 有头像但一个都没认出来：不画（宁漏勿错），诊断留给日志
+
+    // 有头像但一个都没认出来：**先问"是不是我还没锁"** ——
+    //   · `locked`（我确实选完了）→ 不画（宁漏勿错），诊断留给日志；
+    //   · 否则（`unknown`/`picking`）→ 再试一次候选卡：错形态的"占用噪声"会把
+    //     关卡推到顶栏分支，而屏幕上其实还是我的三张卡 —— 那时按"什么都没画"
+    //     返回就等于整块面板空白（与修这个 bug 的初衷相反）。
+    if (labels.length === 0 && pickState !== 'locked') {
+      const cards = scanCards();
+      if (cards.chosen) {
+        return finishCards({
+          cards: cards.chosen.result.cards,
+          geo: cards.chosen.view.geo,
+          source: 'geometry',
+          trace: `形态=${cards.chosen.view.form}（顶栏没认出→改用卡片判据定形态）`,
+        });
+      }
+    }
     return { msg: { active: labels.length > 0, labels, diag }, display, stage: 'topbar' };
   }
 
@@ -329,9 +431,13 @@ export async function runVisionRound(
   //   · `geometry`（默认）—— `detectChampSelectCards`：真机标定的"居中一行 2 或 3 张"
   //     布局 + 四边框判据（吸附到象牙白高亮线的**外缘**）。真机 6 帧正样本全过、
   //     13 个阴性帧（第二阶段大立绘 / 局内海克斯面板）一张都不出。
+  //     **形态按证据挑**（`champ-select-capture-form.ts`）：主形态 = 窗口
+  //     （选人截屏的来源），备形态 = 显示器，判据全过的那个胜出 —— 见函数头注。
   //   · `legacy` —— 旧的 `detectCards`（自由搜索）：真机同一套界面上 0/2/3 张抖动，
-  //     且在大立绘帧上给出位置错误的 2 个矩形。只作对照。
-  // 两套都**不**互相兜底：几何没拿到就是没拿到（宁可少画，绝不画错位置）。
+  //     且在大立绘帧上给出位置错误的 2 个矩形。只作对照，**不为它做两形态重试**
+  //     （它本来就是"真机不稳"的对照开关，重试救不了它；形态沿用自动判）。
+  //   · `off` —— 一张都不画（只出顶栏标签）。
+  // 各分支都**不**互相兜底：几何没拿到就是没拿到（宁可少画，绝不画错位置）。
   const cardMode = deps.champSelectCards?.() ?? 'geometry';
   const emptyGeo: ChampSelectCardsResult = {
     cards: [],
@@ -341,16 +447,171 @@ export async function runVisionRound(
     probes: [],
   };
   const emptyLegacy = { cards: [] as readonly Rect[], confident: false, reason: '（未启用旧检出器）' };
-  const geometric =
-    cardMode === 'geometry'
-      ? detectChampSelectCards(bmp, {
-          // 窗口在截屏里的归一化矩形：窗口快照形态下是恒等，显示器快照形态下做平移缩放
-          region: windowRectToCapture({ x: 0, y: 0, w: 1, h: 1 }, bmp, windowPhysical, display),
-        })
-      : emptyGeo;
+
+  /**
+   * 卡片分支的收尾：OCR → join → 标签。
+   *
+   * ⚠️ `geo` 必须与"检出这几张矩形时用的 `region`"**同出一个形态** ——
+   * 否则会出现"卡片认出来了、标签画在别处"（错形态下横向差 50~130 DIP）。
+   */
+  function finishCards(input: {
+    readonly cards: readonly Rect[];
+    readonly geo: CaptureGeometry;
+    readonly source: string;
+    /** 形态说明（进诊断行：这一轮用了哪个形态、为什么）。 */
+    readonly trace: string;
+  }): { msg: VisionOverlayMsg; display: Electron.Display; stage: VisionStage } {
+    const workArea = display.workArea;
+    const labels: CardLabel[] = [];
+    const nameLibrary = resolveDeps(deps.nameLibrary);
+    const perCard: string[] = [];
+    for (const rect of input.cards) {
+      // 名字带 OCR
+      const stripRect = {
+        x: rect.x + (rect.w * (1 - NAME_STRIP.width)) / 2,
+        y: rect.y + (rect.h * NAME_STRIP.yCenter - (rect.h * NAME_STRIP.height) / 2),
+        w: rect.w * NAME_STRIP.width,
+        h: rect.h * NAME_STRIP.height,
+      };
+      const raw = extractGrayRaw(bmp, stripRect);
+      let championId = 0;
+      let score = 0;
+      let margin = 0;
+      /** 诊断：区分「取样失败」「无文字」「分数不够」三种拒绝原因。 */
+      let why = '';
+      if (!raw) {
+        why = '取样越界';
+      } else {
+        const strip = extractNameStrip(raw.gray, raw.width, raw.height);
+        const ink = strip.bits.reduce((s, v) => s + v, 0) / Math.max(1, strip.bits.length);
+        // ⚠️ 用带区分度的匹配：第二阶段/对局内会在美术图上误检出矩形，
+        // 只看最高分会给出 0.45~0.5 的假命中，于是把错误胜率画到屏幕中间。
+        const m = matchNameCareful(strip, nameLibrary);
+        if (m) {
+          championId = m.championId;
+          score = m.score;
+          margin = m.margin;
+        } else {
+          why = ink < 0.05 ? '无文字' : `分数不够(墨迹${(ink * 100).toFixed(0)}%)`;
+        }
+      }
+      perCard.push(championId > 0 ? `${score.toFixed(2)}/${margin.toFixed(2)}` : `拒绝:${why}`);
+
+      if (championId <= 0) {
+        // 识别不出就不画（宁漏勿错）—— 用户已确认不要「未识别」占位框
+        continue;
+      }
+
+      // 胜率 join（core 纯函数）
+      // ⚠️ 同顶栏：名字指纹库含高 ID（60000+）条目，而排行榜只有基础 ID，
+      // 必须归一化，否则识别成功也会显示「暂无数据」（真机实测过）。
+      const cid = deps.canonicalId(championId);
+      const row = rankings?.heroes.find((h) => h.championId === cid);
+      labels.push(
+        cardLabelFor(rect, input.geo, workArea, {
+          name: deps.championName(cid),
+          winRate: row?.winRate ?? 0,
+          hasData: row !== undefined,
+          championId: cid,
+        }),
+      );
+    }
+
+    // 真机核对用：把标签坐标与它对应的卡片矩形一起报出来，
+    // 这样"标签是否落在卡片下方"可以只看日志判断，不必再猜几何。
+    const firstCard = input.cards[0];
+    return {
+      msg: {
+        active: true,
+        labels,
+        diag:
+          `第一阶段(${pickState})[${input.source}]: 卡片 ${input.cards.length} 张 → 出标签 ${labels.length} 个` +
+          ` ${input.trace}` +
+          ` [得分/分差 ${perCard.join(' ')}]` +
+          (labels[0] && firstCard
+            ? ` 标签0@(${labels[0].x.toFixed(0)},${labels[0].y.toFixed(0)}) ${labels[0].w}x${labels[0].h}` +
+              ` 卡0 x=${firstCard.x.toFixed(4)} w=${firstCard.w.toFixed(4)}` +
+              ` y=${(firstCard.y + firstCard.h).toFixed(3)}(归一)→CSS ${((firstCard.y + firstCard.h) * input.geo.windowHeight).toFixed(0)}`
+            : ''),
+      },
+      display,
+      stage: 'cards',
+    };
+  }
+
+  if (cardMode === 'geometry') {
+    const scan = scanCards();
+    const picked = chooseChampSelectCaptureForm(scan.readings);
+    const trace =
+      `形态=${picked.form}（${picked.reason}）` +
+      (scan.readings.length > 1
+        ? `[${scan.readings.map((r) => `${r.form}:${r.cardsConfident ? '过' : '不过'}`).join(' ')}]`
+        : '[形态唯一]');
+    if (scan.chosen) {
+      return finishCards({
+        cards: scan.chosen.result.cards,
+        geo: scan.chosen.view.geo,
+        source: 'geometry',
+        trace,
+      });
+    }
+    // 卡片两形态都不过 → **对称兜底**：再问一次顶栏。
+    //
+    // LCU 说 `unknown` 时，阶段判定只能靠"主形态的占用读数"；若主形态恰好是错的
+    // 那个（真机上另一种截屏形态），占用可能是 0 → 关卡推成一阶段，而屏幕上其实
+    // 已经是二阶段（大立绘 + 顶栏头像）。此时按"0 张卡"返回就等于整块空白。
+    // ⚠️ 兜底判据是**认出 ≥1 格**（不是"占用 > 0"）：真机实测错形态下占用能到 10 格
+    //    却一个都认不出，用占用兜底会画出整排错标签。
+    if (pickState !== 'picking') {
+      const top = scanTopBar();
+      if (top.cands.length > 0) {
+        const pickedTop = chooseChampSelectCaptureForm(top.readings);
+        const topForm = formOf(pickedTop.form);
+        const plan = topBarLabelPlan({
+          slots: top.slots,
+          cands: top.cands,
+          geo: topForm.geo,
+        });
+        return {
+          msg: {
+            active: plan.labels.length > 0,
+            labels: plan.labels,
+            diag:
+              `第二阶段(${pickState})[卡片两形态都不过→顶栏兜底]: 顶栏占用 ${topBarOccupiedCount} 格, ` +
+              `识别成功 ${plan.labels.length} 格 形态=${pickedTop.form}（${pickedTop.reason}）` +
+              `[${top.readings.map((r) => `${r.form}:占用${r.occupied}/识别${r.identified}`).join(' ')}]` +
+              (plan.identified.length > 0 ? ` [${plan.identified.join(' ')}]` : '') +
+              ` —— ${trace}`,
+          },
+          display,
+          stage: 'topbar',
+        };
+      }
+    }
+    return {
+      msg: {
+        active: false,
+        labels: [],
+        diag:
+          `第一阶段(${pickState})但未检出卡片[geometry]: ${trace}（顶栏占用 ${topBarOccupiedCount}）` +
+          ` —— ${scan.results.map((r) => `${r.form}: ${r.result.reason}`).join(' ｜ ')}`,
+      },
+      display,
+      // 阶段判定是**明确的**（顶栏没占用、LCU 也没说 locked）→ 就是一阶段，
+      // 只是这一轮没检出卡片。它仍然是一阶段证据（不能当成"不知道"）。
+      stage: 'cards',
+    };
+  }
+
+  // legacy / off：保持接线前的口径（形态自动判）。
+  const autoGeo = makeScreenGeometry(bmp, windowPhysical, {
+    bounds: display.bounds,
+    scaleFactor: display.scaleFactor,
+    workArea: display.workArea,
+  });
   const choice = chooseChampSelectCards({
     mode: cardMode,
-    geometric,
+    geometric: emptyGeo,
     legacy: cardMode === 'legacy' ? detectCards(bmp) : emptyLegacy,
   });
   const det = { cards: choice.cards, confident: choice.confident, reason: choice.reason };
@@ -362,90 +623,19 @@ export async function runVisionRound(
         labels: [],
         diag:
           `第一阶段(${pickState})但未检出卡片[${choice.source}]: ${det.reason ?? '?'}` +
-          `（顶栏占用 ${topBarOccupiedCount}）`,
+          `（顶栏占用 ${topBarOccupiedCount}；形态=自动判 ${autoGeo.kind}）`,
       },
       display,
-      // 阶段判定是**明确的**（顶栏没占用、LCU 也没说 locked）→ 就是一阶段，
-      // 只是这一轮没检出卡片。它仍然是一阶段证据（不能当成"不知道"）。
       stage: 'cards',
     };
   }
 
-  const workArea = display.workArea;
-  const labels: CardLabel[] = [];
-  const nameLibrary = resolveDeps(deps.nameLibrary);
-  const perCard: string[] = [];
-  for (const rect of det.cards) {
-    // 名字带 OCR
-    const stripRect = {
-      x: rect.x + (rect.w * (1 - NAME_STRIP.width)) / 2,
-      y: rect.y + (rect.h * NAME_STRIP.yCenter - (rect.h * NAME_STRIP.height) / 2),
-      w: rect.w * NAME_STRIP.width,
-      h: rect.h * NAME_STRIP.height,
-    };
-    const raw = extractGrayRaw(bmp, stripRect);
-    let championId = 0;
-    let score = 0;
-    let margin = 0;
-    /** 诊断：区分「取样失败」「无文字」「分数不够」三种拒绝原因。 */
-    let why = '';
-    if (!raw) {
-      why = '取样越界';
-    } else {
-      const strip = extractNameStrip(raw.gray, raw.width, raw.height);
-      const ink = strip.bits.reduce((s, v) => s + v, 0) / Math.max(1, strip.bits.length);
-      // ⚠️ 用带区分度的匹配：第二阶段/对局内会在美术图上误检出矩形，
-      // 只看最高分会给出 0.45~0.5 的假命中，于是把错误胜率画到屏幕中间。
-      const m = matchNameCareful(strip, nameLibrary);
-      if (m) {
-        championId = m.championId;
-        score = m.score;
-        margin = m.margin;
-      } else {
-        why = ink < 0.05 ? '无文字' : `分数不够(墨迹${(ink * 100).toFixed(0)}%)`;
-      }
-    }
-    perCard.push(championId > 0 ? `${score.toFixed(2)}/${margin.toFixed(2)}` : `拒绝:${why}`);
-
-    if (championId <= 0) {
-      // 识别不出就不画（宁漏勿错）—— 用户已确认不要「未识别」占位框
-      continue;
-    }
-
-    // 胜率 join（core 纯函数）
-    // ⚠️ 同顶栏：名字指纹库含高 ID（60000+）条目，而排行榜只有基础 ID，
-    // 必须归一化，否则识别成功也会显示「暂无数据」（真机实测过）。
-    const cid = deps.canonicalId(championId);
-    const row = rankings?.heroes.find((h) => h.championId === cid);
-    labels.push(
-      cardLabelFor(rect, geo, workArea, {
-        name: deps.championName(cid),
-        winRate: row?.winRate ?? 0,
-        hasData: row !== undefined,
-        championId: cid,
-      }),
-    );
-  }
-
-  // 真机核对用：把标签坐标与它对应的卡片矩形一起报出来，
-  // 这样"标签是否落在卡片下方"可以只看日志判断，不必再猜几何。
-  const firstCard = det.cards[labels.length > 0 ? 0 : 0];
-  return {
-    msg: {
-      active: true,
-      labels,
-      diag:
-        `第一阶段(${pickState})[${choice.source}]: 卡片 ${det.cards.length} 张 → 出标签 ${labels.length} 个` +
-        ` [得分/分差 ${perCard.join(' ')}]` +
-        (labels[0] && firstCard
-          ? ` 标签0@(${labels[0].x.toFixed(0)},${labels[0].y.toFixed(0)}) ${labels[0].w}x${labels[0].h}` +
-            ` 卡0 x=${firstCard.x.toFixed(4)} w=${firstCard.w.toFixed(4)}` +
-            ` y=${(firstCard.y + firstCard.h).toFixed(3)}(归一)→CSS ${((firstCard.y + firstCard.h) * geo.windowHeight).toFixed(0)}`
-          : ''),
-    },
-    display,
-    stage: 'cards',
-  };
+  return finishCards({
+    cards: det.cards,
+    geo: autoGeo.geo,
+    source: choice.source,
+    trace: `形态=${autoGeo.kind}（自动判，legacy/off 路径不做两形态重试）`,
+  });
 }
 
 /**
