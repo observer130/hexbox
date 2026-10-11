@@ -115,6 +115,103 @@ export function encodePng(img: {
   return out;
 }
 
+/**
+ * PNG 编码（**灰度**位图 → 8bit 灰度 PNG）。
+ *
+ * 为什么需要灰度编码（2026-10-11，会话录制/回放基建）：局内链路的**全部**像素判据
+ * 都只看亮度 —— 门控（`augment-panel.ts` 的 `detectCards`/`interiorLuma`）、
+ * 名字识别（`augment-ocr.ts` 的 `extractGrayRaw`）、重随指纹
+ * （`augment-reroll.ts` 的 `extractGray`）都按 `0.299/0.587/0.114` 取灰度。
+ * 因此录帧时**只存灰度**在语义上无损（把灰度填回 RGB 再取一次灰度得到同一个整数），
+ * 却把一帧从 RGB 的三字节降到一字节 —— 这是"一局能录多少帧"的决定因素。
+ *
+ * ⚠️ 与 `encodePng` 的分工：那个是**标注图**用的（要颜色），这个是**帧库**用的。
+ * 两个都零依赖（node:zlib），回放侧用 `decodePng` 解（它本来就支持灰度类型 0）。
+ *
+ * @param filter 0 = None，2 = Up（默认：游戏 UI 纵向大片同色，Up 能吃掉这部分冗余）。
+ */
+export function encodeGrayPng(
+  img: { readonly width: number; readonly height: number; readonly gray: Uint8Array | Uint8ClampedArray },
+  filter: 0 | 2 = 2,
+): Uint8Array {
+  const { width, height } = img;
+  if (width <= 0 || height <= 0) throw new Error(`图像尺寸非法 ${width}x${height}`);
+  if (img.gray.length < width * height) {
+    throw new Error(`灰度数据不足：需要 ${width * height} 字节，实际 ${img.gray.length}`);
+  }
+
+  const raw = new Uint8Array((width + 1) * height);
+  for (let y = 0; y < height; y++) {
+    const rowStart = y * (width + 1);
+    raw[rowStart] = filter;
+    for (let x = 0; x < width; x++) {
+      const v = img.gray[y * width + x]!;
+      if (filter === 2 && y > 0) {
+        raw[rowStart + 1 + x] = (v - img.gray[(y - 1) * width + x]!) & 0xff;
+      } else {
+        raw[rowStart + 1 + x] = v;
+      }
+    }
+  }
+
+  const ihdr = new Uint8Array(13);
+  const dv = new DataView(ihdr.buffer);
+  dv.setUint32(0, width);
+  dv.setUint32(4, height);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 0; // color type: 灰度
+
+  const parts = [
+    new Uint8Array(SIGNATURE),
+    writeChunk('IHDR', ihdr),
+    writeChunk('IDAT', deflateSync(raw, { level: 6 })),
+    writeChunk('IEND', new Uint8Array(0)),
+  ];
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let off = 0;
+  for (const p of parts) {
+    out.set(p, off);
+    off += p.length;
+  }
+  return out;
+}
+
+/**
+ * RGBA 位图 → 灰度数组（`0.299/0.587/0.114`，四舍五入）。
+ *
+ * ⚠️ 公式必须与 `match.ts` 的 `extractGray`/`extractGrayRaw` **逐字相同**：
+ * 录帧时按这里算灰度、回放时再按那一份取灰度，两处差一点就是"回放测出来的
+ * 阈值表现与真机不同"。单测锁了"灰度往返后判据逐位相同"。
+ */
+export function bitmapToGray(bmp: {
+  readonly width: number;
+  readonly height: number;
+  readonly data: Uint8ClampedArray;
+}): Uint8Array {
+  const out = new Uint8Array(bmp.width * bmp.height);
+  for (let i = 0, p = 0; p < out.length; p++, i += 4) {
+    out[p] = Math.round(0.299 * bmp.data[i]! + 0.587 * bmp.data[i + 1]! + 0.114 * bmp.data[i + 2]!);
+  }
+  return out;
+}
+
+/** 灰度数组 → RGBA 位图（r=g=b=gray）—— 回放侧把帧还原成 `Bitmap` 用。 */
+export function grayToBitmap(img: {
+  readonly width: number;
+  readonly height: number;
+  readonly gray: Uint8Array | Uint8ClampedArray;
+}): PngImage {
+  const out = new Uint8ClampedArray(img.width * img.height * 4);
+  for (let p = 0, d = 0; p < img.width * img.height; p++, d += 4) {
+    const g = img.gray[p]!;
+    out[d] = g;
+    out[d + 1] = g;
+    out[d + 2] = g;
+    out[d + 3] = 255;
+  }
+  return { width: img.width, height: img.height, data: out };
+}
+
 function readChunks(buf: Uint8Array): Chunk[] {
   const chunks: Chunk[] = [];
   let off = 8;

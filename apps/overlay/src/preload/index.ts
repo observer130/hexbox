@@ -12,6 +12,8 @@
 
 import { contextBridge, ipcRenderer } from 'electron';
 
+import type { AugmentSessionFramePayload } from '@hexbox/vision';
+
 const api = {
   /** 设置鼠标穿透。 */
   setClickThrough: (on: boolean): Promise<boolean> =>
@@ -80,6 +82,15 @@ const augmentWorkerApi = {
    */
   recognized: (r: unknown): void => {
     ipcRenderer.send('augment:worker-recognized', r);
+  },
+  /**
+   * **会话录制**：把这一帧的灰度像素交给主进程落盘（`HEXBOX_AUGMENT_RECORD=1` 时才有）。
+   *
+   * 像素只在渲染端拿得到（屏幕流在那儿），而写文件在主进程 —— 所以这一条是**唯一**
+   * 会把像素送过 IPC 的通道，且只在录制开关打开时走（默认完全不走，零开销）。
+   */
+  recordFrame: (f: AugmentSessionFramePayload): void => {
+    ipcRenderer.send('augment:worker-record', f);
   },
 } as const;
 

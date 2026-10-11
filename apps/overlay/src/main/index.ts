@@ -511,6 +511,8 @@ import {
   parsePickState,
   // 选人第一阶段候选卡的检出来源（默认标定几何；legacy/off 见 champ-select-cards.ts）
   champSelectCardMode,
+  // 会话录制：搜索区默认值（拿不到窗口矩形时用它；回放按同一份口径换算）
+  PANEL_ROW_REGION,
   // 托盘：状态文案 + 「读不到凭证」的一次性气泡（都是纯函数，单测在 @hexbox/vision）
   TRAY_TOOLTIP_HINT,
   trayStatus,
@@ -548,7 +550,21 @@ import {
   pushLabelOverlay,
 } from './label-overlay.ts';
 import { isLabelOverlaySelfTest, runLabelOverlaySelfTest } from './label-selftest.ts';
-import { AugmentController, type AugmentLabelSink } from './augment-controller.ts';
+import {
+  AUGMENT_CHAIN_CAPTURE,
+  AugmentController,
+  type AugmentLabelSink,
+} from './augment-controller.ts';
+// 控制器要的四样"带环境依赖"的东西都在 Electron 侧装配（控制器本身不 import Electron，
+// 这样纯 Node 的 `scripts/replay-session.mts` 才能用同一个控制器跑离线回放）
+import { augmentStreamCapture } from './augment-capture-stream.ts';
+import { resolveAugmentCaptureGeometry } from './augment-geometry.ts';
+import {
+  createSessionRecorder,
+  recordEnabled as sessionRecordEnabled,
+  recordRootDir,
+  type SessionRecorder,
+} from './session-recorder.ts';
 import {
   attachCloseToTrayHide,
   createTray,
@@ -1533,6 +1549,14 @@ const augmentLabelSink: AugmentLabelSink = {
   },
 };
 
+/**
+ * **会话录制器**（`HEXBOX_AUGMENT_RECORD=1` 才有）：一局一个，进对局后建、离开对局时收工。
+ *
+ * 为什么放在入口而不是控制器里：写文件是环境依赖（与 LCU/屏幕流同类），控制器只把
+ * "已经算出来的东西"交给观察者，落地由这里决定（控制器因此保持可被纯 Node 回放）。
+ */
+let augmentRecorder: SessionRecorder | null = null;
+
 /** 懒建控制器（构造很轻；真正建流的是 `start()`）。 */
 function ensureAugmentController(): AugmentController {
   if (augment) return augment;
@@ -1549,6 +1573,21 @@ function ensureAugmentController(): AugmentController {
     trigger: 'api',
     // api 模式只在"已知确实在对局中"时计 2999 的失败（进游戏前一定没有 2999）
     inMatch: () => AUGMENT_CHAIN_PHASES.includes(lastPhase),
+    // ── 环境依赖的注入（控制器不 import Electron；见 augment-controller.ts 的注释）──
+    createCapture: augmentStreamCapture,
+    // ⚠️ 传入当前档位的 `thumbScale`（它会经 targetWidth 影响搜索区）——省略它等于让
+    //    `HEXBOX_AUGMENT_THUMB_SCALE` 对常驻覆盖层彻底失效（审查发现）
+    resolveGeometry: () => resolveAugmentCaptureGeometry(AUGMENT_CHAIN_CAPTURE.thumbScale),
+    // **会话录制**（`HEXBOX_AUGMENT_RECORD=1`，默认关）：把这一局录成可回放的会话。
+    // 观察者在控制器构造时就给（它一直在），录制器本体等几何就绪后再建。
+    record: sessionRecordEnabled(),
+    observer: {
+      onApiSample: (sample) => augmentRecorder?.api(sample),
+      onPanelEdge: (edge) => augmentRecorder?.edge(edge),
+      onFramePixels: (payload) => augmentRecorder?.frame(payload),
+      // 英雄认出来就补写进会话（回放靠它组强度表；不记就是"回放永远画不出标签"）
+      onIdentity: (c) => augmentRecorder?.setMeta({ champion: c }),
+    },
   });
   return augment;
 }
@@ -1565,6 +1604,60 @@ function ensureAugmentController(): AugmentController {
  * 决定。这样即使链路因为任何原因停掉，**面板还开着**时标签也不会被抹掉
  *（代价：极端边界下可能多留一个轮询周期，见 docs/AUGMENT-PANEL.md §十六 6）。
  */
+/**
+ * 进对局后建会话录制器（**只建一次**；`controller.geometry` 那时才有值）。
+ *
+ * 会话目录里会写 `session.json`（几何/配置/环境变量/身份）——回放要凭它复原现场。
+ */
+/**
+ * 进对局后把**真实几何/数据版本**补写进会话（节点已在 `applyAugmentChain`
+ * 里提前建好，那时只能用默认几何）。
+ *
+ * ⚠️ 它必须**幂等**：已有记录器时只补写元数据（`setMeta`），绝不能
+ * "已经有了就直接 return"—— 那样 `session.json` 里的几何会永远是默认值，而回放靠它复原现场（搜索区不一样判据就不一样）。
+ */
+function ensureRecorder(controller: AugmentController): void {
+  if (!sessionRecordEnabled()) return;
+  const geo = controller.geometry;
+  const patch = {
+    gating: geo
+      ? {
+          targetScale: 1 / 3,
+          minWidth: 960,
+          width: geo.targetWidth,
+          height: Math.round((geo.display.size.height / geo.display.size.width) * geo.targetWidth),
+        }
+      : null,
+    region: geo?.region ?? PANEL_ROW_REGION,
+    altRegion: geo?.altRegion ?? PANEL_ROW_REGION,
+    windowPhysical: geo?.windowPhysical ?? null,
+    display: geo
+      ? {
+          width: geo.display.size.width,
+          height: geo.display.size.height,
+          scaleFactor: geo.display.scaleFactor,
+          workArea: {
+            x: geo.display.workArea.x,
+            y: geo.display.workArea.y,
+            width: geo.display.workArea.width,
+            height: geo.display.workArea.height,
+          },
+        }
+      : null,
+    data: controller.dataInfo,
+  };
+  if (augmentRecorder) {
+    augmentRecorder.setMeta(patch);
+    return;
+  }
+  augmentRecorder = createSessionRecorder({
+    rootDir: recordRootDir(dirname(resolveDataDir())),
+    suffix: `${lastPhase}`,
+    meta: { trigger: 'api', champion: null, notes: ['常驻覆盖层入口（dev:overlay）'], ...patch },
+  });
+  augmentRecorder.phase({ atMs: Date.now(), phase: lastPhase });
+}
+
 function applyAugmentChain(stage: string): void {
   const t = augmentChainTransition(augmentState, augmentSession, stage, {
     augmentEnabled: AUGMENT_ENABLED,
@@ -1577,11 +1670,37 @@ function applyAugmentChain(stage: string): void {
     // ⚠️ 令牌 = **要作废的那一代**：期间若已经起了新一代，这条请求会被忽略
     //（绝不允许旧一代的收工把新一代的流一起收掉）
     augment?.stop('离开对局', { token: t.token });
+    // 会话录制收工：快照写成 golden（回放逐项比对用），下一局重新建目录
+    if (augmentRecorder && augment) {
+      augmentRecorder.close(augment.snapshot());
+      augmentRecorder = null;
+    }
     return;
   }
   if (t.action !== 'start') return;
 
   const controller = ensureAugmentController();
+  // ⚠️ 录制器要在 `start()` **之前**就存在：`start()` 里的第一次 2999 轮询会立即起飞，
+  //    录制器后建就会丢掉那一条采样（审查发现）。先用默认几何建，
+  //    等 `start()` 返回后再用 `setMeta()` 补写真实几何。
+  if (sessionRecordEnabled() && !augmentRecorder) {
+    augmentRecorder = createSessionRecorder({
+      rootDir: recordRootDir(dirname(resolveDataDir())),
+      suffix: `${stage}`,
+      meta: {
+        trigger: 'api',
+        gating: null,
+        region: PANEL_ROW_REGION,
+        altRegion: PANEL_ROW_REGION,
+        windowPhysical: null,
+        display: null,
+        data: null,
+        champion: null,
+        notes: ['常驻覆盖层入口（dev:overlay）'],
+      },
+    });
+    augmentRecorder.phase({ atMs: Date.now(), phase: stage });
+  }
   const token = t.token;
   console.log(
     `[hexbox] 进入对局（${stage}）→ 启动局内海克斯链路（常态零取帧：API 触发 + 常驻屏幕流）`,
@@ -1601,6 +1720,7 @@ function applyAugmentChain(stage: string): void {
       if (state === 'stream') {
         augmentState = 'running';
         console.log('[hexbox] 局内海克斯链路已就绪（面板开边沿才取帧；关闭边沿立刻清空标签）');
+        ensureRecorder(controller);
         return;
       }
       augmentState = 'failed';
@@ -1925,6 +2045,12 @@ app.on('before-quit', () => {
     // ⚠️ 这里是**少数几个明确要求清标签**的地方之一（窗口马上销毁，
     // 不留残留字母）；局内正常的"离开对局"停止**不清标签**
     augment?.stop('程序退出', { clearLabels: true });
+    // 会话录制收工：把快照写成 golden —— 否则"打完直接退游戏/关程序"会丢掉报告
+    // （帧库与 api.jsonl 已经在录的过程中逐帧刷盘了；这一条只补 report.json）
+    if (augmentRecorder && augment) {
+      augmentRecorder.close(augment.snapshot());
+      augmentRecorder = null;
+    }
     // 逐条写清楚"清理做了什么"：真机/打包版验证时 `grep 退出清理` 就能确认
     // 走的是这一条路径（而不是残留一个没有窗口的僵尸进程）
     console.log(

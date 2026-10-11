@@ -22,6 +22,11 @@ export * from './augment-ocr.ts';
 export * from './augment-trigger.ts';
 // 开边沿整批识别的**矩形来源**决策（渲染端 worker 用：原生重检失败 → 门控矩形兜底）
 export * from './augment-open-recognize.ts';
+// 全分辨率识别的**纯函数核心**（渲染端 worker 与离线回放共用同一份 —— 不许再有第二份）
+export * from './augment-recognize.ts';
+// 会话格式：渲染端录制时用的**帧载荷类型**（`AugmentSessionFramePayload`）在这里
+// （纯计算/零 Node 依赖；让 preload→主进程→录制器四跳共用一份类型，而不是各写一份匿名类型）
+export * from './augment-session.ts';
 export * from './augment-label.ts';
 // 面板停留期间的**单卡刷新**检测（指纹在渲染端算：只有它拿得到门控画布像素）
 export * from './augment-reroll.ts';

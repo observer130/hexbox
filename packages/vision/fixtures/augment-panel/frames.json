@@ -1,0 +1,190 @@
+{
+  "note": "真机帧 fixture（由 scripts/make-frame-fixtures.mts 生成）：缩到门控画布分辨率、裁到并集(留档 region, PANEL_ROW_REGION)、灰度。不含个人信息；`expectFound` 是**真机门控当时的判定**，`builtFound` 是生成时跑线上检测器的结果。",
+  "gate": {
+    "targetScale": 0.3333333333333333,
+    "minWidth": 960
+  },
+  "thresholds": {
+    "aspectRatio": 1.77,
+    "aspectTolerance": 0.45,
+    "maxGapRatio": 0.3,
+    "interiorMax": 40,
+    "contrastMin": 70,
+    "minCardHeight": 0.3,
+    "minCards": 2,
+    "maxCards": 3
+  },
+  "frames": [
+    {
+      "file": "panel-inprogress-152515.gray.png",
+      "source": "debug/shots/inprogress-152515-raw.png",
+      "sourceSize": "4587x1920",
+      "gateSize": "1529x640",
+      "region": {
+        "x": 0.12,
+        "y": 0.1,
+        "w": 0.76,
+        "h": 0.66
+      },
+      "altRegion": {
+        "x": 0.12,
+        "y": 0.1,
+        "w": 0.76,
+        "h": 0.66
+      },
+      "crop": {
+        "x": 0.12,
+        "y": 0.1,
+        "w": 0.76,
+        "h": 0.66
+      },
+      "expectFound": true,
+      "note": "真机三选一面板（判据标定用的正样本之一，见 docs/AUGMENT-PANEL.md §二）",
+      "builtFound": true,
+      "builtReason": "3 张卡片：内部暗(25/29/24) 边框亮(127/132/132)"
+    },
+    {
+      "file": "panel-inprogress-152509.gray.png",
+      "source": "debug/shots/inprogress-152509-raw.png",
+      "sourceSize": "4587x1920",
+      "gateSize": "1529x640",
+      "region": {
+        "x": 0.12,
+        "y": 0.1,
+        "w": 0.76,
+        "h": 0.66
+      },
+      "altRegion": {
+        "x": 0.12,
+        "y": 0.1,
+        "w": 0.76,
+        "h": 0.66
+      },
+      "crop": {
+        "x": 0.12,
+        "y": 0.1,
+        "w": 0.76,
+        "h": 0.66
+      },
+      "expectFound": true,
+      "note": "真机三选一面板（同上；与上一张不同时刻、不同官方统计）",
+      "builtFound": true,
+      "builtReason": "3 张卡片：内部暗(25/29/28) 边框亮(127/129/175)"
+    },
+    {
+      "file": "panel-open-1.gray.png",
+      "source": "debug/augment/open-1.png",
+      "sourceSize": "3413x1920",
+      "gateSize": "1138x640",
+      "region": {
+        "x": 0.22,
+        "y": 0.12,
+        "w": 0.56,
+        "h": 0.6
+      },
+      "altRegion": {
+        "x": 0.12,
+        "y": 0.1,
+        "w": 0.76,
+        "h": 0.66
+      },
+      "crop": {
+        "x": 0.12,
+        "y": 0.1,
+        "w": 0.76,
+        "h": 0.66
+      },
+      "expectFound": false,
+      "liveNativeFound": false,
+      "liveReason": "门控当时说\"3 张卡片：内部暗(28/28/27) 边框亮(121/122/129)\"，但**同一时刻的原生重检说未命中**",
+      "note": "**别把它当成正样本改断言**：门控跑在**屏幕流**的 1/3 画布上，而取证帧是 `desktopCapturer` 抓的另一张图 —— 两者不是同一帧（这一帧上：门控说 3 张卡、原生重检说 0 张、本 fixture 的 1/3 重建说 3 条边框带但 0 张卡，后两者一致）。它锁住的正是\"**会话必须存门控画布帧、不能存 desktopCapturer 帧**\"这条结论",
+      "builtFound": false,
+      "builtReason": "卡片数 0（边框带太少(3)，不足以构成卡片）"
+    },
+    {
+      "file": "closed-sample-1.gray.png",
+      "source": "debug/augment/closed-sample-1.png",
+      "sourceSize": "4587x1920",
+      "gateSize": "1529x640",
+      "region": {
+        "x": 0.3047079337401918,
+        "y": 0.11875,
+        "w": 0.39058413251961643,
+        "h": 0.5625
+      },
+      "altRegion": {
+        "x": 0.12,
+        "y": 0.1,
+        "w": 0.76,
+        "h": 0.66
+      },
+      "crop": {
+        "x": 0.12,
+        "y": 0.1,
+        "w": 0.76,
+        "h": 0.66
+      },
+      "expectFound": false,
+      "liveReason": "卡片数 0（等宽候选桶均未通过间隙/纵横比校验（共 6 个候选桶））",
+      "note": "局内但面板未弹（真机负样本；它同时也是\"录制从面板开始\"的边界样本）",
+      "builtFound": false,
+      "builtReason": "卡片数 0（等宽候选桶均未通过间隙/纵横比校验（共 9 个候选桶））"
+    },
+    {
+      "file": "champselect-hover.gray.png",
+      "source": "debug/shots/champselect-hover-152415-raw.png",
+      "sourceSize": "3413x1920",
+      "gateSize": "1138x640",
+      "region": {
+        "x": 0.12,
+        "y": 0.1,
+        "w": 0.76,
+        "h": 0.66
+      },
+      "altRegion": {
+        "x": 0.12,
+        "y": 0.1,
+        "w": 0.76,
+        "h": 0.66
+      },
+      "crop": {
+        "x": 0.12,
+        "y": 0.1,
+        "w": 0.76,
+        "h": 0.66
+      },
+      "expectFound": false,
+      "note": "选人阶段帧：**绝不能**被局内门控认成面板（误判会在选人界面画局内标签）",
+      "builtFound": false,
+      "builtReason": "卡片内部不够暗(55 ≥ 40)"
+    },
+    {
+      "file": "champselect-locked.gray.png",
+      "source": "debug/shots/champselect-locked-152419-raw.png",
+      "sourceSize": "3413x1920",
+      "gateSize": "1138x640",
+      "region": {
+        "x": 0.12,
+        "y": 0.1,
+        "w": 0.76,
+        "h": 0.66
+      },
+      "altRegion": {
+        "x": 0.12,
+        "y": 0.1,
+        "w": 0.76,
+        "h": 0.66
+      },
+      "crop": {
+        "x": 0.12,
+        "y": 0.1,
+        "w": 0.76,
+        "h": 0.66
+      },
+      "expectFound": false,
+      "note": "选人第二阶段（已锁定）帧：同上，且它的大立绘是\"像卡片\"的干扰源",
+      "builtFound": false,
+      "builtReason": "卡片内部不够暗(54 ≥ 40)"
+    }
+  ]
+}

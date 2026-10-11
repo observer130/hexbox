@@ -32,14 +32,18 @@ import {
   detectAugmentPanelInRegions,
   detectPanelPresenceInRegions,
   gateCanvasWidth,
-  readAugmentName,
-  resolveOpenRecognizeCards,
-  PANEL_THRESHOLDS,
+  recognizeOpen,
+  recognizeReroll,
   type AugmentCardFingerprint,
+  type AugmentSessionFramePayload,
   type AugmentNameFingerprint,
   type Bitmap,
   type PanelCard,
   type PanelPresence,
+  type RecognizePixels,
+  type RecognizedCard,
+  type RecognizeOrigin,
+  type RecognizedReport,
   type Rect,
 } from '@hexbox/vision/browser';
 
@@ -60,6 +64,18 @@ interface WorkerConfig {
   readonly library?: readonly AugmentNameFingerprint[];
   /** 门控画布目标宽度（像素）。 */
   readonly targetWidth: number;
+  /**
+   * **会话录制**（`HEXBOX_AUGMENT_RECORD=1`）：把门控帧与识别用的原生帧的**灰度**
+   * 交给主进程落盘。
+   *
+   * 为什么录"门控真正看到的那些帧"而不是定时录屏：回放要复现的是**门控的输入**。
+   * 定时录（例如固定 4fps）录到的时刻与门控实际取帧的时刻对不上，边沿/节流/单卡刷新
+   * 的时间关系就被改了；而"逐个门控帧落盘"在语义上就是**trace**（帧库 = 线上的输入序列），
+   * 回放时逐位一致。代价：只覆盖门控真的取过帧的那些时刻（api 模式常态零取帧 ↓ 几乎不录）。
+   *
+   * 默认 `false`：不开录制时这条路径**一个字节都不走**。
+   */
+  readonly record?: boolean;
 }
 
 /** 一帧的检测结果（回传主进程）。 */
@@ -123,44 +139,21 @@ interface WorkerApi {
   readonly status: (s: { readonly message: string; readonly error?: boolean }) => void;
   /** 全分辨率识别结果（可能不存在：旧 preload）。 */
   readonly recognized?: (r: RecognizedReport) => void;
-}
-
-/** 一张卡的识别结果（`augmentId` 为 null = 没认出来，调用方不要画）。 */
-export interface RecognizedCard {
-  readonly rect: Rect;
-  readonly interiorLuma: number;
-  readonly edgeLuma: number;
-  readonly augmentId: number | null;
-  readonly name: string | null;
-  readonly score: number | null;
-  readonly margin: number | null;
-}
-
-/** 识别报告的触发原因：面板开边沿的整批识别 / 面板停留期间的**单卡重随**重识别。 */
-export type RecognizeOrigin = 'open' | 'reroll';
-
-/** 全分辨率识别报告。 */
-export interface RecognizedReport {
-  readonly ok: boolean;
-  readonly reason: string;
-  readonly cards: readonly RecognizedCard[];
-  readonly regionIndex?: number;
-  readonly tookMs: number;
-  readonly width?: number;
-  readonly height?: number;
-  /** 触发原因（`open` = 开边沿整批；`reroll` = 面板停留期间某张卡被换掉）。 */
-  readonly origin: RecognizeOrigin;
-  /** `origin === 'reroll'`：这次重认的卡片序号（与 `cards` 一一对应）。 */
-  readonly refreshed?: readonly number[];
   /**
-   * 本次（重）识别之后、**当前冻结取样矩形**下的每卡指纹。
+   * 会话录制：一帧的灰度像素（只在 `config.record` 打开时调用）。
    *
-   * 主进程把它当作**重随检测的基线**：基线必须来自"这一帧画的是哪颗海克斯"，
-   * 而不是随便一帧 —— 否则开面板动画或一次抖动就会被当成刷新。
+   * 类型直接用会话格式里的那一份（`AugmentSessionFramePayload`）：
+   * 这条缝要过 preload → 主进程 → 录制器四跳，各自写一份匿名类型就等于“改字段名不会红”。
    */
-  readonly fingerprints: readonly (AugmentCardFingerprint | null)[];
+  readonly recordFrame?: (f: AugmentSessionFramePayload) => void;
 }
 
+/**
+ * 识别相关类型**规范定义在 `@hexbox/vision` 的 `augment-recognize.ts`**
+ * （渲染端 worker 与离线回放共用同一份纯函数核心）。这里只做**转出**：
+ * 主进程（`augment-controller.ts`）从本文件引用这些类型 —— 保持既有导入路径不变。
+ */
+export type { RecognizedCard, RecognizeOrigin, RecognizedReport };
 declare global {
   interface Window {
     readonly augmentWorkerApi?: WorkerApi;
@@ -189,7 +182,7 @@ let lastFrameAt = 0;
  * `null`/空 = 还没识别过 → 本帧用自己检出的矩形取样（主进程那时也没有基线，
  * 不会拿它做判定）。
  */
-let watchRects: Rect[] | null = null;
+let watchRects: readonly Rect[] | null = null;
 /**
  * **冻结的卡片矩形**（上一批识别用的那几个矩形，面板存续期间不变）。
  *
@@ -205,7 +198,7 @@ let watchRects: Rect[] | null = null;
  * 面板存续期间卡片不会动（翻牌是原地换内容），所以正确语义是**一律用冻结矩形**：
  * 新检测矩形只用来判断"差异有多大"并记日志，**绝不改几何**。
  */
-let frozenRects: Rect[] | null = null;
+let frozenRects: readonly Rect[] | null = null;
 /** 最近一帧检出的卡片（重随重识别要用它的矩形与亮度字段）。 */
 let latestCards: readonly PanelCard[] = [];
 /**
@@ -329,6 +322,28 @@ function tick(): void {
   const sincePrevMs = lastFrameAt === 0 ? 0 : now - lastFrameAt;
   lastFrameAt = now;
 
+  /**
+   * **会话录制**（默认关）：把这一帧的灰度与判定交给主进程落盘。
+   *
+   * 录的就是"门控这一帧真正看到的画面"，所以回放时帧库 = 线上的输入序列。
+   * 灰度在这里取（渲染端有像素），编码/写文件在主进程（那边才有 `node:zlib`）。
+   */
+  if (config.record) {
+    api?.recordFrame?.({
+      atMs: Date.now(),
+      kind: 'gating',
+      gray: lumaBytes(bmp),
+      width: bmp.width,
+      height: bmp.height,
+      // 帧库存的是**整幅门控画布**（不裁剪）：卡片矩形/指纹都在画布归一化坐标下，
+      // 裁剪存档会给"补贴图坐标换算"这种静默偏移留口子（见 augment-session.ts）。
+      crop: { x: 0, y: 0, w: 1, h: 1 },
+      found: det.found,
+      reason: det.reason,
+      cards: det.cards,
+    });
+  }
+
   api?.report({
     found: det.found,
     cards: det.cards,
@@ -395,149 +410,97 @@ async function recognize(opts: { readonly only?: readonly number[] } = {}): Prom
   const t0 = performance.now();
 
   /**
-   * 以"当前门控帧检出的卡片矩形"重新**冻结**取样矩形，并回传该矩形下的指纹。
+   * 像素来源（注入给**纯函数核心**，见 `@hexbox/vision` 的 `augment-recognize.ts`）。
    *
-   * 指纹一律在**门控画布**上算（截图与后续帧同一分辨率/同一取样矩形），
-   * 基线才不会因为"原生帧算一次、门控帧算一次"而白白差出一点点距离。
-   *
-   * ⚠️ **只有整批识别（路径 A）才调它**：重随重识别（路径 B）不许重新冻结 ——
-   * 那时卡片正在翻牌动画里，按动画帧的检测矩形取样会让后续每一帧的指纹都偏，
-   * 而 `augment-reroll.ts` 的阈值标定前提正是"同一块面板停留期间用同一组取样矩形"。
+   * 分工刻意如此：
+   *   · 本文件只负责"从屏幕流取像素"（DOM 的活）；
+   *   · 判据/冻结规则/OCR 编排全在核心那一份里 —— 与离线回放**同一份代码**。
+   * `readRect` 走单卡裁剪（一张卡 ≈1.1MB），`readFull` 才是整帧（19.8MB 级）。
    */
-  const refreeze = (): readonly (AugmentCardFingerprint | null)[] => {
-    if (latestCards.length === 0 || !latestGatingBmp) {
-      watchRects = null;
-      latestFingerprints = [];
-      return latestFingerprints;
-    }
-    watchRects = latestCards.map((c) => c.rect);
-    const bmp = latestGatingBmp;
-    latestFingerprints = watchRects.map((r) => augmentCardFingerprint(bmp, r));
-    return latestFingerprints;
+  /**
+   * **会话录制**：识别用的原生帧也存一份（灰度高帧）。
+   *
+   * 为什么必须存整幅原生帧（而不是只存卡片小图）：回放要重跑**线上同一份**识别核心
+   * （`recognizeOpen`），它第一步就是在原生帧上重新检测面板（"原生重检"），
+   * 再逐卡 OCR —— 只有整幅帧才能让那一步真的跑起来。
+   * 频率极低（一次面板 3~5 帧），代价可接受。
+   */
+  const recordNative = (bmp: Bitmap): void => {
+    if (!config?.record) return;
+    api?.recordFrame?.({
+      atMs: Date.now(),
+      kind: 'native',
+      gray: lumaBytes(bmp),
+      width: bmp.width,
+      height: bmp.height,
+      crop: { x: 0, y: 0, w: 1, h: 1 },
+    });
   };
 
-  // ── 路径 B：只重认"被刷新"的那几张卡 ─────────────────────────────────
+  const pixels: RecognizePixels = {
+    width: vw,
+    height: vh,
+    readFull: () => {
+      const off = document.createElement('canvas');
+      off.width = vw;
+      off.height = vh;
+      const octx = off.getContext('2d', { willReadFrequently: true });
+      if (!octx) return null;
+      octx.drawImage(video, 0, 0, vw, vh);
+      const img = octx.getImageData(0, 0, vw, vh);
+      const bmp: Bitmap = { width: vw, height: vh, data: img.data };
+      // 录的正是识别**实际用的那一帧**（同一个 Bitmap 对象），不是"再抓一张"
+      recordNative(bmp);
+      return bmp;
+    },
+    readRect: (rect) => cropVideo(video, rect, vw, vh),
+  };
+
   if (only) {
-    const library = config.library ?? [];
-    const cards: RecognizedCard[] = [];
-    const refreshed: number[] = [];
-    const frozen = frozenRects;
-    for (const index of only) {
-      const panelCard = latestCards[index];
-      refreshed.push(index);
-      // ⚠️ **一律用冻结矩形**（上一次识别报告里的那一个）：面板存续期间卡片不动，
-      //    本帧检测出来的矩形在重随这一刻是**翻牌动画中间帧**，改了它 = 整排标签下移。
-      const rect = frozen?.[index] ?? panelCard?.rect ?? null;
-      if (!rect) {
-        cards.push(emptyCard({ x: 0, y: 0, w: 0, h: 0 }));
-        continue;
-      }
-      logRectShiftIfAny(index, rect, panelCard?.rect ?? null);
-      // 只把这一张卡的区域按原生分辨率取出来（比整帧小一个量级），
-      // 区域用**冻结矩形** → 与开边沿那一次裁的是同一块像素。
-      const region = cropVideo(video, rect, vw, vh);
-      const m = region && library.length > 0 ? readAugmentName(region, { x: 0, y: 0, w: 1, h: 1 }, library) : null;
-      cards.push({
-        rect,
-        interiorLuma: panelCard ? Math.round(panelCard.interiorLuma) : 0,
-        edgeLuma: panelCard ? Math.round(panelCard.edgeLuma) : 0,
-        augmentId: m?.augmentId ?? null,
-        name: m?.name ?? null,
-        score: m ? Number(m.score.toFixed(3)) : null,
-        margin: m ? Number(m.margin.toFixed(3)) : null,
-      });
-    }
-    // 指纹沿用**已冻结的取样矩形**在最近一帧门控画布上的结果（`tick()` 每帧算好的）：
-    // 重随只换内容、不换几何，所以基线仍然要按同一组矩形取。
-    api?.recognized?.({
-      ok: true,
-      reason: `单卡重随：只重认卡 ${refreshed.map((i) => i + 1).join('/')}`,
-      cards,
-      refreshed,
-      origin: 'reroll',
-      tookMs: performance.now() - t0,
-      width: vw,
-      height: vh,
+    // 会话录制：重随路径本身只读**卡片小图**（省 19.8MB 级开销），但回放要重跑
+    // "线上同一份"识别核心 —— 它从**整幅原生帧**取像素。所以开着录制时补一张整幅帧
+    // （每次重随一张；重随很少发生，代价可接受）。不补的话，回放遇到重随只能报
+    // "缺原生帧"，那次单卡刷新就永远验不了。
+    if (config.record) pixels.readFull();
+    // ── 路径 B：只重认"被刷新"的那几张卡（**不重新冻结任何几何**）────────────
+    const out = recognizeReroll({
+      pixels,
+      only,
+      latestCards,
+      frozenRects,
+      library: config.library ?? [],
       fingerprints: latestFingerprints,
+      tookMs: performance.now() - t0,
     });
+    for (const n of out.notes) log(n);
+    api?.recognized?.(out.report);
     return;
   }
 
   // ── 路径 A：整批识别（面板开边沿）──────────────────────────────────
-  const off = document.createElement('canvas');
-  off.width = vw;
-  off.height = vh;
-  const octx = off.getContext('2d', { willReadFrequently: true });
-  if (!octx) {
-    fail('无法建离屏画布', performance.now() - t0);
-    return;
-  }
-  octx.drawImage(video, 0, 0, vw, vh);
-  const img = octx.getImageData(0, 0, vw, vh);
-  const bmp: Bitmap = { width: vw, height: vh, data: img.data };
-
-  // 卡片矩形在**归一化坐标**下与门控画布一致（同一画面、同一纵横比），
-  // 所以可以直接在原生帧上重新检测（更精确），再逐卡认名字。
   const regions: Rect[] = [config.region];
   if (config.altRegion) regions.push(config.altRegion);
-  const hit = detectAugmentPanelInRegions(bmp, regions);
-  const library = config.library ?? [];
-  // ⚠️ 真机回归（2026-10-11）：**同一块面板、两个分辨率、同一条阈值**会打架 ——
-  //    门控在 1/3 分辨率上量到 39（< 40 → 命中，于是开出"面板出现"开边沿），
-  //    原生重检在 1:1 上量到 **40**（`>= 40` → 失败）→ 整批识别"未命中"、
-  //    面板在屏 25.7 秒一个标签都没有（日志：`卡片内部不够暗(40 ≥ 40)`）。
-  //    门控才是"面板在屏"的权威（开边沿由它给出，且要求连续 2 帧命中），
-  //    原生重检只负责**更精确的矩形** —— 它说"不"的时候退回门控刚验过的矩形继续
-  //    OCR（矩形是归一化的，1/3 分辨率下同样可用），而不是把整块面板丢掉。
-  const plan = resolveOpenRecognizeCards({
-    native: hit.detection,
-    // `lastHitCards` = 最近一次**卡片判据命中**的那一帧检出的卡片（见 `tick()`）。
-    gating: lastHitCards,
-    minCards: PANEL_THRESHOLDS.minCards,
-  });
-  if (plan.source === 'gating') log(`⚠ ${plan.reason}`);
-  if (plan.source === 'none') {
-    api?.recognized?.({
-      ok: false,
-      reason: plan.reason,
-      cards: [],
-      regionIndex: hit.regionIndex,
-      tookMs: performance.now() - t0,
-      origin: 'open',
-      fingerprints: latestFingerprints,
-    });
-    return;
-  }
-  const cards = plan.cards.map((c) => {
-    const m = library.length > 0 ? readAugmentName(bmp, c.rect, library) : null;
-    return {
-      rect: c.rect,
-      interiorLuma: Math.round(c.interiorLuma),
-      edgeLuma: Math.round(c.edgeLuma),
-      augmentId: m?.augmentId ?? null,
-      name: m?.name ?? null,
-      score: m ? Number(m.score.toFixed(3)) : null,
-      margin: m ? Number(m.margin.toFixed(3)) : null,
-    };
-  });
-  // 整批识别之后把取样矩形**冻结**在"当前门控帧检出的卡片矩形"上，
-  // 并用同一张门控画布算基线指纹（与后续帧同一分辨率 —— 否则会白差一点点距离）。
-  //
-  // 同时把**裁剪/标签几何**用的卡片矩形冻在"这一批识别报告的 rect"上：
-  // 之后的重随重识别一律复用它（见 `frozenRects` 与路径 B）。
-  frozenRects = cards.map((c) => c.rect);
-  const fingerprints = refreeze();
-  api?.recognized?.({
-    ok: true,
-    reason: hit.detection.reason,
-    cards,
-    regionIndex: hit.regionIndex,
+  const out = recognizeOpen({
+    pixels,
+    regions,
+    library: config.library ?? [],
+    gatingCards: lastHitCards,
+    // 指纹基底 = **门控画布 + 画布坐标的卡片矩形**（线上两者天然同基底）
+    fingerprintBasis: {
+      bitmap: latestGatingBmp,
+      rects: latestCards.length > 0 ? latestCards.map((c) => c.rect) : null,
+    },
+    frozenRects,
+    watchRects,
+    fingerprints: latestFingerprints,
     tookMs: performance.now() - t0,
-    width: vw,
-    height: vh,
-    origin: 'open',
-    fingerprints,
   });
+  if (out.note !== null) log(out.note);
+  // 冻结几何**只在整批识别时**推进（重随路径一个字都不改）。
+  frozenRects = out.frozenRects;
+  watchRects = out.watchRects;
+  latestFingerprints = out.fingerprints;
+  api?.recognized?.(out.report);
 }
 
 /**
@@ -564,38 +527,18 @@ function cropVideo(videoEl: HTMLVideoElement, rect: Rect, vw: number, vh: number
 }
 
 /**
- * 重随重识别时"本帧检测矩形 vs 冻结矩形"的相对差超过这个值就记一条日志。
+ * `Bitmap` → 灰度字节（链路的全部判据只看亮度；见 `vision/png.ts` 的 `encodeGrayPng`）。
  *
- * 单位是**帧宽/帧高**（归一化）；0.005 在 1440 高的真机帧上 ≈7 物理像素 ——
- * 比标定过的 ±1~2px 检测抖动大得多，所以只有"真在动画里"才报。
- * 它**只用于记日志**：几何一律以冻结矩形为准（见 `frozenRects`）。
+ * ⚠️ 系数必须与 `vision/match.ts` 的 `extractGray*` 逐字相同：帧库存的是这里算的灰度，
+ * 回放时再按那一份取灰度 —— 两处差一点就是"回放测出来的阈值表现与真机不同"。
+ * 单测锁了"灰度往返后判据逐位相同"（`png.test.ts`）。
  */
-const REROLL_RECT_SHIFT_TOLERANCE = 0.005;
-
-/**
- * 记一条"检测矩形与冻结矩形差异明显"的日志（**只记日志，不改几何**）。
- *
- * 真机复盘时这一行就是"那张卡当时正在翻牌动画里"的直接证据
- * （`report.json` 里那两帧：冻结 y=0.189621 h=0.463389 → 动画 y=0.179117 h=0.487192）。
- */
-function logRectShiftIfAny(index: number, frozenRect: Rect, detected: Rect | null): void {
-  if (!detected) return;
-  const dy = detected.y - frozenRect.y;
-  const dh = detected.h - frozenRect.h;
-  const dw = detected.w - frozenRect.w;
-  const dx = detected.x - frozenRect.x;
-  const worst = Math.max(Math.abs(dy), Math.abs(dh), Math.abs(dw), Math.abs(dx));
-  if (worst < REROLL_RECT_SHIFT_TOLERANCE) return;
-  log(
-    `卡${index + 1} 重随：本帧检测矩形与冻结矩形差得明显（Δy ${dy.toFixed(6)} Δh ${dh.toFixed(6)} ` +
-      `Δw ${dw.toFixed(6)}）→ **仍用冻结矩形**裁剪与定位（面板存续期间卡片不动，` +
-      `本帧那一个是翻牌动画中间帧）`,
-  );
-}
-
-/** 认不出/取不到时的占位卡（`augmentId: null` → 调用方**清掉该卡标签**）。 */
-function emptyCard(rect: Rect): RecognizedCard {
-  return { rect, interiorLuma: 0, edgeLuma: 0, augmentId: null, name: null, score: null, margin: null };
+function lumaBytes(bmp: Bitmap): Uint8Array {
+  const out = new Uint8Array(bmp.width * bmp.height);
+  for (let i = 0, p = 0; p < out.length; p++, i += 4) {
+    out[p] = Math.round(0.299 * bmp.data[i]! + 0.587 * bmp.data[i + 1]! + 0.114 * bmp.data[i + 2]!);
+  }
+  return out;
 }
 
 function start(cfg: WorkerConfig): void {

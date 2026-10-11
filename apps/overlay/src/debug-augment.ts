@@ -75,10 +75,19 @@ import {
   AUGMENT_CHAIN_CADENCE,
   AUGMENT_CHAIN_CAPTURE,
   AugmentController,
-  resolveAugmentCaptureGeometry,
+  type AugmentChainObserver,
   type AugmentLabelSink,
   type AugmentReadingEvent,
 } from './main/augment-controller.ts';
+// 环境依赖的装配（Electron 侧）；控制器本身与回放共用同一份逻辑
+import { augmentStreamCapture } from './main/augment-capture-stream.ts';
+import { resolveAugmentCaptureGeometry } from './main/augment-geometry.ts';
+import {
+  createSessionRecorder,
+  recordEnabled as sessionRecordEnabled,
+  recordRootDir,
+  type SessionRecorder,
+} from './main/session-recorder.ts';
 import {
   attachLabelOverlayDiagnostics,
   clearLabelOverlay,
@@ -105,6 +114,10 @@ const OUT_DIR = (() => {
 })();
 
 const BENCH = process.env['HEXBOX_AUGMENT_BENCH'] === '1';
+/** **会话录制**（`HEXBOX_AUGMENT_RECORD=1`，默认关）：把这一局录成可回放的帧库 + 2999 采样。 */
+const RECORD = sessionRecordEnabled();
+/** 触发方式（与控制器同一口径；写进 session.json，回放要按它选状态机）。 */
+const TRIGGER_MODE: 'api' | 'pixel' = process.env['HEXBOX_AUGMENT_TRIGGER'] === 'api' ? 'api' : 'pixel';
 /** 只验证"节流切换能不能真的下发到渲染端"的自测（不需要游戏）。 */
 const SELFTEST_CADENCE = process.env['HEXBOX_AUGMENT_SELFTEST_CADENCE'] === '1';
 const CAPTURE = process.env['HEXBOX_AUGMENT_CAPTURE'] === 'oneshot' ? 'oneshot' : 'stream';
@@ -697,6 +710,45 @@ app.whenReady().then(async () => {
   /** 节流自测用：每帧的到达时刻（**未做任何过滤** —— 控制器也拿它数帧）。 */
   const arrivals: Array<{ t: number; sincePrevMs: number }> = [];
   const externalCapture = CAPTURE === 'oneshot';
+
+  /**
+   * **会话录制**（`HEXBOX_AUGMENT_RECORD=1`，默认关）。
+   *
+   * ⚠️ 必须在 `controller.start()` **之前**就建好：否则 pixel 模式的第一帧门控帧、
+   * api 模式的第一次 2999 采样都会落在"录制器还没有"的窗口里而丢掉（审查发现）。
+   * 几何/英雄/数据版本要等跑起来才知道 → 用 `setMeta()` 补写。
+   */
+  const repoRoot = dirname(resolveDataDir());
+  let recorder: SessionRecorder | null = null;
+  if (RECORD) {
+    recorder = createSessionRecorder({
+      rootDir: recordRootDir(repoRoot),
+      meta: {
+        trigger: TRIGGER_MODE,
+        // 先用默认值（start() 之后用 setMeta 修正成真实几何）
+        gating: null,
+        region: PANEL_ROW_REGION,
+        altRegion: PANEL_ROW_REGION,
+        windowPhysical: null,
+        display: null,
+        data: null,
+        champion: null,
+        notes: ['录制工具入口（debug:augment）'],
+      },
+      env: Object.fromEntries(
+        Object.entries(process.env).filter(([k]) => k.startsWith('HEXBOX_')),
+      ) as Record<string, string>,
+    });
+    recorder.phase({ atMs: Date.now(), phase });
+  }
+  const observer: AugmentChainObserver = {
+    onApiSample: (sample) => recorder?.api(sample),
+    onPanelEdge: (edge) => recorder?.edge(edge),
+    onFramePixels: (payload) => recorder?.frame(payload),
+    // 英雄认出来就补写进会话（回放靠它组强度表）
+    onIdentity: (c) => recorder?.setMeta({ champion: c }),
+  };
+
   const controller = new AugmentController({
     dataDir: resolveDataDir(),
     labels: DRAW ? labelSink : undefined,
@@ -706,10 +758,51 @@ app.whenReady().then(async () => {
     inMatch: () => phase === 'InProgress',
     onReading,
     onStreamFrame: (f) => arrivals.push({ t: Date.now(), sincePrevMs: f.sincePrevMs }),
+    // 环境依赖的装配（与常驻覆盖层同一份实现；控制器本身不 import Electron）
+    createCapture: augmentStreamCapture,
+    resolveGeometry: () => resolveAugmentCaptureGeometry(thumbScale),
+    record: RECORD,
+    observer,
   });
 
   const captureState = await controller.start();
   const onStream = captureState === 'stream';
+
+  /**
+   * `start()` 之后把**真实几何**写进会话（窗口矩形要探完才有）。
+   *
+   * 回放要凭它复原现场：搜索区不一样，判据结果就不一样（真机实例：同一帧换个搜索区从"3 张卡片"变成"边框带太少"）。
+   */
+  if (recorder) {
+    const geo = controller.geometry;
+    recorder.setMeta({
+      gating: geo
+        ? {
+            targetScale: 1 / 3,
+            minWidth: 960,
+            width: geo.targetWidth,
+            height: Math.round((geo.display.size.height / geo.display.size.width) * geo.targetWidth),
+          }
+        : null,
+      region: geo?.region ?? PANEL_ROW_REGION,
+      altRegion: geo?.altRegion ?? PANEL_ROW_REGION,
+      windowPhysical: geo?.windowPhysical ?? null,
+      display: geo
+        ? {
+            width: geo.display.size.width,
+            height: geo.display.size.height,
+            scaleFactor: geo.display.scaleFactor,
+            workArea: {
+              x: geo.display.workArea.x,
+              y: geo.display.workArea.y,
+              width: geo.display.workArea.width,
+              height: geo.display.workArea.height,
+            },
+          }
+        : null,
+      data: controller.dataInfo,
+    });
+  }
 
   if (!onStream && !externalCapture) {
     console.warn(
@@ -803,6 +896,8 @@ app.whenReady().then(async () => {
       ],
     };
     writeFileSync(join(OUT_DIR, 'report.json'), JSON.stringify(report, null, 2));
+    // 会话录制同样收工：把控制器快照写成 golden（回放时逐项比对）
+    recorder?.close(report);
 
     if (snap.trigger.mode === 'api' && snap.apiLog.length > 0) {
       writeFileSync(

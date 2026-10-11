@@ -52,7 +52,6 @@
  * 不解析封包、不打开游戏进程句柄。
  */
 
-import { screen } from 'electron';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -78,7 +77,6 @@ import {
   decideOpenRecognitionRetry,
   decideRerollRetry,
   fingerprintDistance,
-  findGameWindowRectCached,
   formatApiTraceLine,
   formatCaptureWindowLine,
   lookupAugmentPickRate,
@@ -86,16 +84,15 @@ import {
   makeScreenGeometry,
   mergeRefreshedCards,
   panelGateEvidence,
-  panelRowRectInCapture,
   rerolledCardIndices,
   shouldAdoptReportedBaseline,
   toScreenTierLabels,
   withLogOffset,
-  PANEL_ROW_REGION,
   type AugmentBadgeAlign,
   type AugmentBadgeSize,
   type AugmentClearReason,
   type AugmentCardFingerprint,
+  type AugmentSessionFramePayload,
   type CadenceMode,
   type CloseConfirmDecision,
   type LabelRowLock,
@@ -118,10 +115,9 @@ import {
   type LiveDataClient,
 } from '@hexbox/lcu';
 
-import { AugmentStream, type AugmentFrame } from './augment-stream.ts';
+import type { AugmentFrame } from './augment-stream.ts';
 import type { LabelOverlayMsg } from './label-overlay.ts';
 import type { RecognizedCard, RecognizedReport, RecognizeOrigin } from '../capture/worker.ts';
-
 /* ------------------------------------------------------------------ */
 /* 环境变量（全部是**链路**的旋钮；"怎么录制"的旋钮留在录制工具里）        */
 /* ------------------------------------------------------------------ */
@@ -530,7 +526,127 @@ export interface AugmentControllerDeps {
   readonly onStreamFrame?: (frame: AugmentFrame) => void;
   readonly log?: (line: string) => void;
   readonly warn?: (line: string) => void;
+
+  /* ------------------------------------------------------------------ */
+  /* 以下四个注入缝（2026-10-12 加）：让**同一个控制器**能离线回放          */
+  /* ------------------------------------------------------------------ */
+  /*
+   * 为什么要注入而不是直接调：回放必须跑"线上同一份代码"（这个项目踩过
+   * "诊断脚本与主流程两份实现必然漂移"的坑），而线上这四样东西都带环境依赖：
+   * 真实时钟、Electron 截屏流、2999 HTTP、LCU 探测。把它们换成注入之后，
+   * `scripts/replay-session.mts` 就能用虚拟时钟 + 会话帧库 + 录下来的 2999/身份
+   * 跑**同一个 `AugmentController`**（连边沿、节流、重随、标签全都一起回放）。
+   *
+   * ⚠️ 缺省行为必须与接线前**逐字相同**（不传 = 真实实现），否则录制工具/常驻覆盖层
+   * 会在不知情的情况下换了一条路径。
+   */
+
+  /** 单调时钟（ms）。缺省 `Date.now`。 */
+  readonly now?: () => number;
+  /**
+   * 建常驻截屏源（缺省 `new AugmentStream(...)`）。
+   *
+   * 回放传入一个"从帧库按虚拟时间取帧"的实现，于是门控/边沿/节流/重随
+   * 全部在离线状态下被同一段代码驱动。
+   */
+  readonly createCapture?: (input: AugmentCaptureFactoryInput) => AugmentCaptureSource;
+  /** 采集几何（真实实现 = `augment-geometry.ts` 的 `resolveAugmentCaptureGeometry()`，依赖 Electron）。 */
+  readonly resolveGeometry?: () => Promise<AugmentCaptureGeometry>;
+  /** 2999 客户端（缺省 = `createLiveDataClient({ timeoutMs: 2500 })`）。 */
+  readonly liveData?: () => AugmentLiveData;
+  /** 认"我是谁"（缺省 = LCU 探测 + 2999 名字 → `resolveMyChampionIdentity`）。 */
+  readonly resolveIdentity?: (live: AugmentLiveData | null) => Promise<ChampionIdentity>;
+  /**
+   * **会话录制**开关（`HEXBOX_AUGMENT_RECORD=1`）→ 透传给截屏源：渲染端据此把
+   * 门控帧与原生帧的灰度交给主进程落盘（不开则这条路径一个字节都不走）。
+   */
+  readonly record?: boolean;
+  /**
+   * 录制观察者（`session-recorder.ts` 实现；不给 = 不录）。
+   *
+   * 三个回调都是**录制专属的旁路**：控制器照旧跑它自己的状态机，只是把已经算出来的
+   * 东西顺手交出去（2999 采样、门控边沿、帧像素）。控制器**不碰 fs** ——
+   * 产物怎么落地由调用方决定（与 `onReading` 同一条原则）。
+   */
+  readonly observer?: AugmentChainObserver;
 }
+
+/** 录制观察者（三个回调都可缺省）。 */
+export interface AugmentChainObserver {
+  /** 每一次 2999 采样（api 触发状态机的**输入** + 当时的判定）。 */
+  onApiSample?(sample: {
+    readonly atMs: number;
+    readonly gameTime: number;
+    readonly level: number;
+    readonly isDead: boolean;
+    readonly respawnTimer: number;
+    readonly capture: boolean;
+    readonly pending: readonly number[];
+    readonly reason: string;
+  }): void;
+  /** 面板门控边沿（开/关）——回放驱动 `notePanelOpen/Closed` 靠它。 */
+  onPanelEdge?(edge: { readonly atMs: number; readonly kind: 'open' | 'close' }): void;
+  /** 一帧的灰度像素（渲染端经截屏源递上来；帧库就是它攒出来的）。 */
+  onFramePixels?(payload: AugmentSessionFramePayload): void;
+  /**
+   * 认出了本局英雄（首次成功时调一次）。
+   *
+   * 为什么必须记下来（2026-10-12 审查发现）：录制器构造时**还不知道**英雄（它在看到第一块面板时才认出来），
+   * 而回放靠会话里的身份留档组强度表 —— 不记就会得到"回放永远画不出标签"。
+   */
+  onIdentity?(champion: { readonly id: number; readonly source: string; readonly name: string }): void;
+}
+
+/**
+ * 常驻截屏源（线上实现 = `AugmentStream`；回放实现 = 帧库）。
+ *
+ * ⚠️ 接口刻意只有这五个方法：控制器**不允许**知道流是怎么来的
+ * （隐藏窗口 / getDisplayMedia / 帧库 / 一次性截屏都行）。
+ * `AugmentStream` 结构上天然满足它（无需改那个类）。
+ */
+export interface AugmentCaptureSource {
+  start(display: Electron.Display): Promise<boolean>;
+  setCadence(intervalMs: number): void;
+  recognize(opts?: { readonly only?: readonly number[] }): void;
+  unwatch(): void;
+  stop(): void;
+}
+
+/** 建截屏源要用的东西（与 `AugmentStream` 的 deps 对齐，回放只用得到 `onFrame`/`onRecognized`）。 */
+export interface AugmentCaptureFactoryInput {
+  readonly geometry: AugmentCaptureGeometry;
+  readonly deps: {
+    readonly triggerMode: 'api' | 'pixel';
+    readonly idleMs: number;
+    readonly onFrame: (frame: AugmentFrame) => void;
+    readonly onStatus: (message: string, isError?: boolean) => void;
+    readonly onRecognized: (report: unknown) => void;
+    /** 会话录制开关（截屏源据此决定要不要取像素）。 */
+    readonly record: boolean;
+    /** 会话录制：一帧的灰度像素（record 打开时由渲染端递上来）。 */
+    readonly onRecordFrame: (payload: AugmentSessionFramePayload) => void;
+    readonly loadLibrary: () => readonly {
+      augmentId: number;
+      name: string;
+      width: number;
+      height: number;
+      bits: Uint8Array;
+    }[];
+    readonly log: (line: string) => void;
+  };
+  /** 起始采样间隔（api 模式 = 0 = 一帧不取）。 */
+  readonly startIntervalMs: number;
+}
+
+/**
+ * 触发状态机需要的那几个数（线上 = `@hexbox/lcu` 的 `LiveDataClient`）。
+ *
+ * 用 `Pick` 而不是另写一个更窄的接口：`resolveMyChampionIdentity()` 收的就是
+ * `LiveDataClient`，窄接口在那边**不可赋值**（返回类型少字段），会在类型检查里
+ * 变成一处无谓的适配层 —— 而适配层正是"两份实现"的开端。
+ * 回放侧只要按这个形状回答（字段给空串/0 都行）即可。
+ */
+export type AugmentLiveData = Pick<LiveDataClient, 'getPlayerState' | 'getChampionNames' | 'lastError'>;
 
 /* ------------------------------------------------------------------ */
 /* 工具                                                                */
@@ -538,29 +654,6 @@ export interface AugmentControllerDeps {
 
 function csvField(s: string): string {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
-
-/**
- * 算一次采集几何（游戏窗口 → 截屏归一化搜索区）。
- *
- * 导出给录制工具的**基准模式**用（它自己建一次流对照两种截屏路径，
- * 不该为了拿几何再去 new 一个控制器）。
- */
-export async function resolveAugmentCaptureGeometry(
-  thumbScale: number = THUMB_SCALE,
-): Promise<AugmentCaptureGeometry> {
-  const windowPhysical = await findGameWindowRectCached();
-  // ⚠️ 用**游戏窗口所在**显示器，不是主显示器（多显示器 + 不同 DPI 时全错）
-  const display = windowPhysical
-    ? screen.getDisplayNearestPoint({ x: windowPhysical.x + 10, y: windowPhysical.y + 10 })
-    : screen.getPrimaryDisplay();
-  const targetWidth = Math.round(display.size.width * 2 * thumbScale);
-  const region = panelRowRectInCapture(
-    { width: targetWidth, height: Math.round(display.size.height * 2 * thumbScale) },
-    windowPhysical,
-    display,
-  );
-  return { display, windowPhysical, region, altRegion: PANEL_ROW_REGION, targetWidth };
 }
 
 /**
@@ -637,13 +730,13 @@ export class AugmentController {
   private streamToken = 0;
 
   /** 常驻流（由本文件创建/销毁；`null` = 没在跑）。 */
-  private stream: AugmentStream | null = null;
+  private stream: AugmentCaptureSource | null = null;
   /** 渲染端是否报告"门控已就绪/已启动"（api 模式不取帧，不能用"有没有帧"判断）。 */
   private sawReady = false;
   private sawFrame = false;
 
   /** 一次性 api 客户端（本局英雄身份的权威来源之一）。 */
-  private live: LiveDataClient | null = null;
+  private live: AugmentLiveData | null = null;
   /** 触发状态机（api 模式；每次 `start()` 重建 = 一块新的"未选集合"）。 */
   private apiTrigger: ReturnType<typeof createAugmentTrigger> | null = null;
   /** 门控去抖状态机（纯函数，见 `vision/augment-panel.ts`）。 */
@@ -666,7 +759,8 @@ export class AugmentController {
     tailMs: TAIL_MS,
   });
 
-  private startedAt = Date.now();
+  /** 会话起点（虚拟时钟下由回放决定）。 */
+  private startedAt: number;
   /** 本会话是否在跑（`stop()` 之后为 false；API 轮询与帧处理都看它）。 */
   private isRunning = false;
   /** api 模式的采样日志（复盘"为什么开/没开"靠它）。 */
@@ -712,6 +806,9 @@ export class AugmentController {
   private winPresence = 0;
   private winOpenEdges = 0;
   private winCloseEdges = 0;
+
+  /** 名字指纹库条数（产物里的 `data.nameLibraryEntries`）。 */
+  private libraryEntries = 0;
 
   /* ── 强度表与英雄身份 ── */
   private dataset: Dataset | null = null;
@@ -784,15 +881,33 @@ export class AugmentController {
   private recognizedRows: AugmentRecognizedRow[] = [];
   private labelRows: AugmentLabelRow[] = [];
 
+  /* ── 注入缝（构造时定死；见 `AugmentControllerDeps`）── */
+  /** 单调时钟（回放用虚拟时钟）。 */
+  private readonly now: () => number;
+
+  /** 建常驻截屏源；缺省 = 明确报错（真实运行必须由 Electron 侧入口注入）。 */
+  private makeCapture(input: AugmentCaptureFactoryInput): AugmentCaptureSource {
+    const factory = this.deps.createCapture;
+    if (!factory) {
+      throw new Error(
+        '未注入 createCapture：常驻流需要截屏源工厂（Electron 侧见 augment-capture-stream.ts）',
+      );
+    }
+    return factory(input);
+  }
+
   constructor(deps: AugmentControllerDeps) {
     this.deps = deps;
+    // 注入缝（缺省 = 真实实现；回放传虚拟实现，见 `AugmentControllerDeps` 的注释）
+    this.now = deps.now ?? ((): number => Date.now());
+    this.startedAt = this.now();
     this.logLine = deps.log ?? ((line: string): void => console.log(line));
     this.warnLine = deps.warn ?? ((line: string): void => console.warn(line));
     // 诊断（无行为变化）：每条 [augment]/[hexbox] 日志带上"链路建立以来的秒数"。
     // 真机复盘的硬伤：这份日志没有时间戳，"开截屏 → 关截屏"之间是一个采样周期
     // 还是 45 秒（armWindowMs）根本分不出来（2026-10-11 差点因此定错根因）。
     const rawLog = this.logLine;
-    this.logLine = (line: string): void => rawLog(withLogOffset(line, Date.now() - this.startedAt));
+    this.logLine = (line: string): void => rawLog(withLogOffset(line, this.now() - this.startedAt));
     const envTrigger = process.env['HEXBOX_AUGMENT_TRIGGER'] === 'api' ? 'api' : 'pixel';
     this.triggerMode = deps.trigger ?? envTrigger;
   }
@@ -828,6 +943,16 @@ export class AugmentController {
   }
 
   /**
+   * 产物里要记的数据版本（回放时"为什么认不出/查不到强度"靠它）。
+   *
+   * `nameLibraryEntries` 在第一次下发指纹库时就有值；`tierDataDate` 要等
+   * `loadTierData()` 读完 `data/builds.json`。
+   */
+  get dataInfo(): { readonly nameLibraryEntries: number; readonly tierDataDate: string } {
+    return { nameLibraryEntries: this.libraryEntries, tierDataDate: this.builds?.meta.dataDate ?? '' };
+  }
+
+  /**
    * 起链路（同一个令牌重复调用是幂等的）。
    *
    * 顺序与真机验证过的那条完全一致：读数据 → 认英雄 → 算几何 → 建流 → 等就绪
@@ -859,7 +984,7 @@ export class AugmentController {
     }
     this.sessionToken = mine;
     this.state = 'starting';
-    this.startedAt = Date.now();
+    this.startedAt = this.now();
     this.resetSession();
     this.isRunning = true;
 
@@ -869,7 +994,15 @@ export class AugmentController {
       await this.refreshTierTable(null);
       if (!this.isCurrentSession(mine)) return this.abortStart(mine, '启动途中已作废（阶段变化/新会话）');
 
-      this.geo = await resolveAugmentCaptureGeometry();
+      // ⚠️ 几何**必须注入**（真实实现 `resolveAugmentCaptureGeometry` 依赖 Electron `screen`，
+//    一旦被本文件静态引用，纯 Node 回放就 `import` 不了这个控制器 —— 那会逼出第二份状态机）。
+      const resolveGeometry = this.deps.resolveGeometry;
+      if (!resolveGeometry) {
+        throw new Error(
+          '未注入 resolveGeometry：采集几何依赖 Electron screen，回放入口请传会话里存档的几何',
+        );
+      }
+      this.geo = await resolveGeometry();
       if (!this.isCurrentSession(mine)) return this.abortStart(mine, '启动途中已作废（阶段变化/新会话）');
       const geo = this.geo;
       this.logLine(
@@ -940,13 +1073,13 @@ export class AugmentController {
    *
    * `AugmentStream.stop()` 幂等，所以同一对象进两次也无害。
    */
-  private dropStream(mine: number, local: AugmentStream | null = null): void {
+  private dropStream(mine: number, local: AugmentCaptureSource | null = null): void {
     const registered = this.streamToken === mine ? this.stream : null;
     if (this.streamToken === mine) {
       this.stream = null;
       this.streamToken = 0;
     }
-    const targets = new Set<AugmentStream>();
+    const targets = new Set<AugmentCaptureSource>();
     if (registered) targets.add(registered);
     if (local) targets.add(local);
     for (const s of targets) s.stop();
@@ -1155,6 +1288,7 @@ export class AugmentController {
     this.lastConfirmedCloseAtMs = null;
     this.sawReady = false;
     this.sawFrame = false;
+    this.libraryEntries = 0;
     this.tracker = createPanelTracker();
     this.closeConfirm = createCloseConfirm();
     this.cadence = createCadencePolicy({
@@ -1176,33 +1310,39 @@ export class AugmentController {
   private async startStream(geo: AugmentCaptureGeometry, mine: number): Promise<boolean> {
     // 收工/被作废后再建流 = 留下一条没人管的截屏流（启动是异步的，见 start() 的说明）
     if (!this.isCurrentSession(mine)) return false;
-    const stream = new AugmentStream({
-      // 起始间隔：
-      //   · pixel 模式用**常态低频**（节流策略会按命中情况升到高频）；
-      //   · api 模式**一帧不取**（0 = 停），等状态机触发后再起表。
-      // altRegion = 全屏恒等：窗口探针认错窗口时主区会切掉外侧卡边框，
-      // 渲染端会用这个再搜一次（2~4ms），避免"探针错 = 整局瞎"。
-      config: {
-        region: geo.region,
-        altRegion: geo.altRegion,
-        // 门控画布按**流原生宽度的 1/3、且不小于 960px** 取 —— 与 DPI/分辨率无关。
-        // 旧算法（逻辑宽×2×0.25）隐含假设缩放倍率 1.5，在 4K@250% 上会掉到 1/5，
-        // 低于标定的 1/4 下限（见 gateCanvasWidth 注释）。
-        targetScale: 1 / 3,
-        minWidth: 960,
+    // 起始间隔：
+    //   · pixel 模式用**常态低频**（节流策略会按命中情况升到高频）；
+    //   · api 模式**一帧不取**（0 = 停），等状态机触发后再起表。
+    const startIntervalMs = this.triggerMode === 'api' ? 0 : IDLE_MS;
+    // ⚠️ 流的**唯一出口**是注入的工厂（真实实现 = `augment-capture-stream.ts`）：
+    //    离线回放传帧库实现，于是门控/边沿/节流/重随全部由**同一段代码**驱动。
+    const stream = this.makeCapture({
+      geometry: geo,
+      startIntervalMs,
+      deps: {
+        triggerMode: this.triggerMode,
+        record: this.deps.record === true,
+        idleMs: IDLE_MS,
+        onFrame: (f) => this.onStreamFrame(f),
+        onStatus: (m, e) => {
+          this.logLine(`[augment] ${e ? '⚠' : '·'} ${m}`);
+          // api 模式下"一帧不取"是正常的，所以不能用"有没有帧"判断流是否就绪，
+          // 改用渲染端的这两条日志（见 capture/worker.ts 的 start()）。
+          if (m.includes('门控已就绪') || m.includes('门控已启动')) this.sawReady = true;
+        },
+        onRecognized: (r) => this.onRecognized(r),
         // 名字指纹库随配置下发（渲染端做识别，读文件在主进程）
-        library: loadAugmentLibrary(this.deps.dataDir),
-        intervalMs: this.triggerMode === 'api' ? 0 : IDLE_MS,
-        targetWidth: geo.targetWidth,
+        // 正好把条数记下来（产物里的 `data.nameLibraryEntries`：回放时
+        // "为什么这次认不出"最便宜的一条线索就是它）
+        loadLibrary: () => {
+          const lib = loadAugmentLibrary(this.deps.dataDir);
+          this.libraryEntries = lib.length;
+          return lib;
+        },
+        // 录制：像素只在渲染端拿得到，这里只把它转交给观察者（控制器不碰 fs）
+        onRecordFrame: (payload) => this.deps.observer?.onFramePixels?.(payload),
+        log: (line) => this.logLine(line),
       },
-      onFrame: (f) => this.onStreamFrame(f),
-      onStatus: (m, e) => {
-        this.logLine(`[augment] ${e ? '⚠' : '·'} ${m}`);
-        // api 模式下"一帧不取"是正常的，所以不能用"有没有帧"判断流是否就绪，
-        // 改用渲染端的这两条日志（见 capture/worker.ts 的 start()）。
-        if (m.includes('门控已就绪') || m.includes('门控已启动')) this.sawReady = true;
-      },
-      onRecognized: (r) => this.onRecognized(r),
     });
     this.stream = stream;
     this.streamToken = mine;
@@ -1229,10 +1369,10 @@ export class AugmentController {
       return false;
     }
 
-    const t0 = Date.now();
+    const t0 = this.now();
     // api 模式不取帧，所以等的是渲染端"门控已就绪"的日志；其他模式等首帧。
     while (this.triggerMode === 'api' ? !this.sawReady : !this.sawFrame) {
-      if (Date.now() - t0 > 8000) break;
+      if (this.now() - t0 > 8000) break;
       if (!this.isCurrentSession(mine)) {
         this.dropStream(mine, stream);
         return false;
@@ -1305,8 +1445,8 @@ export class AugmentController {
   }
 
   /** 2999 客户端单例（pixel 模式也要用：它是英雄身份的**权威来源**）。 */
-  private liveClient(): LiveDataClient {
-    this.live ??= createLiveDataClient({ timeoutMs: 2500 });
+  private liveClient(): AugmentLiveData {
+    this.live ??= this.deps.liveData?.() ?? createLiveDataClient({ timeoutMs: 2500 });
     return this.live;
   }
 
@@ -1318,13 +1458,18 @@ export class AugmentController {
    *
    * ⚠️ 认不出就**返回 false**：调用方据此一张标签都不画（宁漏勿错）。
    */
-  private async refreshTierTable(live: LiveDataClient | null): Promise<boolean> {
+  private async refreshTierTable(live: AugmentLiveData | null): Promise<boolean> {
     if (this.championId > 0) return this.tierTable.size > 0;
-    const identity = await resolveMyChampionIdentity(await this.lcuReader(), {
-      champions: this.dataset?.champions ?? [],
-      // ⚠️ pixel 模式下 live 为 null，但**不能**因此不查 2999：它是英雄身份的权威来源
-      live: live ?? this.liveClient(),
-    });
+    // ⚠️ 认英雄是**注入**的（缺省 = LCU + 2999 的 `resolveMyChampionIdentity`）：
+    //    回放没有 LCU/2999，但会话里存了那一局的身份留档 —— 否则回放会"认不出英雄
+    //    → 一张标签都不画"，测出来的就不是"标签对不对"而是"环境有没有"。
+    const identity = this.deps.resolveIdentity
+      ? await this.deps.resolveIdentity(live ?? this.liveClient())
+      : await resolveMyChampionIdentity(await this.lcuReader(), {
+          champions: this.dataset?.champions ?? [],
+          // ⚠️ pixel 模式下 live 为 null，但**不能**因此不查 2999：它是英雄身份的权威来源
+          live: live ?? this.liveClient(),
+        });
     this.championIdentity = identity;
     if (identity.championId <= 0) {
       // 明确说清"为什么这次没有标签"——真机排查只看这一行
@@ -1348,6 +1493,8 @@ export class AugmentController {
       `[augment] 本局英雄 ${hero}（#${this.championId}，来源 ${identity.source}：${identity.reason}）` +
         ` → 强度表 ${this.tierTable.size} 条（标签的档位来源）`,
     );
+    // 会话录制：把身份留档补写进 `session.json`（回放靠它组强度表）
+    this.deps.observer?.onIdentity?.({ id: this.championId, source: identity.source, name: hero });
     return this.tierTable.size > 0;
   }
 
@@ -1387,7 +1534,7 @@ export class AugmentController {
     if (!this.isRunning) return;
     // ⚠️ 丢弃过期帧：取证/阻塞会让帧排队，那些帧"画面早已过去"，
     // 用它们做边沿会造出假边沿（真机实测过一次 close/open 凭空出现）。
-    const age = Date.now() - f.atMs;
+    const age = this.now() - f.atMs;
     if (age > STALE_FRAME_MS) {
       this.droppedStaleFrames++;
       return;
@@ -1515,6 +1662,7 @@ export class AugmentController {
     }
 
     if (reading.edge === 'open') {
+      this.deps.observer?.onPanelEdge?.({ atMs: nowMs, kind: 'open' });
       this.openCount++;
       this.winOpenEdges++;
       this.logLine(
@@ -1544,6 +1692,7 @@ export class AugmentController {
       this.openNamedCards = 0;
       this.stream?.recognize();
     } else if (reading.edge === 'close') {
+      this.deps.observer?.onPanelEdge?.({ atMs: nowMs, kind: 'close' });
       this.closeCount++;
       this.winCloseEdges++;
       // 关闭边沿之后不再对这块面板做任何识别（`onRecognized` 里还有一道 isRunning 门）。
@@ -1761,10 +1910,10 @@ export class AugmentController {
             '基线保持在新内容上（否则同一次刷新会被再检出一次）',
         );
       }
-      this.watchingSinceMs = Date.now();
+      this.watchingSinceMs = this.now();
     }
     this.recognizedRows.push({
-      atMs: Date.now() - this.startedAt,
+      atMs: this.now() - this.startedAt,
       ok: rep.ok,
       reason: rep.reason,
       cards,
@@ -1803,7 +1952,7 @@ export class AugmentController {
     });
     const labels = row.labels;
     if (!wasLocked && row.rowLock) {
-      this.rowLockAtMs = Date.now() - this.startedAt;
+      this.rowLockAtMs = this.now() - this.startedAt;
       this.logLine(
         `[augment] 📐 整排行基准锁定（${row.rowLock.cards.length} 张卡）：` +
           `框顶 y=${row.rowLock.band.y.toFixed(6)} 框高 h=${row.rowLock.band.h.toFixed(6)}` +
@@ -1902,7 +2051,7 @@ export class AugmentController {
     }
 
     this.labelRows.push({
-      atMs: Date.now() - this.startedAt,
+      atMs: this.now() - this.startedAt,
       championId: this.championId,
       ok: rep.ok,
       reason: rep.reason,
@@ -2104,7 +2253,7 @@ export class AugmentController {
         }
       } else {
         this.apiMisses = 0;
-        const now = Date.now();
+        const now = this.now();
         const d = trigger.onSample(
           {
             gameTime: state.gameTime,
@@ -2149,6 +2298,19 @@ export class AugmentController {
             .map((f) => csvField(f))
             .join(','),
         );
+        // 会话录制：把这一次采样原样交给观察者（`api.jsonl` = 触发状态机的输入 + 判定）
+        // ⚠️ 这里给的是**绝对时钟**（与帧载荷同一时基）；产物内部再按会话起点归一化 ——
+        //    两处各归一化一次就会出现“边沿与帧差了几秒”这种查不出来的错位。
+        this.deps.observer?.onApiSample?.({
+          atMs: now,
+          gameTime: state.gameTime,
+          level: state.level,
+          isDead: state.isDead,
+          respawnTimer: state.respawnTimer,
+          capture: d.capture,
+          pending: d.pending,
+          reason: d.reason,
+        });
       }
       if (this.isRunning) setTimeout(() => void poll(), API_POLL_MS);
     };
@@ -2160,7 +2322,7 @@ export class AugmentController {
     if (!d.capture) this.closeCaptureWindow(d.reason);
     this.logLine(`[augment] 🔌 ${d.capture ? '开截屏' : '关截屏'}：${d.reason}`);
     this.applyInterval(d.capture ? ACTIVE_MS : 0, d.reason);
-    if (d.capture) this.openCaptureWindow(Date.now());
+    if (d.capture) this.openCaptureWindow(this.now());
   }
 
   /* ------------------------------------------------------------------ */
@@ -2189,7 +2351,7 @@ export class AugmentController {
     this.logLine(
       formatCaptureWindowLine(
         {
-          ms: Date.now() - this.winOpenedAtMs,
+          ms: this.now() - this.winOpenedAtMs,
           samples: this.winSamples,
           hits: this.winHits,
           presenceFrames: this.winPresence,

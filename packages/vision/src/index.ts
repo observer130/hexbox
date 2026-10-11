@@ -17,6 +17,8 @@ export * from './augment-ocr.ts';
 export * from './augment-trigger.ts';
 // 开边沿整批识别的两个纯决策（原生重检失败 → 门控矩形兜底；失败后**有界**重试）
 export * from './augment-open-recognize.ts';
+// 全分辨率识别的**纯函数核心**（渲染端 worker 与离线回放共用同一份）
+export * from './augment-recognize.ts';
 // 常驻路径的轻量诊断（日志时间偏移 + 采样窗口汇总与裁决；无行为变化）
 export * from './augment-log-diag.ts';
 // 选人阶段的子阶段解析（pickState）与"这一轮谁出标签"的判定（纯函数）
@@ -34,6 +36,12 @@ export * from './augment-reroll-retry.ts';
 export * from './augment-clear.ts';
 // 局内链路 ⇄ 标签的**时间轴回放**（纯函数；回归测试与诊断脚本共用，不参与运行时）
 export * from './augment-timeline.ts';
+// 录制会话（session）：数据模型 + 纯解析 + 裁剪帧坐标映射
+export * from './augment-session.ts';
+// 会话回放引擎：把会话喂给**线上同一份**纯函数（门控/节流/API 触发），收指标与差异
+export * from './augment-session-replay.ts';
+// 离线回放用的**虚拟时钟/虚拟定时器**（闭环回放要它：时间只在显式推进时走）
+export * from './virtual-clock.ts';
 export * from './label-draw.ts';
 // 离线预览用的软件光栅化与字形（不需要 Electron；渲染端不用它们）
 export * from './label-raster.ts';

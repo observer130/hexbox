@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { deflateSync } from 'node:zlib';
 
-import { decodePng, encodePng } from './png.ts';
+import { bitmapToGray, decodePng, encodeGrayPng, encodePng, grayToBitmap } from './png.ts';
 
 /* ------------------------------------------------------------------ */
 /* 手工 PNG 编码（测试专用，未做任何优化）                              */
@@ -351,4 +351,62 @@ test('encodePng：单像素与全尺寸边界', () => {
   expectRgba(back, 0, 1, 2, 3, 255);
 
   assert.throws(() => encodePng({ width: 0, height: 0, data: new Uint8ClampedArray(0) }), /尺寸非法/);
+});
+
+/* ------------------------------------------------------------------ */
+/* 帧库用的灰度编码（会话录制/回放基建）                                 */
+/* ------------------------------------------------------------------ */
+
+test('encodeGrayPng → decodePng：灰度往返无损（两种滤波）', () => {
+  const w = 9;
+  const h = 6;
+  const gray = new Uint8Array(w * h);
+  for (let i = 0; i < gray.length; i++) gray[i] = (i * 37 + (i % 5) * 11) % 256;
+
+  for (const filter of [0, 2] as const) {
+    const back = decodePng(encodeGrayPng({ width: w, height: h, gray }, filter));
+    assert.equal(back.width, w);
+    assert.equal(back.height, h);
+    for (let i = 0; i < gray.length; i++) {
+      assert.equal(back.data[i * 4], gray[i], `filter=${filter} #${i} R`);
+      assert.equal(back.data[i * 4 + 1], gray[i], `filter=${filter} #${i} G`);
+      assert.equal(back.data[i * 4 + 2], gray[i], `filter=${filter} #${i} B`);
+      assert.equal(back.data[i * 4 + 3], 255, `filter=${filter} #${i} A`);
+    }
+  }
+});
+
+test('encodeGrayPng：尺寸与数据长度非法时报错', () => {
+  assert.throws(() => encodeGrayPng({ width: 0, height: 3, gray: new Uint8Array(0) }), /尺寸非法/);
+  assert.throws(
+    () => encodeGrayPng({ width: 4, height: 4, gray: new Uint8Array(4 * 4 - 1) }),
+    /灰度数据不足/,
+  );
+});
+
+test('bitmapToGray / grayToBitmap：往返后**判据用的灰度逐位相同**', () => {
+  // 这是"录灰度帧不改变识别结果"的前提：帧存的是整数灰度，回放时把它填回 RGB，
+  // 再按 `extractGray*` 的公式取一次灰度 —— 必须得到同一个整数。
+  // 若 `bitmapToGray` 的系数与 match.ts 漂移，这条会立刻红。
+  const w = 16;
+  const h = 4;
+  const data = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < w * h; i++) {
+    data[i * 4] = (i * 17) % 256;
+    data[i * 4 + 1] = (i * 91) % 256;
+    data[i * 4 + 2] = (i * 43) % 256;
+    data[i * 4 + 3] = 255;
+  }
+  const gray = bitmapToGray({ width: w, height: h, data });
+  const bmp = grayToBitmap({ width: w, height: h, gray });
+  const again = bitmapToGray(bmp);
+
+  assert.deepEqual([...again], [...gray]);
+  // 与 match.ts 的 extractGrayRaw 同一口径（该函数收敛在 `Math.round`）。
+  for (let i = 0; i < w * h; i++) {
+    const expected = Math.round(
+      0.299 * data[i * 4]! + 0.587 * data[i * 4 + 1]! + 0.114 * data[i * 4 + 2]!,
+    );
+    assert.equal(gray[i], expected, `#${i}`);
+  }
 });

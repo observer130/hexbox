@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import type {
   AugmentCardFingerprint,
   AugmentNameFingerprint,
+  AugmentSessionFramePayload,
   PanelCard,
   PanelPresence,
   Rect,
@@ -119,6 +120,11 @@ export interface AugmentStreamConfig {
   readonly intervalMs: number;
   /** 门控画布目标宽度（像素）。 */
   readonly targetWidth: number;
+  /**
+   * **会话录制**开关（`HEXBOX_AUGMENT_RECORD=1`）：渲染端把门控帧与原生帧的**灰度**
+   * 交给主进程落盘（帧库）。默认关 —— 关的时候这条路径一个字节都不走。
+   */
+  readonly record?: boolean;
 }
 
 export interface AugmentStreamDeps {
@@ -127,6 +133,12 @@ export interface AugmentStreamDeps {
   readonly onStatus: (message: string, isError?: boolean) => void;
   /** 全分辨率识别结果（渲染端做完识别后回传；不传则忽略）。 */
   readonly onRecognized?: (r: unknown) => void;
+  /** 会话录制：一帧的灰度像素（只在配置里开了 `record` 时才会收到）。
+   *
+   * 类型用会话格式里的那一份而不是 `unknown`：这条缝要过 preload → 主进程 → 录制器，
+   * 各自写一份匿名类型就等于“改字段名不会红”（审查发现）。
+   */
+  readonly onRecordFrame?: (payload: AugmentSessionFramePayload) => void;
 }
 
 const PRELOAD_PATH = resolvePreloadPath();
@@ -143,6 +155,7 @@ export class AugmentStream {
   private readonly onFrameMsg: (e: Electron.IpcMainEvent, frame: AugmentFrame) => void;
   private readonly onStatusMsg: (e: Electron.IpcMainEvent, s: { message: string; error?: boolean }) => void;
   private readonly onRecognizedMsg: (e: Electron.IpcMainEvent, r: unknown) => void;
+  private readonly onRecordMsg: (e: Electron.IpcMainEvent, payload: AugmentSessionFramePayload) => void;
 
   constructor(deps: AugmentStreamDeps) {
     this.deps = deps;
@@ -153,6 +166,7 @@ export class AugmentStream {
     };
     this.onStatusMsg = (_e, s) => this.deps.onStatus(s.message, s.error === true);
     this.onRecognizedMsg = (_e, r) => this.deps.onRecognized?.(r);
+    this.onRecordMsg = (_e, payload) => this.deps.onRecordFrame?.(payload);
   }
 
   /** 建立隐藏窗口 + 屏幕流。返回是否成功发出启动指令。 */
@@ -161,6 +175,7 @@ export class AugmentStream {
     ipcMain.on('augment:worker-frame', this.onFrameMsg);
     ipcMain.on('augment:worker-status', this.onStatusMsg);
     ipcMain.on('augment:worker-recognized', this.onRecognizedMsg);
+    ipcMain.on('augment:worker-record', this.onRecordMsg);
 
     // 屏幕源交给渲染端：只枚举显示器（1 个源），不枚举窗口（真机 14 个，
     // 每次多花约 200ms —— 见 bench.json）
@@ -268,6 +283,7 @@ export class AugmentStream {
     ipcMain.removeListener('augment:worker-frame', this.onFrameMsg);
     ipcMain.removeListener('augment:worker-status', this.onStatusMsg);
     ipcMain.removeListener('augment:worker-recognized', this.onRecognizedMsg);
+    ipcMain.removeListener('augment:worker-record', this.onRecordMsg);
   }
 
   /**
