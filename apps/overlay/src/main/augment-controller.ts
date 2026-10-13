@@ -103,6 +103,8 @@ import {
   type Rect,
   type RerollCardState,
   type ScreenAugmentTierLabel,
+  // 悬停提示框文案（纯函数；海克斯那条的口径说明在 vision 里单测锁死）
+  augmentTierLabelTip,
 } from '@hexbox/vision';
 import { findDetail, type ChampionDetailSet, type Dataset } from '@hexbox/core';
 import { readBuilds, readDataset } from '@hexbox/data-store';
@@ -2031,6 +2033,14 @@ export class AugmentController {
             textScale: s.fontScale,
             // 绘制样式：大号描边字母 + 尖括号 + 选取率行（没有色块底）
             style: s.style,
+            // 悬停提示框：文案在纯函数里（`vision/label-tip.ts`，含"不是本局选项"
+            // 的口径说明）；取值率与标签同源同格式
+            ...augmentTierLabelTip({
+              tier: s.tier,
+              pickRate: s.pickRate,
+              championName: this.championIdentity.championName,
+              dataDate: this.builds?.meta.dataDate ?? null,
+            }),
           })),
           diag: `海克斯强度 ${screenLabels.length} 个：${perCard.join(' ')}`,
         },

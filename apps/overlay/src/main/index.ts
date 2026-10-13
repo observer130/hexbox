@@ -477,6 +477,7 @@ console.log(
 
 import {
   LcuClient,
+  LcuEventStream,
   LcuHttpError,
   createLiveDataClient,
   detectCredentialsDetailed,
@@ -484,6 +485,8 @@ import {
   isBrawlSession,
   readSelfIdentity,
   resolveMyChampionIdentity,
+  resolveMyChampionIdentityWithRetry,
+  type LcuCredentials,
   type LiveDataClient,
   type SelfIdentity,
 } from '@hexbox/lcu';
@@ -501,6 +504,8 @@ import {
   augmentChainTransition,
   augmentStartIsStale,
   createStageGate,
+  reconnectStep,
+  decideReconnectChainAction,
   labelProducerFor,
   overlayAugmentEnabled,
   stageSampleFromSession,
@@ -583,6 +588,25 @@ let win: BrowserWindow | null = null;
 /** S2 全屏透明覆盖窗口（选人阶段显示卡片胜率标签）。 */
 let overlayWin: BrowserWindow | null = null;
 let client: LcuClient | null = null;
+/**
+ * LCU **事件订阅**（相位变化的加速器；思路来自对同类工具的工程做法调研）。
+ *
+ * ⚠️ 它**不参与相位判定**：收到事件只做一件事 —— 让主循环立刻跑一次 `pollOnce()`
+ * （那一轮照样读会话、照样过 `stageGate`）。所以：
+ *   · 阶段门/去抖/"离开要连续 N 次"这些规则一行都没改；
+ *   · 事件通道挂了或 LCU 不推事件时，`POLL_MS` 轮询照旧兜底（不是二选一）。
+ *
+ * 生命周期与 `client` 绑定：**LCU 端口/令牌每次启动都会变**，所以凭证一换就必须
+ * 重建连接（旧端口上的订阅已经没有任何意义）。
+ */
+let phaseEvents: LcuEventStream | null = null;
+/** 当前事件订阅所用的 `端口:令牌`（变了才重建；见 `syncPhaseEventStream`）。 */
+let phaseEventCredsKey = '';
+/**
+ * 唤醒钩子：`pollLoop` 在等待期间把它设上；事件到达时调用它立即返回。
+ * `null` = 当前没有在等待（例如正在跑 `pollOnce`），此时事件只会被记日志。
+ */
+let wakeLoop: (() => void) | null = null;
 let dataset: Dataset | null = null;
 let rankings: RankingSnapshot | null = null;
 let builds: ChampionDetailSet | null = null;
@@ -599,6 +623,14 @@ let warnedNoCreds = false;
 let credsDetail = '';
 /** 本次选人中「我」选的英雄（0 = 未知）。 */
 let myChampionId = 0;
+/**
+ * 重连恢复的"记账"位：进入 `Reconnect` 相位时置真，回到 `InProgress` 时消费掉。
+ *
+ * 判定全在纯函数 `reconnectStep()`（`@hexbox/vision`，有单测）——这里只存它的状态。
+ * 为什么必须有这个位：没有它就无法区分"正常进局"与"重连后回到对局"，
+ * 于是要么每次进局都做一遍恢复（多余的重试与重置），要么永远不做。
+ */
+let reconnectArmed = false;
 /**
  * 我自己的身份（puuid / summonerId / 显示名）—— 用于在 gameflow 里定位"我"。
  *
@@ -1101,6 +1133,8 @@ async function pollOnce(): Promise<void> {
     probeClientRunning = res?.clientRunning ?? false;
     if (res?.credentials) {
       client = new LcuClient(res.credentials);
+      // 事件订阅与凭证同寿命：端口/令牌一换就必须重建（旧端口上的订阅已无意义）
+      syncPhaseEventStream(res.credentials);
       console.log(`[hexbox] LCU 已连接 (port ${res.credentials.port}, ${res.detail})`);
       credsDetail = '';
     } else if (!warnedNoCreds) {
@@ -1168,6 +1202,8 @@ async function pollOnce(): Promise<void> {
         if (err.isAuthFailure) {
           console.warn('[hexbox] LCU 鉴权失败，凭证可能已失效，将重新探测');
           client = null;
+          // 凭证失效 → 订阅立刻停掉（旧令牌连不上，留着只会每 30 秒重连一次刷日志）
+          syncPhaseEventStream(null);
           warnedNoCreds = false; // 允许重新提示
           credsDetail = '';
           stageSample = null; // 读失败：这一轮不知道阶段（不是"不在对局"）
@@ -1329,6 +1365,79 @@ async function pollOnce(): Promise<void> {
     }
   }
 
+  // ── 重连恢复（纯判定见 `vision/reconnect-recovery.ts`）─────────────────────
+  //
+  // 借来的规则（同类工具的重连恢复服务）：
+  //   · `Reconnect` 本身**只记账**，动作只在回到 `InProgress` 时做 —— 选人/终局相位
+  //     直接清位，避免"选人 → 进局"这种**正常**转移被当成重连恢复；
+  //   · 恢复时**先重置本局熔断**（`failed` = 本局放弃过；进程中断后那个判断不再可信）；
+  //   · 英雄身份**优先本局缓存**，缺了才去 2999 兜底（3 次 × 2 秒）。
+  //
+  // 放在这里的原因：这一轮的身份解析已经跑过（`myChampionId` 是最新的），
+  // 而 `applyAugmentChain(phase)` 还没跑 —— 熔断重置必须赶在它之前，
+  // 否则这一轮仍会按 `failed` 拒绝启动，白等一个轮询周期。
+  const recon = reconnectStep({
+    armed: reconnectArmed,
+    phase,
+    chainState: augmentState,
+    championKnown: myChampionId > 0,
+  });
+  reconnectArmed = recon.armed;
+  if (recon.stage === 'gap' || recon.recover) {
+    console.log(`[hexbox] 🔁 重连：${recon.reason}`);
+  }
+  if (recon.recover) {
+    // 先决定"对链路做什么"（纯函数）：重置熔断 / 停掉僵尸会话 —— 二选一，绝不都做
+    const chainAction = decideReconnectChainAction({
+      chainState: augmentState,
+      captureState: augment?.snapshot().captureState ?? 'idle',
+    });
+    if (chainAction.resetFuse || chainAction.restartSession) {
+      console.log(`[hexbox] 🔁 重连恢复：${chainAction.reason}`);
+    }
+    if (chainAction.resetFuse) {
+      augmentState = 'idle';
+    }
+    if (chainAction.restartSession) {
+      // ⚠️ 只重置 `augmentState` 不够：控制器里那一代还"在跑"（只是永远没有帧），
+      //    必须**真的停掉它**（收干净它的屏幕流），下一轮 `applyAugmentChain`
+      //    才会用**新令牌**重建。`clearLabels: false` = 停链路不清标签
+      //    （清空由画布换手负责，见 `augmentStopClearsLabels()`）。
+      augment?.stop('重连恢复：抓帧不可用', { token: augmentSession, clearLabels: false });
+      augmentState = 'idle';
+    }
+    if (!recon.heroFromCache) {
+      const retry = await resolveMyChampionIdentityWithRetry(
+        client,
+        // 工厂：**每次尝试都重新取**，这样 beforeAttempt 里重建的 2999 才真的生效
+        () => ({
+          champions: dataset?.champions ?? [],
+          live: liveClient(),
+          // 重连时不喂旧会话：选人会话已失效，旧 gameflow 会话可能是上一局的
+          gameflow: null,
+          me: selfIdentity ?? {},
+        }),
+        {
+          attempts: 3,
+          intervalMs: 2000,
+          beforeAttempt: () => {
+            // 重建 2999 客户端：重连后它可能刚起来 / 连接态还在恢复，
+            // 拿着上一代的客户端重试没有意义（也丢掉它的 lastError）
+            liveData = null;
+          },
+        },
+      );
+      for (const note of retry.notes) console.log(`[hexbox] 🔁 重连英雄重试：${note}`);
+      if (retry.identity.championId > 0) {
+        myChampionId = retry.identity.championId;
+        console.log(
+          `[hexbox] 🔁 重连恢复成功：本局英雄 #${retry.identity.championId}` +
+            ` ${retry.identity.championName || '(图鉴无此 ID)'}（来源 ${retry.identity.source}）`,
+        );
+      }
+    }
+  }
+
   // 可见性随「阶段 + 连接状态」自动切换（不抢焦点）
   //
   // ⚠️ 必须比较**两份判定结果**而不是只比较 phase：
@@ -1419,6 +1528,51 @@ async function pollOnce(): Promise<void> {
   }
 }
 
+/**
+ * 按当前凭证同步 LCU 事件订阅。
+ *
+ * ⚠️ **LCU 端口与令牌每次启动客户端都会变**，所以判据是 `端口:令牌` 这个键：
+ * 键没变就不动（避免每 2 秒轮询都去重连一次）；键变了就**先停旧的再起新的**
+ * （旧端口上的订阅已经没有任何意义，留着只会不断重连、刷日志）。
+ *
+ * `creds = null`（凭证失效/客户端退出）→ 停掉订阅，回到纯轮询。
+ */
+function syncPhaseEventStream(creds: LcuCredentials | null): void {
+  const key = creds ? `${creds.port}:${creds.password}` : '';
+  if (key === phaseEventCredsKey) return;
+  phaseEventCredsKey = key;
+
+  phaseEvents?.stop();
+  phaseEvents = null;
+  if (!creds) return;
+
+  const stream = new LcuEventStream({
+    creds,
+    // 收到事件只做一件事：让主循环立刻复查一轮（判定依旧只有 stageGate 一条通路）
+    onPhase: (phase, detail) => {
+      const n = stream.events;
+      if (n === 1 || n % 20 === 0) {
+        // 第一条必须打（"订阅到底通没通"看它）；之后按条数抽样，避免刷日志
+        console.log(`[hexbox] ⚡ LCU 事件订阅生效：相位=${phase}（${detail}）第 ${n} 条`);
+      }
+      wakeLoop?.();
+    },
+    onStatus: (status, detail) => {
+      // 只报有诊断价值的状态：连上 / 停掉 / 出错。connecting 与每次退避不单独打，
+      // 由 disconnected 那行里的"N ms 后重连（第 K 次退避）"承担。
+      if (status === 'connected') {
+        console.log(`[hexbox] LCU 事件订阅已连接：${detail}`);
+      } else if (status === 'stopped') {
+        console.log('[hexbox] LCU 事件订阅已停止');
+      } else if (status !== 'connecting') {
+        console.warn(`[hexbox] LCU 事件订阅 ${status}：${detail}`);
+      }
+    },
+  });
+  phaseEvents = stream;
+  stream.start();
+}
+
 async function pollLoop(): Promise<void> {
   for (;;) {
     try {
@@ -1429,7 +1583,19 @@ async function pollLoop(): Promise<void> {
     // 托盘状态（只读菜单项 + tooltip）与本轮读数同一个节拍 ——
     // 放在 try 之外：即使这一轮 pollOnce 抛了也要刷新（否则状态会一直停在旧值）
     tray?.refresh();
-    await new Promise((r) => setTimeout(r, POLL_MS));
+    // 等待：**要么** 到点（`POLL_MS` 兜底），**要么** 收到 LCU 事件被立刻唤醒。
+    // 事件只缩短"相位变化的可见延迟"（最坏 2s → 一次本地往返），不改变任何判定。
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        wakeLoop = null;
+        resolve();
+      }, POLL_MS);
+      wakeLoop = () => {
+        clearTimeout(timer);
+        wakeLoop = null;
+        resolve();
+      };
+    });
   }
 }
 
@@ -2045,6 +2211,11 @@ app.on('before-quit', () => {
     // ⚠️ 这里是**少数几个明确要求清标签**的地方之一（窗口马上销毁，
     // 不留残留字母）；局内正常的"离开对局"停止**不清标签**
     augment?.stop('程序退出', { clearLabels: true });
+    // LCU 事件订阅收工（它会自己清掉待执行的重连，不会再建连接）
+    phaseEvents?.stop();
+    phaseEvents = null;
+    phaseEventCredsKey = '';
+    wakeLoop = null;
     // 会话录制收工：把快照写成 golden —— 否则"打完直接退游戏/关程序"会丢掉报告
     // （帧库与 api.jsonl 已经在录的过程中逐帧刷盘了；这一条只补 report.json）
     if (augmentRecorder && augment) {

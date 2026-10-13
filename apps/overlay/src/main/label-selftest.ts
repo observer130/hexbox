@@ -24,7 +24,7 @@ import { app, screen } from 'electron';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-import { canvasBitmapSize, labelOverlaySelftestLabels } from '@hexbox/vision';
+import { canvasBitmapSize, failureTaxonomyText, labelOverlaySelftestLabels } from '@hexbox/vision';
 
 import {
   attachLabelOverlayDiagnostics,
@@ -32,6 +32,7 @@ import {
   describeLabelOverlay,
   pushLabelOverlay,
 } from './label-overlay.ts';
+import { runLabelOverlayScenarios, type ScenarioHost, type ScenarioReport } from './label-selftest-scenarios.ts';
 import { packagedArtifactDir } from './user-paths.ts';
 
 /** 开关名（写进 apps/overlay/README.md，改这里必须同步文档）。 */
@@ -149,6 +150,12 @@ export function runLabelOverlaySelfTest(): void {
   console.log('  应该看到：屏幕中线上三个大字母方块 —— 左 L / 中 C / 右 R（三秒内出现）。');
   console.log('  若一个都看不到：请把下面这段完整日志（含 ✅/❌ 结论）发回。\n');
 
+  // 排查手册：**与代码同源**（`vision/failure-taxonomy.ts`，有单测锁住）。
+  // 打印在这里而不是只在文档里 —— 用户把日志发回来时就等于把手册一起发回来了。
+  console.log('  常见症状 → 原因 → 怎么查（五个症状都来自同类产品的线上反馈分类）：');
+  for (const line of failureTaxonomyText().split('\n')) console.log(`    ${line}`);
+  console.log('');
+
   const win = createLabelOverlay({ display });
   attachLabelOverlayDiagnostics(win, 'label-selftest');
 
@@ -158,6 +165,49 @@ export function runLabelOverlaySelfTest(): void {
       labels,
       diag: 'label-overlay-selftest（自测，非游戏数据）',
     });
+  /** 推一帧 `active:false`（清空画布）—— 场景②要用。 */
+  const pushEmpty = (): void =>
+    pushLabelOverlay(win, display, {
+      active: false,
+      labels: [],
+      diag: 'label-overlay-selftest 清空（场景②）',
+    });
+
+  /**
+   * 三个场景（悬停提示框 / 清空无残留 / 改尺寸画布跟随）。
+   *
+   * 判定逻辑在 `label-selftest-scenarios.ts`（**不依赖 Electron**，因此有单测）；
+   * 这里只做接线：真实的窗口矩形 + 真实的推送 + 真实的渲染端执行。
+   */
+  const scenarios: { report: ScenarioReport | null } = { report: null };
+  const runScenarios = async (): Promise<void> => {
+    const host: ScenarioHost = {
+      run: (script) => win.webContents.executeJavaScript(script) as Promise<unknown>,
+      bounds: () => {
+        const b = win.getBounds();
+        return { x: b.x, y: b.y, width: b.width, height: b.height };
+      },
+      setBounds: (b) => win.setBounds(b),
+      pushLabels: push,
+      pushEmpty,
+      // 提示框正显示时留图：复核者不用自己悬停就能看到它长什么样
+      onHoverShown: async () => {
+        const image = await win.webContents.capturePage();
+        const dir = resolveDebugDir();
+        mkdirSync(dir, { recursive: true });
+        const file = join(dir, 'label-overlay-hover.png');
+        writeFileSync(file, image.toPNG());
+        console.log(`[label-selftest] 悬停提示框截图：${file}`);
+      },
+    };
+    const mid = labels[1] ?? labels[0];
+    if (!mid) return;
+    scenarios.report = await runLabelOverlayScenarios(host, {
+      centerLabel: { x: mid.x, y: mid.y, w: mid.w, h: mid.h },
+      originX,
+      originY,
+    });
+  };
 
   // ⚠️ loadFile 是异步的：建完立刻推的第一条消息会丢（S2 覆盖层同样如此），
   // 所以等首帧加载完成再推，并隔 400ms 再补一次（窗口 resize 可能晚于首帧）。
@@ -165,8 +215,12 @@ export function runLabelOverlaySelfTest(): void {
     console.log('[label-selftest] 渲染端已加载，开始画 3 个假标签');
     push();
     setTimeout(push, 400);
+    // 场景起点放在首帧之后：那时画布尺寸/标签都已经稳定
+    setTimeout(() => void runScenarios(), 800);
   });
 
+  // 场景要在 `finish` 之前跑完；用户把停留时间设得很短时也不能半路截断
+  const finishAt = Math.max(holdMs, SCENARIO_END_MS);
   setTimeout(() => {
     void finish(
       win,
@@ -176,13 +230,25 @@ export function runLabelOverlaySelfTest(): void {
         cx: l.x + l.w / 2 - originX,
         cy: l.y + l.h / 2 - originY,
       })),
+      scenarios.report,
     );
-  }, holdMs);
+  }, finishAt);
 }
+
+/**
+ * 场景序列的收尾时刻（ms）。
+ *
+ * 三个场景各自的等待加起来约 2 秒；这里给到 3 秒留余量。默认停留 5 秒，
+ * 所以正常情况下**不影响**"5 秒后自动退出"这个已文档化的行为；
+ * 只有用户把 `HEXBOX_LABEL_OVERLAY_TEST_MS` 设得比它还短时，才会延长到这一刻
+ * （宁可多停一秒，也不要在场景跑到一半时退出、给出一份假的 ✅）。
+ */
+const SCENARIO_END_MS = 3000;
 
 async function finish(
   win: Electron.BrowserWindow,
   points: ReadonlyArray<{ readonly text: string; readonly cx: number; readonly cy: number }>,
+  scenarios: ScenarioReport | null,
 ): Promise<void> {
   if (win.isDestroyed()) {
     console.error('❌ 画布窗口已被销毁（进程/渲染端异常）—— 请把这段日志发回');
@@ -242,18 +308,34 @@ async function finish(
   console.log(
     `  三个标签中心像素：${(probe?.probes ?? []).map((p) => `${p.text}=${(p.rgba[3] ?? 0) > 0 ? '已画' : '空'}`).join(' ')}`,
   );
+
+  // 场景②③ 会改动画布/窗口，跑完之后**再确认一次**基础三项没被弄坏
+  //（自测自己把状态搞乱，却报"覆盖窗正常"，是最坏的一种假绿）。
+  console.log('  场景序列（借同类产品已发货的失败清单设计）：');
+  if (scenarios === null) {
+    console.log('  ❌ 场景序列没有结论（渲染端未就绪 / 自测被提前截断）—— 请把日志发回');
+  } else {
+    for (const r of scenarios.results) {
+      console.log(`  ${r.ok ? '✅' : '❌'} ${r.name}：${r.detail}`);
+    }
+  }
+  const scenarioOk = scenarios !== null && scenarios.ok;
+
   if (shot !== '') console.log(`  截图（画布内容）：${shot}`);
   console.log(
-    ok
-      ? '  ✅ 窗口可见 + 置顶 + 画布出像素 —— 覆盖窗链路正常；' +
+    ok && scenarioOk
+      ? '  ✅ 窗口可见 + 置顶 + 画布出像素 + 三个场景全过 —— 覆盖窗与悬停链路正常；' +
           '若此刻屏幕上仍看不到字母，说明是**显示器/游戏遮挡**问题（把这段日志发回）。'
-      : '  ❌ 覆盖窗有问题（详见上面各项）。请把整段日志发回，按 ❌ 的那一项定位。',
+      : ok
+        ? '  ❌ 基础三项没问题，但**场景序列有失败项**（详见上面 ❌ 那几行）：' +
+            '悬停提示框 / 长会话残留 / 改尺寸跟随其中之一坏了。'
+        : '  ❌ 覆盖窗有问题（详见上面各项）。请把整段日志发回，按 ❌ 的那一项定位。',
   );
   console.log('──────── 自测结束 ────────\n');
   // **退出前**把"为什么退出"说清楚：用户的真实误解是"覆盖层启动完就退出了"，
   // 而原因只是同一个终端里 $env: 还留着（见本函数注释）。
   logLabelOverlaySelfTestExitNotice();
-  app.exit(ok ? 0 : 1);
+  app.exit(ok && scenarioOk ? 0 : 1);
 }
 
 /**

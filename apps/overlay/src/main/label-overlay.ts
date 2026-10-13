@@ -105,6 +105,16 @@ export interface LabelOverlayLabel {
    * `@hexbox/vision` 的 `labelBoxPlan()`（渲染端与离线预览共用）。
    */
   readonly style?: LabelStyle;
+  /**
+   * 悬停提示框的**标题**（可选）。
+   *
+   * 为什么由主进程给字符串、而不是渲染端自己拼：渲染端没有图鉴/榜单/强度表，
+   * 让它拼就会在渲染端出现第二份文案来源（本仓库反复踩过的坑）。
+   * 内容为空（或整个字段缺失）→ 该标签**没有**提示框。
+   */
+  readonly tipTitle?: string;
+  /** 悬停提示框的正文行（可选）。 */
+  readonly tip?: readonly string[];
 }
 
 /** 推送给画布的消息（渲染端只读）。 */
@@ -200,6 +210,28 @@ export function positionLabelOverlay(win: BrowserWindow, display: Electron.Displ
     cur.height !== target.height
   ) {
     win.setBounds(target);
+    // ── 回读断言（"几何回读纠偏"的只读版本：**只在真的不一致时才报**）──────────
+    //
+    // 为什么要有它：同类工具出过一次"窗口设了 `resizable: false` 之后
+    // `setBounds` 被夹住"的事故（他们当时的 Electron 版本）。
+    // 我们在 Electron 33.4.11 上**实测证伪**了这条（400×300 → 900×700 →
+    // 1920×1080 → 3440×1440 全部生效），
+    // 所以**不改行为**：只回读一次、不一致就打一行 WARN 带上实际值。
+    // 这样将来真在某个 Electron 版本上撞到夹取，日志里能直接看到"设了 A、成了 B"，
+    // 而不是只看到标签整体偏移（那种现象排查起来要花一整局）。
+    const after = win.getBounds();
+    if (
+      after.width !== target.width ||
+      after.height !== target.height ||
+      after.x !== target.x ||
+      after.y !== target.y
+    ) {
+      console.warn(
+        `[label-overlay] ⚠ 画布窗口边界回读不一致：请求 ${target.width}x${target.height}` +
+          `@${target.x},${target.y} → 实际 ${after.width}x${after.height}@${after.x},${after.y}` +
+          '（若持续出现：该 Electron/系统组合可能夹取了窗口尺寸，标签会整体偏移）',
+      );
+    }
   }
   // 提示渲染端"该重设画布尺寸了"（渲染端只把它当提示：自己量 window.innerWidth，
   // 不信任这里的宽高 —— 见 renderer/overlay-canvas.ts 的 syncCanvasSize）。

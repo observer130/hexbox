@@ -17,6 +17,8 @@ import { desktopCapturer, screen } from 'electron';
 
 import {
   cardLabelFor,
+  // 悬停提示框文案（纯函数：统计口径/日期措辞在 vision 里单测锁死）
+  championLabelTip,
   chooseChampSelectCaptureForm,
   chooseChampSelectCards,
   champSelectCaptureForms,
@@ -72,6 +74,14 @@ export interface VisionOverlayMsg {
      * 与选人标签共用同一块画布（见 main/label-overlay.ts）。
      */
     readonly color?: string;
+    /**
+     * 悬停提示框内容（可选；`forward: true` 送进来的 mousemove 用它出详情）。
+     *
+     * 文案在**主进程**拼好（这里才有图鉴/榜单/统计日期），渲染端只负责画 ——
+     * 见 `label-overlay.ts` 的 `LabelOverlayLabel.tipTitle` 注释。
+     */
+    readonly tipTitle?: string;
+    readonly tip?: readonly string[];
   }>;
   /** 诊断信息（可选,调试面板用）。 */
   readonly diag?: string;
@@ -507,14 +517,26 @@ export async function runVisionRound(
       // 必须归一化，否则识别成功也会显示「暂无数据」（真机实测过）。
       const cid = deps.canonicalId(championId);
       const row = rankings?.heroes.find((h) => h.championId === cid);
-      labels.push(
-        cardLabelFor(rect, input.geo, workArea, {
-          name: deps.championName(cid),
+      const name = deps.championName(cid);
+      // 悬停提示框：文案在**主进程**拼（这里才有榜单与统计日期），渲染端只画。
+      // 判定与排版是纯函数（`vision/label-tip.ts` + `label-hover.ts`，都有单测）。
+      const tip = championLabelTip({
+        name,
+        winRate: row?.winRate ?? null,
+        pickRate: row?.pickRate ?? null,
+        rank: row?.rank ?? null,
+        rankChangeDesc: row?.rankChangeDesc,
+        dataDate: rankings?.meta.dataDate ?? null,
+      });
+      labels.push({
+        ...cardLabelFor(rect, input.geo, workArea, {
+          name,
           winRate: row?.winRate ?? 0,
           hasData: row !== undefined,
           championId: cid,
         }),
-      );
+        ...tip,
+      });
     }
 
     // 真机核对用：把标签坐标与它对应的卡片矩形一起报出来，

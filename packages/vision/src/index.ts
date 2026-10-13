@@ -73,3 +73,11 @@ export * from './update-version.ts';
 export * from './update-check.ts';
 // 「读不到 LCU 凭证」的**一次性气泡**判定（连续 N 轮才提示、每个连接会话最多一次）
 export * from './credential-notice.ts';
+// 重连恢复的**纯判定**（动作只在 InProgress 上做、先重置本局熔断、英雄身份优先缓存）
+export * from './reconnect-recovery.ts';
+// hover 命中测试 + 提示框排版（纯函数；渲染端与将来的离线预览共用同一份）
+export * from './label-hover.ts';
+// 提示框**文案**（纯函数：统计口径/日期/海克斯"非本局选项"的措辞都在这里）
+export * from './label-tip.ts';
+// 故障症状 → 原因 → 怎么查（借同类产品**已发货**的反馈分类表；自测与文档同一份）
+export * from './failure-taxonomy.ts';

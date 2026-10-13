@@ -66,10 +66,10 @@ pnpm dev:web                                  # http://localhost:5273
 
 `pnpm typecheck` → `pnpm test` → `pnpm build` (CI runs the same on `windows-latest`).
 Node's built-in runner; `pnpm --filter @hexbox/core test` is faster. **Keep them green
-and add tests for new behavior.** Current: **869** — core 55 / vision 638 / lcu 87 /
-overlay 7 / provider-communitydragon 12 / provider-tencent 43 / data-store 17 /
+and add tests for new behavior.** Current: **974** — core 55 / vision 685 / lcu 129 /
+overlay 23 / provider-communitydragon 12 / provider-tencent 43 / data-store 17 /
 data-cli 10 (`pnpm test` is the source of truth; the overlay's Electron runtime is not
-testable, its 7 tests cover replay-safe parts only).
+testable — its tests cover replay-safe parts and the self-test scenario logic only).
 
 ## Rules that must not be broken
 
@@ -157,8 +157,15 @@ in `debug-augment.ts`.
 $env:HEXBOX_LABEL_OVERLAY_TEST='1'; pnpm dev:overlay   # overlay window only (needs a desktop)
 node --experimental-strip-types scripts/preview-augment-labels.mts         # → debug/label-preview.png
 node --experimental-strip-types scripts/diag-champ-select-cards.mts --ocr  # real frames, online code
+node --experimental-strip-types scripts/diag-lcu-events.mts --all          # live LCU event subscription
 node --experimental-strip-types scripts/replay-session.mts [debug/sessions/<dir>]
 ```
+> The label-overlay self-test also runs three scenarios by itself (hover tooltip via the
+> forwarded `mousemove`, no residue after a clear, canvas follows a window resize) and
+> prints the failure taxonomy from `packages/vision/src/failure-taxonomy.ts`; it exits
+> non-zero if any scenario fails (`debug/label-overlay-hover.png` shows the tooltip).
+> `diag-lcu-events.mts` needs a running client with readable credentials (admin, or
+> `HEXBOX_LCU_CREDENTIALS`); without them it proves only the handshake path (HTTP 401).
 > `$env:` values are session-scoped: unset them, or `pnpm dev:overlay` runs that self-test
 > and exits by itself (by design).
 

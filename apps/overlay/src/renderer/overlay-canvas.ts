@@ -24,7 +24,14 @@
  * "预览好看、局内不一样"（用户 2026-10-05 明确要求两边一致）。
  */
 
-import { canvasBitmapSize, labelBoxPlan, rgbaCss } from '@hexbox/vision/browser';
+import {
+  canvasBitmapSize,
+  hoveredLabelIndex,
+  labelBoxPlan,
+  rgbaCss,
+  tooltipPlanFor,
+  TOOLTIP_COLORS,
+} from '@hexbox/vision/browser';
 import type { LabelBoxPlan, LabelStyle, TierTagPlan } from '@hexbox/vision/browser';
 
 interface VisionLabel {
@@ -46,6 +53,15 @@ interface VisionLabel {
   textScale?: number;
   /** 绘制样式：缺省 = 选人标签（深色底）；`tier` = 局内强度评级（大字母 + 尖括号）。 */
   style?: LabelStyle;
+  /**
+   * 悬停提示框的标题/正文（**主进程给**，可能缺失）。
+   *
+   * 文案为什么不在渲染端拼：这里没有图鉴/榜单/强度表，也没有统计日期 ——
+   * 自己拼就会变成第二份文案来源（`vision/label-tip.ts` 里那些口径说明
+   * 就只能靠人工同步）。渲染端只负责**画**。
+   */
+  tipTitle?: string;
+  tip?: string[];
 }
 
 interface VisionMsg {
@@ -162,7 +178,6 @@ function draw(msg: VisionMsg): void {
   // DPR 变换后 clearRect 也要覆盖整窗（用逻辑尺寸）
   ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
   if (!msg.active) return;
-
   console.log(
     `[overlay-canvas] draw labels=${msg.labels.length} ` +
       `canvas=${canvas.width}x${canvas.height} ` +
@@ -217,6 +232,117 @@ function draw(msg: VisionMsg): void {
       // 出处仍在侧边窗与数据站展示（见 docs/OVERLAY-STAGES.md 的来源标注要求）。
     }
   }
+
+  // 悬停提示框：**最后画**（在所有标签之上），且只画命中的那一个
+  drawTooltip();
+}
+
+/* ------------------------------------------------------------------ */
+/* 悬停提示框（参考同类工具：`forward: true` 送进来的 mousemove 是有用的）  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 最近一次鼠标位置（窗口内逻辑 DIP）与"是否在窗口内"。
+ *
+ * ⚠️ 这块窗口是**永久穿透 + forward: true**（`label-overlay.ts`）：
+ *   · 它永远不吃点击 —— 悬停只**看**，不影响游戏输入；
+ *   · mousemove 仍会送进来，所以"悬停出详情"不需要任何新窗口/新命中层。
+ * 坐标口径与标签**完全一致**（都是窗口内 DIP），所以命中测试不需要换算。
+ */
+let hoverX = 0;
+let hoverY = 0;
+let hoverInside = false;
+/** 上一次真正画出来的悬停目标（只为"变了才重绘"，避免每像素重绘整块画布）。 */
+let hoverIndex: number | null = null;
+
+/** `ctx.measureText` 适配：排版公式在纯函数里，这里只提供字体度量。 */
+function measureText(text: string, font: string): number {
+  if (!ctx) return 0;
+  const prev = ctx.font;
+  ctx.font = font;
+  const width = ctx.measureText(text).width;
+  ctx.font = prev;
+  return width;
+}
+
+/**
+ * 鼠标位置变化 → 只在**命中目标变化**时重绘。
+ *
+ * 为什么按"目标"而不是按"像素"：提示框锚在**标签**上（内容是标签的数据），
+ * 鼠标在同一张标签里移动不需要重画；否则每秒几百次全画布重绘，
+ * 白白让被游戏盖住的透明窗反复合成。
+ */
+function updateHover(x: number, y: number, inside: boolean): void {
+  hoverX = x;
+  hoverY = y;
+  hoverInside =
+    inside &&
+    x >= 0 &&
+    y >= 0 &&
+    x <= window.innerWidth &&
+    y <= window.innerHeight;
+  const next =
+    hoverInside && lastMsg?.active ? hoveredLabelIndex(lastMsg.labels, hoverX, hoverY) : null;
+  if (next === hoverIndex) return;
+  hoverIndex = next;
+  // 真机取证只看这一行：`grep hover` 就能确认 forward 进来的 mousemove 真的到了
+  if (next !== null) {
+    const l = lastMsg?.labels[next];
+    console.log(
+      `[overlay-canvas] hover #${next} text=${l?.text ?? '?'} ` +
+        `tip=${l?.tipTitle ? '有' : '无'} @(${Math.round(hoverX)},${Math.round(hoverY)})`,
+    );
+  }
+  if (lastMsg) draw(lastMsg);
+}
+
+window.addEventListener('mousemove', (e) => {
+  updateHover(e.clientX, e.clientY, true);
+});
+window.addEventListener('mouseleave', () => {
+  // 穿透窗口不一定收到它，所以命中判定**也会**按坐标夹一遍（见 updateHover）
+  updateHover(hoverX, hoverY, false);
+});
+
+/**
+ * 画出当前悬停标签的提示框。
+ *
+ * 几何/行位置/贴边规则全来自纯函数 `tooltipPlanFor()`（`vision/label-hover.ts`，
+ * 有单测；视觉常量 `TOOLTIP_STYLE`/`TOOLTIP_COLORS` 也在那里 —— 将来离线预览
+ * 用同一份，不会出现"预览好看、局内不一样"）。
+ */
+function drawTooltip(): void {
+  if (!ctx || !hoverInside || !lastMsg?.active) return;
+  const idx = hoveredLabelIndex(lastMsg.labels, hoverX, hoverY);
+  const label = idx === null ? undefined : lastMsg.labels[idx];
+  if (!label) return;
+
+  const plan = tooltipPlanFor(measureText, {
+    title: label.tipTitle,
+    lines: label.tip,
+    anchor: { x: label.x, y: label.y, w: label.w, h: label.h },
+    canvas: { width: window.innerWidth, height: window.innerHeight },
+  });
+  if (!plan) return; // 该标签没有可显示的内容 → 不弹空框
+
+  ctx.save();
+  roundRect(ctx, plan.x, plan.y, plan.w, plan.h, TOOLTIP_COLORS.radius);
+  ctx.fillStyle = TOOLTIP_COLORS.fill;
+  ctx.fill();
+  ctx.strokeStyle = TOOLTIP_COLORS.stroke;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  // ⚠️ 不换行：超长行按框裁剪（宽度上限由纯函数的 `maxWidth` 决定）。
+  //    这是刻意的 —— 换行会让框高随文本抖动，反而更难读；文案由主进程控制长度。
+  ctx.clip();
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  for (const row of plan.rows) {
+    ctx.font = row.font;
+    ctx.fillStyle = row.isTitle ? TOOLTIP_COLORS.title : TOOLTIP_COLORS.text;
+    ctx.fillText(row.text, plan.x + plan.padding, row.top);
+  }
+  ctx.restore();
 }
 
 /**

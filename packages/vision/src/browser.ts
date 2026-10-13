@@ -34,3 +34,6 @@ export * from './augment-reroll.ts';
 export * from './label-overlay-coords.ts';
 // 标签绘制计划（渲染端 overlay-canvas.ts 用它取圆角/字号/配色 —— 与离线预览同一份）
 export * from './label-draw.ts';
+// hover 命中测试 + 提示框排版（渲染端 overlay-canvas.ts 用它画悬停详情；
+// `forward: true` 送进来的 mousemove 靠这两个纯函数变成可见内容）
+export * from './label-hover.ts';

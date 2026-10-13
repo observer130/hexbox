@@ -31,7 +31,23 @@ export interface LabelOverlaySelftestLabel {
   readonly championId: number;
   /** 强调色（沿用档位配色，顺便验证颜色通道）。 */
   readonly color: string;
+  /**
+   * 悬停提示框内容（**故意不用真实的** `championLabelTip()` / `augmentTierLabelTip()`）。
+   *
+   * 自测画的不是游戏数据，所以提示框也必须一眼看出不是游戏数据 —— 用真实文案
+   * 构建器会让"自测截图"与"真机截图"看起来一模一样，取证时反而分不清。
+   * 但**字段形态与真实标签完全一致**，所以它验证的是同一条渲染路径。
+   */
+  readonly tipTitle: string;
+  readonly tip: readonly string[];
 }
+
+/** 自测提示框的固定正文（写在标签上，便于截图取证）。 */
+export const LABEL_SELFTEST_TIP_LINES: readonly string[] = [
+  '这不是游戏数据（自测）',
+  '悬停提示框通路验证',
+  '来源：HEXBOX_LABEL_OVERLAY_TEST',
+];
 
 /** 工作区矩形（`display.workArea`，逻辑 DIP）。 */
 export interface SelfTestWorkArea {
@@ -71,6 +87,8 @@ export function labelOverlaySelftestLabels(
       hasData: true,
       championId: 1,
       color: '#4ade80',
+      tipTitle: '自测标签 L',
+      tip: LABEL_SELFTEST_TIP_LINES,
     },
     {
       x: xCenter,
@@ -82,6 +100,8 @@ export function labelOverlaySelftestLabels(
       hasData: true,
       championId: 2,
       color: '#e6a33a',
+      tipTitle: '自测标签 C',
+      tip: LABEL_SELFTEST_TIP_LINES,
     },
     {
       x: xRight,
@@ -93,6 +113,8 @@ export function labelOverlaySelftestLabels(
       hasData: true,
       championId: 3,
       color: '#a76ede',
+      tipTitle: '自测标签 R',
+      tip: LABEL_SELFTEST_TIP_LINES,
     },
   ];
 }
