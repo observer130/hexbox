@@ -13,6 +13,18 @@
  * | 2999 HTTP | `api.jsonl`（按虚拟时间回答"最近一次采样"） |
  * | LCU/2999 认英雄 | `session.json` 里存的那一局身份留档 |
  *
+ * ⚠️ **时基（最容易错的一处）**：回放的虚拟时钟**从会话零点（= 录制里第一个事件的时刻）
+ * 起步**，不早也不晚。控制器的每一个 `x - startedAt` 字段（`reroll.events` /
+ * `recognized` / `apiLog`）都因此落在**与会话产物同一个时基**上 —— 于是
+ * `report.json`、`edges.jsonl`、`frames.idx.jsonl`、标签推送时刻可以直接对表。
+ *
+ * 曾经的写法是 `startMs = firstEvent(api/帧/边沿) - 1000`（想跳过"还没开始"的空档），
+ * 后果是**整份报告被平移**：真机会话 `20261012-213155` 的首个 api 采样在会话第 7389ms，
+ * 而会话零点（首条 phase 采样）在 0 → 回放的 `startedAt` 落在 6389ms，所有
+ * `x - startedAt` 字段集体少了 6389ms：单卡刷新读出来"比面板出现还早 3.5 秒"，
+ * 与 golden 对比时 5 次重随**每次都差 6392ms**。空档本身不用跳 —— 它会被如实记进
+ * `gaps`（帧库没覆盖到这里），跳过它反而把时基搞错了。
+ *
  * ⚠️ 三条诚实边界（回放结论必须连着它们一起读）：
  *   1. **帧库决定保真度**：回放只能看到录下来的帧。录制器存的是"门控当时真正看的
  *      那些帧"（见 `session-recorder.ts`），所以**trace 回放**与真机逐位一致；而
@@ -39,10 +51,12 @@ import {
   parseFramesIndexJsonl,
   parseSessionMeta,
   parseTimelineCsv,
+  reconnectStep,
   rectFromCrop,
   rectToCrop,
   regionsInCrop,
   PANEL_ROW_REGION,
+  RECONNECT_PHASE,
   type AugmentCardFingerprint,
   type AugmentNameFingerprint,
   type AugmentSessionApiSample,
@@ -70,6 +84,75 @@ import {
 import { bitmapPixels, recognizeOpen, recognizeReroll } from '@hexbox/vision';
 import type { AugmentFrame } from '../main/augment-stream.ts';
 import type { LabelOverlayMsg } from '../main/label-overlay.ts';
+
+/* ------------------------------------------------------------------ */
+/* 重连判定回放（把录到的**相位序列**喂给线上那条纯判定）                */
+/* ------------------------------------------------------------------ */
+
+export interface ReconnectTimelineResult {
+  /** 录到的相位采样条数（0 = 这份会话判定不了，**不是**"通过"）。 */
+  readonly samples: number;
+  /** 其中读不到相位的条数（`phase: null`）—— 阶段门会保持上一阶段，故不喂给重连判定。 */
+  readonly unreadable: number;
+  /** 录到过哪些相位（去重、按首次出现顺序）。 */
+  readonly observed: readonly string[];
+  /** 进入过几次 `Reconnect`（"记账"次数）。 */
+  readonly gaps: number;
+  /** 触发了几次恢复动作（真实录制里没有 Reconnect 时必须为 0）。 */
+  readonly recoveries: number;
+}
+
+/**
+ * 把会话里录到的相位序列喂给 `reconnectStep()`（线上同一条纯判定）。
+ *
+ * 为什么这算"回放"而不是"重新实现"：`reconnectStep` 是**线上同一个纯函数**（有单测），
+ * 这里只把**录到的相位**按顺序喂进去（与把真机 2999 采样喂给触发状态机是同一手法）——
+ * 判据与状态位（`armed`）都在那个函数里。这段以前住在脚本里，而"判据住在脚本里
+ * → 没有 CI 覆盖"正是本仓库踩过的坑（见 `session-golden.ts` 的注释），所以它搬进了
+ * 这个有单测的文件。
+ *
+ * ⚠️ **只报能判定的东西**：恢复那一刻链路是 `failed` 还是"在跑但抓帧不可用"
+ * 没有录进会话，而这两者决定的动作**互斥**（重置熔断 / 停掉重建）—— 所以这里
+ * 不猜那个状态，只报"该不该恢复、恢复了几次"。动作由 `pollOnce` 在**当时**按
+ * 真实状态决定（见 `decideReconnectChainAction`）。
+ *
+ * `phase: null` 的采样（那次读不到相位）不喂给判定：真实链路里阶段门会保持上一阶段，
+ * 重连判定看到的也仍是上一阶段。
+ */
+export function replayReconnectTimeline(
+  phases: readonly AugmentSessionPhaseSample[],
+): ReconnectTimelineResult {
+  let armed = false;
+  let recoveries = 0;
+  let unreadable = 0;
+  const observed: string[] = [];
+
+  for (const sample of phases) {
+    const phase = sample.phase;
+    if (phase === null) {
+      unreadable++;
+      continue;
+    }
+    if (!observed.includes(phase)) observed.push(phase);
+    const step = reconnectStep({
+      armed,
+      phase,
+      // 只关心"该不该恢复"：链路状态不影响这一步（`recover` 与状态无关，动作才相关）
+      chainState: 'running',
+      championKnown: true,
+    });
+    armed = step.armed;
+    if (step.recover) recoveries++;
+  }
+
+  return {
+    samples: phases.length,
+    unreadable,
+    observed,
+    gaps: phases.filter((p) => p.phase === RECONNECT_PHASE).length,
+    recoveries,
+  };
+}
 
 /* ------------------------------------------------------------------ */
 /* 会话加载                                                            */
@@ -172,6 +255,40 @@ export class FrameStore {
     return best;
   }
 
+  /**
+   * 识别请求（虚拟时刻 `atMs`）**该用的那张原生帧**。
+   *
+   * ⚠️ 录制里的原生帧是**识别请求现场抓的**（`capture/worker.ts` 的 `readFull()`：
+   * 请求 → 抓帧 → 回传），所以它的 `atMs` 天生比请求时刻**晚几十毫秒**。
+   * 真机会话 `20261012-213155` 实测：5 次单卡重随的"请求 → 原生帧"=
+   * `21106-21050 / 34306-34250 / 35508-35450 / 417951-417950 / 421151-421150` = 1~58ms。
+   *
+   * 只按"不晚于当前时刻"选帧会得到两种坏结果：
+   *   · 明明下一张原生帧就是这次请求的答案，却报"原生帧过期"（本会话 5 次单卡重随全都中）；
+   *   · 更糟：退而取**上一张**（刷新前那一帧）并"识别成功" → 报告读起来全绿，内容却是旧的。
+   * 所以先认"请求之后的第一张"（`NATIVE_GRAB_LOOKAHEAD_MS` 内 = 这次请求抓的），
+   * 取不到才回退到"不晚于当前时刻"的最近一张（那条路仍受 `MAX_NATIVE_FRAME_AGE_MS` 约束）。
+   *
+   * 代价（必须连着结论读）：请求之后的第一张**未必**是这次请求抓的 —— 窗口内若正好有
+   * 下一次请求的答案，就会借到它。窗口取 500ms（远大于实测的几十毫秒抓帧延迟，又小于
+   * 两次请求的最小间隔 400ms 的一倍多），并且**每一次借用都会被记进报告**
+   * （`nativeLookahead`），不静默。
+   */
+  nativeForRecognize(
+    atMs: number,
+  ): { readonly ref: AugmentSessionFrameRef; readonly lookahead: boolean } | null {
+    let future: AugmentSessionFrameRef | null = null;
+    for (const f of this.frames) {
+      if (f.kind !== 'native' || f.atMs < atMs) continue;
+      if (future === null || f.atMs < future.atMs) future = f;
+    }
+    if (future && future.atMs - atMs <= NATIVE_GRAB_LOOKAHEAD_MS) {
+      return { ref: future, lookahead: true };
+    }
+    const past = this.frameAt(atMs, 'native');
+    return past ? { ref: past, lookahead: false } : null;
+  }
+
   /** 帧库在某个时刻之后还有没有帧（诊断"帧库没覆盖到这里"）。 */
   hasAfter(atMs: number): boolean {
     return this.frames.some((f) => f.atMs > atMs);
@@ -216,6 +333,16 @@ const FRAME_CACHE_MAX = 4;
  */
 const MAX_NATIVE_FRAME_AGE_MS = 1500;
 
+/**
+ * 原生帧的"请求 → 抓帧"允许的前瞻窗口（ms）。
+ *
+ * 录制里的原生帧是识别请求**现场抓的**，所以它比请求时刻晚几十毫秒（见
+ * `FrameStore.nativeForRecognize`）。窗口太小 = 每次重随都判"原生帧过期"；
+ * 窗口太大 = 可能借到下一次请求的答案。取 500ms：实测抓帧延迟 1~58ms，
+ * 而两次识别请求的最小间隔是重随轮询 400ms（借用的每一次都会计数上报）。
+ */
+const NATIVE_GRAB_LOOKAHEAD_MS = 500;
+
 /* ------------------------------------------------------------------ */
 /* 回放用的四个注入实现                                                */
 /* ------------------------------------------------------------------ */
@@ -231,6 +358,8 @@ export interface ReplayCaptureOptions {
     uniqueFrames: number;
     maxFrameAgeMs: number;
     staleNativeFrames: number;
+    /** 原生帧取自"请求之后那一张"的次数（录制是现场抓帧，见 `nativeForRecognize`）。 */
+    nativeLookahead: number;
   };
   /** 帧库覆盖不到的采样点（"帧库没覆盖到这里"）——诊断用。 */
   readonly onGap?: (atMs: number) => void;
@@ -363,7 +492,11 @@ export function createReplayCapture(
     const only = o.only && o.only.length > 0 ? o.only : null;
     recognizeCount++;
     const atMs = clock.now();
-    const ref = store.frameAt(atMs, 'native');
+    // ⚠️ 原生帧的选取见 `nativeForRecognize`：录制里的原生帧是**这次请求现场抓的**，
+    //    所以"请求之后的第一张"才是这次识别的答案（只往后看会天天判过期）。
+    const pick = store.nativeForRecognize(atMs);
+    const ref = pick?.ref ?? null;
+    if (ref && pick?.lookahead) opts.frameStats.nativeLookahead++;
     if (!ref) {
       // ⚠️ 明确报"缺原生帧"（而不是假装认不出）：报告里能据此区分
       //    "识别判据问题" 与 "会话没录到原生帧"。
@@ -569,6 +702,13 @@ export interface ReplayReport {
   readonly notes: readonly string[];
   readonly startMs: number;
   readonly endMs: number;
+  /**
+   * 会话零点 → 第一个留档事件之间的空档（ms）。
+   *
+   * 它只说明"这一段没有任何留档"（帧库缺口也会落在这一段），**不是**用来挪时基的：
+   * 时基永远是会话零点，见文件头。
+   */
+  readonly leadInMs: number;
   readonly frames: readonly ReplayFrameRow[];
   readonly edges: readonly AugmentSessionPanelEdge[];
   readonly labels: readonly ReplayLabelPush[];
@@ -588,6 +728,8 @@ export interface ReplayReport {
   readonly maxFrameAgeMs: number;
   /** 因"原生帧过期"而拒绝重跑识别的次数。 */
   readonly staleNativeFrames: number;
+  /** 原生帧取自"请求之后那一张"（= 录制那次请求现场抓的帧）的次数。 */
+  readonly nativeLookahead: number;
   /** 驱动器是否因上限提前收工（true = 报告尾部可能少一段，结论要打折）。 */
   readonly truncated: boolean;
   readonly snapshot: ReturnType<AugmentController['snapshot']>;
@@ -599,7 +741,14 @@ export interface ReplayReport {
 export interface RunReplayOptions {
   readonly session: LoadedSession;
   readonly library: readonly AugmentNameFingerprint[];
-  /** 会话起点对应虚拟时钟的 0（默认 0）。 */
+  /**
+   * 虚拟时钟的起点在**会话时基**上的取值。
+   *
+   * 默认 `0`（= 会话零点）。合成会话（不是从真机录出来的、零点本身没有意义）才需要显式给 ——
+   * 那时给的是"切片自己的零点"，好让状态机与切片里的帧/采样对齐。
+   * ⚠️ 真机会话**不要**动它：控制器把 `startedAt` 当成 `x - startedAt` 的基准，挪起点
+   *    等于把报告整体平移（见文件头"时基"）。
+   */
   readonly startMs?: number;
   /** 跑到哪（默认 = 最后一个事件 + 5s）。 */
   readonly endMs?: number;
@@ -626,8 +775,16 @@ export async function runReplaySession(options: RunReplayOptions): Promise<Repla
   let recognizeCalls = 0;
   let labelsUnavailable = 0;
   /** 帧投递统计（重复投递 / 最大帧龄 / 过期原生帧）—— 审查发现的假绿靠它们才能被看见。 */
-  const frameStats = { frameReuses: 0, uniqueFrames: 0, maxFrameAgeMs: 0, staleNativeFrames: 0 };
+  const frameStats = {
+    frameReuses: 0,
+    uniqueFrames: 0,
+    maxFrameAgeMs: 0,
+    staleNativeFrames: 0,
+    nativeLookahead: 0,
+  };
 
+  // ⚠️ `endMs` 只看链路自己的时间线（api / 帧 / 边沿）：phase 采样会一直写到链路收工之后，
+  //    拿它定终点会让回放多跑一大段"链路已经不在"的虚拟时间。
   const lastEvent = Math.max(
     session.api.at(-1)?.atMs ?? 0,
     session.frames.at(-1)?.atMs ?? 0,
@@ -637,11 +794,15 @@ export async function runReplaySession(options: RunReplayOptions): Promise<Repla
     session.api[0]?.atMs ?? Number.POSITIVE_INFINITY,
     session.frames[0]?.atMs ?? Number.POSITIVE_INFINITY,
     session.edges[0]?.atMs ?? Number.POSITIVE_INFINITY,
+    session.phase[0]?.atMs ?? Number.POSITIVE_INFINITY,
   );
-  // ⚠️ 时钟从**第一个事件之前**开始：从 0 开始会在"会话还没开始"的空档里空转
-  //    （表现为一大段虚拟时间 + 0 帧采样，看起来像回放坏了）。
-  const startMs = options.startMs ?? (Number.isFinite(firstEvent) ? Math.max(0, firstEvent - 1000) : 0);
+  // ⚠️ 默认**就是会话零点**（见文件头"时基"）：控制器据此得到的 `startedAt` 与会话产物
+  //    的零点重合，`x - startedAt` 那些字段才和 `edges.jsonl` / `frames.idx.jsonl` 可比。
+  //    别为了"跳过空档"把它挪到第一个事件之前 —— 那只会把整份报告平移（真机踩过 6.4s）。
+  const startMs = options.startMs ?? 0;
   const endMs = options.endMs ?? lastEvent + 5000;
+  /** 会话开始到第一个留档事件之间的空档（真实的"这段没有留档"，别拿它去挪时基）。 */
+  const leadInMs = Number.isFinite(firstEvent) ? Math.max(0, firstEvent - startMs) : 0;
   clock.advanceTo(startMs);
 
   try {
@@ -773,6 +934,7 @@ export async function runReplaySession(options: RunReplayOptions): Promise<Repla
       notes: session.notes,
       startMs,
       endMs,
+      leadInMs,
       frames,
       edges,
       labels,
@@ -782,6 +944,7 @@ export async function runReplaySession(options: RunReplayOptions): Promise<Repla
       uniqueFrames: frameStats.uniqueFrames,
       maxFrameAgeMs: frameStats.maxFrameAgeMs,
       staleNativeFrames: frameStats.staleNativeFrames,
+      nativeLookahead: frameStats.nativeLookahead,
       truncated,
       snapshot: snap,
       elapsedRealMs: Date.now() - startedAtReal,

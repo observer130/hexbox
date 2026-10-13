@@ -25,7 +25,18 @@ import {
   PANEL_ROW_REGION,
   type Rect,
 } from '../packages/vision/src/index.ts';
-import { loadSession, runReplaySession, type LoadedSession } from '../apps/overlay/src/replay/session-replay.ts';
+import {
+  loadSession,
+  replayReconnectTimeline,
+  runReplaySession,
+  type LoadedSession,
+} from '../apps/overlay/src/replay/session-replay.ts';
+import {
+  compareGolden,
+  parseGoldenReport,
+  type GoldenReport,
+} from '../apps/overlay/src/replay/session-golden.ts';
+import { RECONNECT_PHASE } from '../packages/vision/src/index.ts';
 
 const argv = process.argv.slice(2);
 const asJson = argv.includes('--json');
@@ -57,6 +68,17 @@ const mmss = (ms: number): string => {
   const s = Math.max(0, ms / 1000);
   return `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}`;
 };
+
+/** 取帧间隔分布（api 模式下"常态是不是真的零取帧"看这个，而不是 pixel 节流占比）。 */
+function intervalDistribution(intervals: readonly number[]): string {
+  if (intervals.length === 0) return '（一帧都没取）';
+  const count = new Map<number, number>();
+  for (const ms of intervals) count.set(ms, (count.get(ms) ?? 0) + 1);
+  return [...count.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([ms, n]) => `${ms === 0 ? '停帧' : `${ms}ms`}×${n}（${((n / intervals.length) * 100).toFixed(0)}%）`)
+    .join(' / ');
+}
 
 /* ------------------------------------------------------------------ */
 /* 合成会话                                                            */
@@ -186,6 +208,12 @@ async function main(): Promise<void> {
     ? loadSession(isAbsolute(target) ? target : join(ROOT, target))
     : syntheticSession();
 
+  // ⚠️ 只有**合成会话**才显式给虚拟时钟起点：它不是真机录出来的，"会话零点"没有物理含义，
+  //    这里把起点对到切片里的第一条 2999 采样之前，好让状态机的第一次轮询正好落在采样上。
+  //    真机会话一律用默认值（= 会话零点）—— 挪起点会把整份报告的 `x - startedAt` 字段
+  //    整体平移（真机踩过 6.4s，见 `session-replay.ts` 文件头"时基"）。
+  const startMs = target ? undefined : Math.max(0, (session.api[0]?.atMs ?? 1000) - 1000);
+
   const library = ((): readonly { augmentId: number; name: string; width: number; height: number; bits: Uint8Array }[] => {
     const path = join(DATA_DIR, 'augment-names.json');
     if (!existsSync(path)) return [];
@@ -209,6 +237,7 @@ async function main(): Promise<void> {
     session,
     library,
     dataDir: DATA_DIR,
+    ...(startMs === undefined ? {} : { startMs }),
     // 日志收进数组：默认不刷屏（--json 时更不该刷）；人读模式最后一起打
     log: (line) => logLines.push(line),
   });
@@ -219,6 +248,17 @@ async function main(): Promise<void> {
     : existsSync(join(session.dir, 'report.json'))
       ? loadGolden(join(session.dir, 'report.json'))
       : null;
+  const cmp = golden
+    ? compareGolden(
+        {
+          edges: report.edges,
+          rerolls: snap.reroll.events,
+          recognizeCalls: report.recognizeCalls,
+          counts: snap.counts,
+        },
+        golden,
+      )
+    : null;
 
   if (asJson) {
     console.log(
@@ -227,12 +267,14 @@ async function main(): Promise<void> {
           session: { dir: session.dir, notes: report.notes, meta: report.meta },
           replay: {
             spanMs: report.endMs,
+            leadInMs: report.leadInMs,
             elapsedRealMs: report.elapsedRealMs,
             frames: report.frames.length,
             gaps: report.gaps,
             edges: report.edges,
             recognizeCalls: report.recognizeCalls,
             labelsUnavailable: report.labelsUnavailable,
+            nativeLookahead: report.nativeLookahead,
             labels: report.labels,
             counts: snap.counts,
             cadence: snap.cadence,
@@ -241,7 +283,8 @@ async function main(): Promise<void> {
             reroll: { detected: snap.reroll.detected, events: snap.reroll.events },
             closeConfirm: snap.closeConfirm,
           },
-          golden: golden ? compareGolden(report, golden) : null,
+          reconnect: replayReconnectTimeline(session.phase),
+          golden: cmp,
         },
         null,
         2,
@@ -257,7 +300,10 @@ async function main(): Promise<void> {
       ` / 原生帧 ${session.frames.filter((f) => f.kind === 'native').length}` +
       `、2999 采样 ${session.api.length} 条、边沿留档 ${session.edges.length} 条` +
       `、名字指纹库 ${library.length} 条` +
-      `\n跨度 ${mmss(report.endMs)}，**真实耗时 ${report.elapsedRealMs}ms**（虚拟时钟：秒级跑完一局）`,
+      `\n跨度 ${mmss(report.endMs)}，**真实耗时 ${report.elapsedRealMs}ms**（虚拟时钟：秒级跑完一局）` +
+      (report.leadInMs > 0
+        ? `\n会话零点 → 第一个留档事件还有 ${report.leadInMs}ms 空档（这段没有任何留档，帧库缺口会记在这里）`
+        : ''),
   );
 
   console.log(
@@ -277,10 +323,20 @@ async function main(): Promise<void> {
   }
   const edgeLines = report.edges.slice(0, limit).map((e) => `${e.kind === 'open' ? '▶' : '◀'}${mmss(e.atMs)}`);
   console.log(`  边沿：${edgeLines.length > 0 ? edgeLines.join(' ') : '（无）'}`);
-  console.log(
-    `节流：常态 ${(snap.cadence.share.idle * 100).toFixed(0)}% / probe ${(snap.cadence.share.probe * 100).toFixed(0)}%` +
-      ` / 高频 ${(snap.cadence.share.active * 100).toFixed(0)}%（常态 ${snap.cadence.idleMs}ms ↔ 高频 ${snap.cadence.activeMs}ms）`,
-  );
+  // ⚠️ `cadence.ms/share` **只在 pixel 模式累计**（api 模式的间隔由 2999 状态机决定，不是
+  //    节流策略给的）—— 拿它俩去读 api 会话会得到"常态 0% / probe 0% / 高频 0%"，
+  //    看起来像"节流没工作"。api 模式该看的是**取帧间隔分布**与"零取帧"这条硬指标。
+  if (snap.trigger.mode === 'api') {
+    console.log(
+      `节流：api 触发（常态零取帧由 2999 状态机决定，pixel 节流占比不适用）；取帧间隔分布 ` +
+        intervalDistribution(report.frames.map((f) => f.intervalMs)),
+    );
+  } else {
+    console.log(
+      `节流：常态 ${(snap.cadence.share.idle * 100).toFixed(0)}% / probe ${(snap.cadence.share.probe * 100).toFixed(0)}%` +
+        ` / 高频 ${(snap.cadence.share.active * 100).toFixed(0)}%（常态 ${snap.cadence.idleMs}ms ↔ 高频 ${snap.cadence.activeMs}ms）`,
+    );
+  }
   console.log(
     `触发：模式 ${snap.trigger.mode}、采样 ${snap.trigger.samples} 次、结束时 ${snap.trigger.captureAtEnd ? '仍开着截屏' : '常态不截屏'}` +
       `、待选 [${snap.trigger.pendingAtEnd.join(',')}]${snap.trigger.apiFallback ? '、⚠ 已退回像素节流' : ''}`,
@@ -298,7 +354,10 @@ async function main(): Promise<void> {
   console.log(
     `识别：调用 ${report.recognizeCalls} 次` +
       (report.labelsUnavailable > 0 ? `，其中 ${report.labelsUnavailable} 次无法重跑（缺原生帧/原生帧过期）` : '') +
-      (report.staleNativeFrames > 0 ? `（原生帧过期 ${report.staleNativeFrames} 次）` : ''),
+      (report.staleNativeFrames > 0 ? `（原生帧过期 ${report.staleNativeFrames} 次）` : '') +
+      (report.nativeLookahead > 0
+        ? `；原生帧 ${report.nativeLookahead} 次取自"请求之后那一张"（录制是请求现场抓帧，正常）`
+        : ''),
   );
   console.log(
     `标签：推送 ${report.labels.filter((l) => l.active).length} 次 / 清空 ${report.labels.filter((l) => !l.active).length} 次` +
@@ -310,17 +369,52 @@ async function main(): Promise<void> {
     );
   }
 
-  if (golden) {
-    const cmp = compareGolden(report, golden);
-    console.log(`\n与 golden（${cmp.source}）对比：`);
-    console.log(
-      `  门控：golden 认定 ${cmp.goldenFoundFrames} 帧 / 回放 ${cmp.replayFoundFrames} 帧` +
-        `　出现 ${cmp.goldenOpenEdges} vs ${cmp.replayOpenEdges} 次、消失 ${cmp.goldenCloseEdges} vs ${cmp.replayCloseEdges} 次`,
+  if (cmp) {
+    console.log(`\n与 golden（${cmp.source}）对比（容差 ${cmp.toleranceMs}ms，双向配对）：`);    console.log(
+      `  门控：认定面板 ${cmp.goldenFoundFrames} vs ${cmp.replayFoundFrames} 帧` +
+        `、出现 ${cmp.goldenOpenEdges} vs ${cmp.replayOpenEdges} 次、消失 ${cmp.goldenCloseEdges} vs ${cmp.replayCloseEdges} 次`,
     );
-    console.log(`  边沿配对（容差 ${cmp.toleranceMs}ms）：命中 ${cmp.edgeMatched} / golden ${cmp.goldenEdges} 条`);
+    console.log(
+      `  整批识别锚点：命中 ${cmp.openEdgeMatched} / golden ${cmp.goldenRecognitions} 条` +
+        `（缺 ${cmp.openEdgeMissing}、回放多 ${cmp.openEdgeExtra}）`,
+    );
+    console.log(
+      `  单卡刷新：命中 ${cmp.rerollMatched} / golden ${cmp.goldenRerolls} 条` +
+        `（**缺 ${cmp.rerollMissing}**、回放多 ${cmp.rerollExtra}）、识别调用 ${cmp.replayRecognizeCalls} 次 vs golden ${cmp.goldenRecognitions} 条`,
+    );
+    if (cmp.diffs.length === 0) console.log('  ✔ 逐项一致');
     for (const d of cmp.diffs.slice(0, limit)) console.log(`    ${d}`);
   } else {
     console.log('\n（没有 golden：会话目录里放一份录制当时的 report.json 即可做逐项比对）');
+  }
+
+  // ── 重连判定（把录到的相位序列喂给线上纯判定；见 replayReconnectTimeline）────
+  const recon = replayReconnectTimeline(session.phase);
+  if (recon.samples === 0) {
+    console.log('\n重连判定：会话没有录到相位采样 → 无法判定（**不是**"通过"）');
+  } else {
+    const sawReconnect = recon.observed.includes(RECONNECT_PHASE);
+    console.log(
+      `\n重连判定（相位序列 ${recon.samples} 条` +
+        (recon.unreadable > 0 ? `，其中 ${recon.unreadable} 条读不到相位` : '') +
+        `：${recon.observed.join('/') || '—'}）：Reconnect 记账 ${recon.gaps} 次、恢复动作 ${recon.recoveries} 次`,
+    );
+    if (!sawReconnect && recon.recoveries > 0) {
+      console.log(
+        '  ❌ 录到的相位里没有 Reconnect 却触发了恢复动作 —— 对局中途误触发会让链路自己重启',
+      );
+    } else {
+      console.log(
+        `  ✔ 恢复动作 ${recon.recoveries} 次，与录到的相位一致` +
+          (sawReconnect
+            ? '（录到过 Reconnect：回到对局中恢复一次是预期的）'
+            : '（没有 Reconnect → 必须为 0）'),
+      );
+    }
+    console.log(
+      '  （恢复时具体做什么取决于**当时**的链路状态：failed → 重置熔断；在跑但抓帧不可用 → 停掉重建。' +
+        '那个状态没有录进会话，所以这里只报"该不该恢复"。）',
+    );
   }
 
   console.log('\n控制器日志（前 %d 行）：', Math.min(limit, logLines.length));
@@ -331,89 +425,15 @@ async function main(): Promise<void> {
 /* golden 比对（录制当时的 report.json）                                */
 /* ------------------------------------------------------------------ */
 
-interface Golden {
-  readonly source: string;
-  readonly counts: { foundFrames: number; openEdges: number; closeEdges: number };
-  readonly edges: readonly { atMs: number; kind: 'open' | 'close' }[];
-}
-
-function loadGolden(path: string): Golden {
-  const o = JSON.parse(readFileSync(path, 'utf8')) as {
-    counts?: { foundFrames?: number; openEdges?: number; closeEdges?: number };
-    labels?: { events?: Array<{ atMs: number; origin: string }> };
-    samples?: number;
-  };
-  return {
-    source: path,
-    counts: {
-      foundFrames: o.counts?.foundFrames ?? 0,
-      openEdges: o.counts?.openEdges ?? 0,
-      closeEdges: o.counts?.closeEdges ?? 0,
-    },
-    // 录制产物没有独立的边沿表：用"标签事件的时刻"当近似锚点（origin=open 就是开边沿）
-    edges: (o.labels?.events ?? [])
-      .filter((e) => e.origin === 'open')
-      .map((e) => ({ atMs: e.atMs, kind: 'open' as const })),
-  };
-}
-
-function compareGolden(
-  report: Awaited<ReturnType<typeof runReplaySession>>,
-  golden: Golden,
-): {
-  source: string;
-  goldenFoundFrames: number;
-  replayFoundFrames: number;
-  goldenOpenEdges: number;
-  replayOpenEdges: number;
-  goldenCloseEdges: number;
-  replayCloseEdges: number;
-  goldenEdges: number;
-  edgeMatched: number;
-  toleranceMs: number;
-  diffs: readonly string[];
-} {
-  const toleranceMs = 1000; // 录制是 1Hz 采样，边沿时刻本身有 ±1 个采样周期的粒度
-  const diffs: string[] = [];
-  // ⚠️ **双向**配对（审查发现）：只遍历 golden 的话，"回放多出来的边沿"永远不会被报，
-  //    于是 `mismatchCount === 0` 被误读成"两边等价"。
-  const near = (a: { atMs: number; kind: string }, b: { atMs: number; kind: string }): boolean =>
-    a.kind === b.kind && Math.abs(a.atMs - b.atMs) <= toleranceMs;
-  let matched = 0;
-  for (const g of golden.edges) {
-    if (report.edges.some((e) => near(e, g))) matched++;
-    else diffs.push(`golden 的 ${g.kind} 边沿 @${mmss(g.atMs)} 在回放里找不到（±${toleranceMs}ms）`);
-  }
-  let replayOnly = 0;
-  for (const e of report.edges) {
-    if (!golden.edges.some((g) => near(g, e))) replayOnly++;
-  }
-  if (replayOnly > 0) {
-    diffs.push(
-      `回放多出 ${replayOnly} 条边沿（golden 里没有）—— 没到面板就判开、或边沿时刻偏移超过容差`,
-    );
-  }
-  const counts = report.snapshot.counts;
-  if (golden.counts.openEdges !== counts.openEdges) {
-    diffs.push(
-      `面板出现次数不一致：golden ${golden.counts.openEdges} vs 回放 ${counts.openEdges}` +
-        '（帧库只覆盖录到的那些帧 —— 改了采样节奏时这里必然有差）',
-    );
-  }
-  return {
-    source: golden.source,
-    goldenFoundFrames: golden.counts.foundFrames,
-    replayFoundFrames: counts.foundFrames,
-    goldenOpenEdges: golden.counts.openEdges,
-    replayOpenEdges: counts.openEdges,
-    goldenCloseEdges: golden.counts.closeEdges,
-    replayCloseEdges: counts.closeEdges,
-    goldenEdges: golden.edges.length,
-    edgeMatched: matched,
-    replayOnlyEdges: replayOnly,
-    toleranceMs,
-    diffs,
-  };
+/**
+ * 读一份 golden。**解析与双向比对都在 `apps/overlay/src/replay/session-golden.ts`**，
+ * 那里有 CI 单测 —— 这段以前住在脚本里（`pnpm test` 一行覆盖不到），于是读错了
+ * 一整轮都没人发现：录制器写的是 `report.json.labels = [ { atMs, origin } ]`（数组），
+ * 而它读的是 `labels.events`（不存在）→ golden 的边沿恒为空，每次回放都打印
+ * "命中 0 / golden 0 条" + "回放多出 N 条边沿"（2026-10-12 拿真机会话复核时抓到）。
+ */
+function loadGolden(path: string): GoldenReport {
+  return parseGoldenReport(readFileSync(path, 'utf8'), path);
 }
 
 /** 合成会话模式也会用到：把会话目录写出来供人工复核（`--dump=<dir>`）。 */

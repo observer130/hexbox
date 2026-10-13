@@ -303,7 +303,7 @@ test('闭环回放：原生帧 + 英雄留档 + 强度表 → 真的把标签画
     for (const t of [1000, 1250]) files.push({ atMs: t, bmp: panel, kind: 'native' });
     let seq = 0;
     for (const f of files) {
-      const file = `f\${String(seq).padStart(3, '0')}.png`;
+      const file = `f${String(seq).padStart(3, '0')}.png`;
       writeFileSync(join(dir, file), encodeGrayPng({ width: f.bmp.width, height: f.bmp.height, gray: bitmapToGray(f.bmp) }, 2));
       frames.push({ seq, atMs: f.atMs, kind: f.kind, file, crop: { x: 0, y: 0, w: 1, h: 1 } });
       seq++;
@@ -312,8 +312,8 @@ test('闭环回放：原生帧 + 英雄留档 + 强度表 → 真的把标签画
     // 指纹库：用**同一个 `readAugmentNameStrip`** 从原生帧上算（与构建期脚本同规格）
     const library: AugmentNameFingerprint[] = CARD_XS.map((x, i) => {
       const strip = readAugmentNameStrip(panel, { x, y: CARD_Y, w: CARD_W, h: CARD_H });
-      assert.ok(strip, `卡\${i + 1} 没读出名字位图`);
-      return { augmentId: 100 + i, name: `测试海克斯\${i + 1}`, width: strip.width, height: strip.height, bits: strip.bits };
+      assert.ok(strip, `卡${i + 1} 没读出名字位图`);
+      return { augmentId: 100 + i, name: `测试海克斯${i + 1}`, width: strip.width, height: strip.height, bits: strip.bits };
     });
 
     const meta = parseSessionMeta(
@@ -364,7 +364,7 @@ test('闭环回放：原生帧 + 英雄留档 + 强度表 → 真的把标签画
     });
 
     // ① 识别真的跑了（而不是"缺原生帧"）
-    assert.equal(report.labelsUnavailable, 0, `不该报缺原生帧：\${JSON.stringify(report.snapshot.recognized.map((r) => r.reason))}`);
+    assert.equal(report.labelsUnavailable, 0, `不该报缺原生帧：${JSON.stringify(report.snapshot.recognized.map((r) => r.reason))}`);
     assert.ok(report.recognizeCalls >= 1);
     assert.ok(
       report.snapshot.recognized.some((r) => r.ok && r.cards.some((c) => c.augmentId !== null)),
@@ -373,11 +373,11 @@ test('闭环回放：原生帧 + 英雄留档 + 强度表 → 真的把标签画
 
     // ② 标签真的推了（三张卡都有档位）—— 这就是"回放能一路跑到标签"的证据
     const pushed = report.labels.filter((l) => l.active);
-    assert.ok(pushed.length >= 1, `一次都没推标签：\${JSON.stringify(report.labels)}`);
-    assert.deepEqual(pushed[0]!.texts, ['S', 'A', 'B'], `档位不对：\${JSON.stringify(pushed[0])}`);
+    assert.ok(pushed.length >= 1, `一次都没推标签：${JSON.stringify(report.labels)}`);
+    assert.deepEqual(pushed[0]!.texts, ['S', 'A', 'B'], `档位不对：${JSON.stringify(pushed[0])}`);
     assert.ok(
       pushed[0]!.subs.every((s) => s.startsWith('选取率')),
-      `选取率行丢了：\${JSON.stringify(pushed[0]!.subs)}`,
+      `选取率行丢了：${JSON.stringify(pushed[0]!.subs)}`,
     );
     assert.equal(report.snapshot.champion.championId, 79);
   } finally {
@@ -394,13 +394,13 @@ test('闭环回放：会话**没有**英雄留档 → 一张标签都不画（�
     for (let t = 0; t <= 1500; t += 250) files.push({ atMs: t, bmp: t >= 1000 ? panel : closedFrame(), kind: 'gating' });
     files.push({ atMs: 1000, bmp: panel, kind: 'native' });
     const frames: AugmentSessionFrameRef[] = files.map((f, i) => {
-      const file = `n\${String(i).padStart(3, '0')}.png`;
+      const file = `n${String(i).padStart(3, '0')}.png`;
       writeFileSync(join(dir, file), encodeGrayPng({ width: f.bmp.width, height: f.bmp.height, gray: bitmapToGray(f.bmp) }, 2));
       return { seq: i, atMs: f.atMs, kind: f.kind, file, crop: { x: 0, y: 0, w: 1, h: 1 } };
     });
     const library: AugmentNameFingerprint[] = CARD_XS.map((x, i) => {
       const strip = readAugmentNameStrip(panel, { x, y: CARD_Y, w: CARD_W, h: CARD_H })!;
-      return { augmentId: 200 + i, name: `x\${i}`, width: strip.width, height: strip.height, bits: strip.bits };
+      return { augmentId: 200 + i, name: `x${i}`, width: strip.width, height: strip.height, bits: strip.bits };
     });
     const report = await runReplaySession({
       session: {
@@ -441,6 +441,136 @@ test('闭环回放：会话**没有**英雄留档 → 一张标签都不画（�
   }
 });
 
+/* ------------------------------------------------------------------ */
+/* 原生帧的时点（真机踩过：它比识别请求晚几十毫秒）                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 造一个"面板帧 + 指定时点的原生帧"的会话，跑一次回放。
+ *
+ * @param nativeAtMs  原生帧的采集时刻（相对会话零点）
+ * @param panelFromMs 面板从这一刻起在屏（默认 1000：首次识别请求就在它附近）
+ */
+async function replayWithNativeAt(
+  nativeAtMs: number,
+  panelFromMs = 1000,
+): Promise<{
+  report: Awaited<ReturnType<typeof runReplaySession>>;
+  cleanup: () => void;
+}> {
+  const dir = mkdtempSync(join(tmpdir(), 'hexbox-replay-native-'));
+  const panel = panelFrame();
+  CARD_XS.forEach((x, i) =>
+    paintName(panel, { x, y: CARD_Y, w: CARD_W, h: CARD_H }, PATTERNS_FOR_NOCHAMP[i]!),
+  );
+  const files: Array<{ atMs: number; bmp: Bitmap; kind: 'gating' | 'native' }> = [];
+  for (let t = 0; t <= panelFromMs + 3000; t += 250) {
+    files.push({ atMs: t, bmp: t >= panelFromMs ? panel : closedFrame(), kind: 'gating' });
+  }
+  files.push({ atMs: nativeAtMs, bmp: panel, kind: 'native' });
+  const frames = files.map((f, i) => {
+    const file = `v${String(i).padStart(3, '0')}.png`;
+    writeFileSync(join(dir, file), encodeGrayPng({ width: f.bmp.width, height: f.bmp.height, gray: bitmapToGray(f.bmp) }, 2));
+    return { seq: i, atMs: f.atMs, kind: f.kind, file, crop: { x: 0, y: 0, w: 1, h: 1 } };
+  });
+  const library: AugmentNameFingerprint[] = CARD_XS.map((x, i) => {
+    const strip = readAugmentNameStrip(panel, { x, y: CARD_Y, w: CARD_W, h: CARD_H })!;
+    return { augmentId: 400 + i, name: `测试海克斯${i + 1}`, width: strip.width, height: strip.height, bits: strip.bits };
+  });
+  const report = await runReplaySession({
+    session: {
+      dir,
+      meta: parseSessionMeta(
+        {
+          trigger: 'pixel',
+          gating: { targetScale: 1 / 3, minWidth: 960, width: W, height: H },
+          region: PANEL_ROW_REGION,
+          altRegion: PANEL_ROW_REGION,
+          display: { width: W, height: H, scaleFactor: 1, workArea: { x: 0, y: 0, width: W, height: H } },
+          champion: { id: 79, source: 'activePlayer-raw', name: '酒桶' },
+        },
+        { region: PANEL_ROW_REGION, altRegion: PANEL_ROW_REGION },
+      ),
+      frames,
+      api: [],
+      edges: [],
+      phase: [],
+      notes: [],
+    },
+    library,
+    log: () => undefined,
+    loadData: async () => ({
+      dataset: null,
+      builds: {
+        meta: { source: 'test', dataDate: '20261005', fetchedAt: '', count: 1 },
+        details: [
+          {
+            championId: 79,
+            augments: [0, 1, 2].map((i) => ({
+              rank: i + 1,
+              augmentId: 400 + i,
+              level: 'kGold',
+              pickRate: 0.1 + i * 0.05,
+              tier: ['S', 'A', 'B'][i]!,
+            })),
+            build: { start: [], startCombo: [], shoes: [], core: [] },
+            skills: [],
+            partners: [],
+            dataDate: '20261005',
+          },
+        ],
+      },
+    }),
+  });
+  return { report, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+test('★回归：原生帧是"识别请求现场抓的"（比请求晚几十毫秒）→ 不许判成过期', async () => {
+  // 真机会话 20261012-213155 实测：5 次单卡重随的"请求 → 原生帧" = 1/56/56/58/1ms
+  // （`capture/worker.ts` 的 `readFull()` 是收到请求之后才 drawImage + getImageData，
+  // 所以原生帧的 atMs 天生**晚于**请求时刻）。只按"不晚于当前时刻"选帧的回放会把
+  // 每一次识别都判成"缺原生帧/原生帧过期" → 7 张标签全丢（本会话实测 3 推 10 清）。
+  const { report, cleanup } = await replayWithNativeAt(1300); // 首次识别请求在 ~1000ms
+  try {
+    assert.equal(
+      report.labelsUnavailable,
+      0,
+      `原生帧晚于请求是常态，不许报缺帧：${JSON.stringify(report.snapshot.recognized.map((r) => r.reason))}`,
+    );
+    assert.ok(report.nativeLookahead > 0, '这次识别必须取自"请求之后那一张"（否则就是取到了别的帧）');
+    const rec = report.snapshot.recognized[0]!;
+    assert.ok(rec.ok);
+    assert.deepEqual(
+      rec.cards.map((c) => c.name),
+      ['测试海克斯1', '测试海克斯2', '测试海克斯3'],
+      '认出来的名字必须来自那张原生帧',
+    );
+    assert.ok(report.labels.some((l) => l.active), '识别成功就必须真的画出标签');
+  } finally {
+    cleanup();
+  }
+});
+
+test('★诚实边界：只有"很久以前"的原生帧 → 必须报过期，不许拿旧帧假装认出来', async () => {
+  // 面板在 5000ms 起在屏（首次识别请求 ≈5000ms），唯一的原生帧在 2000ms
+  // —— 比请求早 3000ms，远超 MAX_NATIVE_FRAME_AGE_MS(1500)。拿它重认只会得到
+  // **刷新前**的画面，报告却会写成"识别成功"（真机审查发现过的假绿）。
+  const { report, cleanup } = await replayWithNativeAt(2000, 5000);
+  try {
+    assert.ok(
+      report.snapshot.recognized.length > 0 && report.snapshot.recognized.every((r) => !r.ok),
+      `拿旧帧"识别成功"就是假绿：${JSON.stringify(report.snapshot.recognized.map((r) => ({ ok: r.ok, why: r.reason })))}`,
+    );
+    assert.ok(
+      report.snapshot.recognized.some((r) => /原生帧过期/.test(r.reason)),
+      `必须明说"过期"而不是"认不出"：${JSON.stringify(report.snapshot.recognized.map((r) => r.reason))}`,
+    );
+    assert.equal(report.labels.filter((l) => l.active).length, 0, '没有可信的原生帧就不许画标签');
+  } finally {
+    cleanup();
+  }
+});
+
 test('闭环回放：没有帧库时不抛异常，并如实报告缺口', async () => {
   const session: LoadedSession = {
     dir: join(tmpdir(), 'hexbox-nonexistent-session'),
@@ -456,4 +586,85 @@ test('闭环回放：没有帧库时不抛异常，并如实报告缺口', async
   assert.equal(report.edges.length, 0);
   assert.ok(report.gaps > 0, '一帧都没有时应当报缺口，而不是静默"跑完了"');
   assert.equal(report.snapshot.counts.openEdges, 0);
+});
+
+/* ------------------------------------------------------------------ */
+/* 时基（真机踩过：整份报告被平移 6.4 秒）                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * **回放的虚拟时钟必须从会话零点起步**，否则控制器所有 `x - startedAt` 的字段
+ * （`recognized` / `reroll.events` / `apiLog`）相对 `edges.jsonl`、`frames.idx.jsonl`
+ * 和标签推送时刻整体平移 —— 真机会话 `20261012-213155` 上表现为：
+ * "单卡刷新比面板出现还早 3.5 秒"，与 golden 对比时 5 次重随**每次都差 6392ms**。
+ *
+ * 这里刻意造一个"会话第 4000ms 才有第一份留档"的会话：旧写法（起点 = 第一个事件 - 1000）
+ * 会把 `startedAt` 放在 3000，识别时刻因此比开边沿还早 —— 正是上面那种自相矛盾。
+ */
+test('★回归：回放时基 = 会话零点（不许把"第一个事件之前 1 秒"当起点）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hexbox-replay-tbase-'));
+  try {
+    const panel = panelFrame();
+    PATTERNS_FOR_NOCHAMP.forEach((p, i) =>
+      paintName(panel, { x: CARD_XS[i]!, y: CARD_Y, w: CARD_W, h: CARD_H }, p),
+    );
+    const files: Array<{ atMs: number; bmp: Bitmap; kind: 'gating' | 'native' }> = [];
+    for (const t of [4000, 4500]) files.push({ atMs: t, bmp: closedFrame(), kind: 'gating' });
+    for (let t = 5000; t <= 6500; t += 250) files.push({ atMs: t, bmp: panel, kind: 'gating' });
+    // 原生帧：识别要它（缺了会如实报"缺原生帧"，那就测不到时基了）
+    files.push({ atMs: 5000, bmp: panel, kind: 'native' });
+    const frames = files.map((f, i) => {
+      const file = `t${String(i).padStart(3, '0')}.png`;
+      writeFileSync(join(dir, file), encodeGrayPng({ width: f.bmp.width, height: f.bmp.height, gray: bitmapToGray(f.bmp) }, 2));
+      return { seq: i, atMs: f.atMs, kind: f.kind, file, crop: { x: 0, y: 0, w: 1, h: 1 } };
+    });
+    const library: AugmentNameFingerprint[] = CARD_XS.map((x, i) => {
+      const strip = readAugmentNameStrip(panel, { x, y: CARD_Y, w: CARD_W, h: CARD_H })!;
+      return { augmentId: 300 + i, name: `t${i}`, width: strip.width, height: strip.height, bits: strip.bits };
+    });
+
+    const report = await runReplaySession({
+      session: {
+        dir,
+        meta: parseSessionMeta(
+          {
+            trigger: 'pixel',
+            region: PANEL_ROW_REGION,
+            altRegion: PANEL_ROW_REGION,
+            display: { width: W, height: H, scaleFactor: 1, workArea: { x: 0, y: 0, width: W, height: H } },
+          },
+          { region: PANEL_ROW_REGION, altRegion: PANEL_ROW_REGION },
+        ),
+        frames,
+        api: [],
+        edges: [],
+        phase: [],
+        notes: [],
+      },
+      library,
+      log: () => undefined,
+      loadData: async () => ({ dataset: null, builds: null }),
+    });
+
+    assert.equal(report.startMs, 0, '真机会话的虚拟时钟起点就是会话零点');
+    assert.equal(report.leadInMs, 4000, '会话零点 → 第一个留档事件的距离要如实报出来');
+    const opened = report.edges.find((e) => e.kind === 'open');
+    assert.ok(opened, `没有开边沿：${JSON.stringify(report.edges)}`);
+    const rec = report.snapshot.recognized;
+    assert.ok(rec.length > 0, '开边沿必须触发识别');
+    assert.ok(
+      rec[0]!.atMs >= opened.atMs - 100,
+      `识别时刻比面板出现还早 → 报告被整体平移了：识别 ${rec[0]!.atMs} vs 开边沿 ${opened.atMs}`,
+    );
+    // 同一份报告里的字段必须在同一个时基上（识别行与标签推送时刻是同一次事件）
+    const pushed = report.labels.find((l) => l.active);
+    if (pushed) {
+      assert.ok(
+        Math.abs(pushed.atMs - rec[0]!.atMs) <= 600,
+        `标签推送时刻与识别时刻不在同一时基：${pushed.atMs} vs ${rec[0]!.atMs}`,
+      );
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
