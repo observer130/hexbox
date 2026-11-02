@@ -17,9 +17,10 @@
 #
 # 3. 数据（`data/*.json`）走 `extraResources` → 落到 `resources/data/`。
 #    主进程的 resolveDataDir() 会向上遍历找到它（见 src/main/index.ts），
-#    所以**运行时不需要额外配置**。数据更新 = 在开发仓库重跑
-#    `pnpm sync` / `pnpm templates` 后重新打包；也可以让用户把新数据
-#    放进 `%LOCALAPPDATA%\hexbox\data\`（优先级更高，免重新打包）。
+#    所以**运行时不需要额外配置**。这里打进去的是**基线快照**（新装用户开箱即用）。
+#    日常更新 = 托盘「更新数据」（`main/data-update-flow.ts`，2026-11）：
+#    写到 `%LOCALAPPDATA%\hexbox\data\`（优先级更高），不需要重新打包；
+#    发新版时再重跑 `pnpm sync` / `pnpm templates` 刷新基线快照。
 #
 # 4. `requestedExecutionLevel` 见 docs/RELEASE-WINDOWS.md §权限：
 #    国服（WeGame）客户端的 `LeagueClient\lockfile` 实测为 **0 字节**，
@@ -62,17 +63,19 @@ files:
   - '!dist/debug-*.cjs'
   - '!dist/phase-probe.cjs'
 
-# 运行时数据快照（gitignore 的 pnpm sync / pnpm templates 产物）
-# 只带**运行时真正会读**的 5 个文件；name-fingerprints.json 是构建期中间产物
-# （它的内容已经被 pnpm templates 编进 templates.json），不进包。
+# 数据**不再随安装包发布**（2026-11 起，用户决策：数据与安装位置解耦）：
+#   数据放在用户文档目录 `文档\hexbox\data`（见 main/user-paths.ts 与
+#   vision/data-location.ts），首次运行由托盘「更新数据」下载。
+#   因此安装包少了 ~6MB；升级/卸载也不会连带删掉数据。
+#   旧版本内置的 `resources\data` 仍被当作**只读回退**识别，升级用户无感。
 extraResources:
+  # 唯一还随包的数据文件：海克斯名字指纹库（0.24 MB）。
+  # 它由 `scripts/render-augment-name-fingerprints.ps1` 在**构建期**从系统字体生成，
+  # 运行时无法重建（不是从上游拉的数据），缺了它 = 局内认不出海克斯名 → 一张强度标签都不画。
+  # 主进程会在启动时把它拷进用户数据目录（`main/index.ts` 的 ensureAugmentLibrary）。
   - from: ../../data
     to: data
     filter:
-      - dataset.json
-      - rankings.json
-      - builds.json
-      - templates.json
       - augment-names.json
   # 托盘图标（`scripts/make-tray-icon.py` 生成；随仓库提交）。
   # ⚠️ 必须走 extraResources：`files` 只放 esbuild 产物，而 esbuild **不搬静态资源**

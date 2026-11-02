@@ -20,7 +20,7 @@ pnpm --filter @hexbox/overlay package:dir     # 只出免安装目录（验证�
 | `release/hexbox-portable-0.1.0-x64.exe` | **77.00 MB** | 便携版（自解压到临时目录后运行） |
 | `release/win-unpacked/` | 276.1 MB（含 Electron 运行时） | 免安装目录，`hexbox.exe` 可直接跑 |
 | `release/…/resources/app.asar` | **0.30 MB** | 只有 `dist/**` + `package.json` |
-| `release/…/resources/data/` | 6.26 MB | 数据快照（见 §三） |
+| `release/…/resources/data/` | 6.26 MB（2026-11 起**不再打入**） | 旧版数据快照；现在数据在 `文档\hexbox\data`（见 §三） |
 
 配置在 **`apps/overlay/electron-builder.yml`**（不新增 `apps/desktop`：
 本包已经是 workspace 项目、已经声明 `main=dist/main/index.cjs`，
@@ -55,71 +55,72 @@ capture\worker.js,*.html,styles.css}  \package.json
 > 顺带这也是"**不可能把 `debug/`（真机截图）或令牌打进安装包**"的机制保证：
 > 白名单只放 `dist/`，`debug/`、`data/`、`.env*` 根本不在候选里。
 
-## 三、运行时数据（最关键的一条）
+## 三、运行时数据（2026-11 起：放用户文档目录，不随包）
 
-运行时读 `data/` 下 5 个文件（`resolveDataDir()` 向上遍历找 `dataset.json`）：
-
-| 文件 | 大小 | 谁在读 |
-|---|---|---|
-| `builds.json` | 4.47 MB | 局内海克斯强度表 + 出装（`augmentStrength` / `championBuild`） |
-| `dataset.json` | 0.87 MB | 图鉴（海克斯/英雄/装备 join） |
-| `templates.json` | 0.46 MB | 头像模板 + 名字指纹（`pnpm templates` 产物） |
-| `augment-names.json` | 0.24 MB | 局内海克斯名 OCR 指纹库 |
-| `rankings.json` | 0.22 MB | 选人胜率榜 |
-| （`name-fingerprints.json` 0.09 MB） | — | **不进包**：它已被 `pnpm templates` 编进 `templates.json` |
-
-合计 **6.26 MB**（对 77 MB 的安装包可忽略），所以**整套打进包**，不做子集裁剪。
-
-### 方案 ①（**采用**）：数据快照走 `extraResources`
-
-```yaml
-extraResources:
-  - from: ../../data
-    to: data
-    filter: [dataset.json, rankings.json, builds.json, templates.json, augment-names.json]
-```
-
-落到 `…\resources\data\`，而 `resolveDataDir()` 的向上遍历**正好会在那里命中**
-（`app.asar\dist\main` → `…\resources\data`），**运行时不需要任何配置**。
-本机实测（打包后的程序自己打的日志）：
+运行时读 5 个文件；**它们不再打进安装包**（唯一例外：`augment-names.json`
+0.24 MB —— 构建期从系统字体生成、运行时无法重建，作为种子随包），
+而是放在用户能看见、能备份的位置：
 
 ```text
-[hexbox] 数据目录: D:\…\release-verify\win-unpacked\resources\data
-[hexbox] 图鉴已加载: 海克斯(cn) 248 / 英雄 245 / 装备 870
-[hexbox] 排行榜已加载: 英雄榜 173 / 海克斯榜 211  统计日期 20261005
-[hexbox] 英雄详情已加载: 173 个英雄  统计日期 20261005
-[hexbox] 名字指纹 245 个 / 头像模板 245 个已加载
+文档\hexbox\data\
+  builds.json        4.47 MB   局内海克斯强度表 + 出装
+  dataset.json       0.87 MB   图鉴
+  templates.json     0.46 MB   头像模板 + 名字指纹（pnpm templates 产物）
+  augment-names.json 0.24 MB   海克斯名 OCR 指纹库
+  rankings.json      0.22 MB   选人胜率榜
 ```
 
-**数据更新 = 在开发仓库重跑 `pnpm sync` / `pnpm templates` 后重新打包**
-（数据是日更的静态数据；UI 里本来就带"统计日期"）。
+（合计 6.26 MB；`name-fingerprints.json` 是构建期中间产物，已被 `pnpm templates`
+编进 `templates.json`，不进目录。同目录还有 `data-check.json`：启动检查的节流状态，
+删掉只会让下次启动重新检查一次。）
 
-**不想重新打包的更新方式**（已实现，优先级高于安装目录里的快照）：
-把新的 5 个 json 放进 **`%LOCALAPPDATA%\hexbox\data\`**
-（只要该目录里有 `dataset.json` 就整套用它）：
+### 位置与优先级（`vision/data-location.ts`，纯函数 + 单测）
 
-```powershell
-# 开发仓库里先同步，再拷给已安装的程序
-pnpm sync; pnpm templates
-copy data\*.json "$env:LOCALAPPDATA\hexbox\data\"
-```
+| # | 读哪里 | 何时 |
+|---|---|---|
+| 1 | `HEXBOX_DATA_DIR` / `--data-dir` | 显式指定（读写都用它） |
+| 2 | **`文档hexboxdata`** | 新默认；首次启动自动创建（后台下载） |
+| 3 | `%LOCALAPPDATA%\hexbox\data` | 0.2 及以前的用户覆盖目录（**只读回退**） |
+| 4 | `<安装目录>\resources\data` | 旧版内置快照（**只读回退**） |
+| 5 | 开发仓库 `data/` | 仅开发版 |
 
-优先级：`HEXBOX_DATA_DIR` / `--data-dir` → `%LOCALAPPDATA%\hexbox\data`
-→ 向上遍历（打包后 = `resources\data`）。
+**写入目标永远是 1/2**（开发版也写文档目录；仓库 `data/` 只作只读基线）——**绝不写安装目录**：
+升级/卸载会整个删掉，Program Files 布局下还不可写。读到旧位置时启动日志会提示
+"下次更新会写到文档目录"，下一次更新自然完成迁移。
 
-### 方案 ②（**不采用**，但可行性已验证）：首次运行联网同步
+为什么用 `app.getPath('documents')` 而不是拼 `%USERPROFILE%\Documents`：
+Windows 的"文档"可能被 OneDrive / 组策略重定向，只有 known folder 知道真实路径。
 
-* **Electron 跑不了 `packages/data-cli` 的 TS 源码**（硬事实，见下），
-  要复用同步逻辑必须先用 esbuild 把 CLI 打成 CJS 再随包发布；
-* 打出来的 bundle 在 Electron 的 Node 20 上**能加载**（实测 247.4 KB，
-  无语法/依赖问题），但 **`cli.ts` 的"入口保护"让它什么都不做**：
-  `isDirectRun()` 比较 `import.meta.url === pathToFileURL(argv[1]).href`，
-  而 CJS 产物里 `import.meta` 不存在 → 恒为 false（实测：进程退出 0、无输出）。
-  要真跑起来得**额外写一个 CJS 入口**（或给 CLI 加一个导出的 `cmdSync`），
-  属于"为了一个可选功能动 `packages/data-cli`"；
-* 运行时还要解决"数据写哪儿"（安装目录只读语义）与"国内数据源可达性"。
+### 首次运行与更新
 
-结论：**默认走快照**；联网同步留作后续可选项，落地时按上面的坑走。
+* 安装包只带 0.24 MB 的名字指纹库（不再带 6.26 MB 数据；压缩后约省 1–2 MB）：
+  **首次启动自动后台下载**（不弹确认框），失败/取消都不写空文件；
+* 日常更新：启动时每天最多检查一次官方统计日期，有新数据**自动后台下载**；
+  也可从托盘「更新数据」手动触发；运行中再点同一项是取消；
+* 自动更新只走托盘气泡 + 日志（不弹模态框），失败时现有数据保留。
+
+### 方案 ②（**不采用**）：让 Electron 直接跑 `packages/data-cli` 的 CLI 入口
+
+早期验证过的做法：把 CLI 打成 CJS 随包发布、在应用里加载它。**不采用**，因为：
+
+* Electron 跑不了 TS 源码（内置 Node 20 不支持 `--experimental-strip-types`）；
+* 打成 CJS 后 `cli.ts` 的入口保护 `isDirectRun()` 恒为 false（CJS 里没有 `import.meta`），
+  实测进程退出 0、什么都没做；
+* 要真跑起来得给 CLI 加一个 CJS 入口或导出 `cmdSync` —— 属于"为了复用去改 CLI 的形状"。
+
+### 方案 ③（**已实现，2026-11**）：把同步**引擎**导出，由主进程直接调用
+
+不是"跑 CLI"，而是把流水线抽成库：
+
+* `packages/data-cli/src/sync.ts` 的 `runDataSync()`（+ `runDefaultSync()` 生产装配）：
+  图鉴 → 榜单 → 详情 → 模板，全部可注入、可单测；`cli.ts` 只负责打印进度；
+* 悬浮窗的 `main/data-update-flow.ts` 在**用户确认后**调用同一条流水线，写入
+  `文档\hexbox\data`，成功后重读数据并刷新托盘；
+* 启动检查只做一次轻量探测（`fetchLatestStatDate()`：一个接口、往回最多 3 天），
+  24h 节流，**只提示不下载**；
+* 取消/退出会 `AbortSignal` 中止在途请求；任何阶段失败都**不覆盖**已有文件（空数据不落盘）。
+
+结论：数据与安装目录解耦（用户可见、可备份、升级不丢），更新由用户在托盘点一下触发。
 
 ### 硬事实：Electron 内置的 Node 不支持 `--experimental-strip-types`
 
@@ -333,7 +334,7 @@ pnpm --filter @hexbox/overlay package:win
 |---|---|
 | `%LOCALAPPDATA%\hexbox\logs\overlay.log` | 打包后**默认开启**的运行日志（>4 MB 自动轮转成 `.1`） |
 | `%LOCALAPPDATA%\hexbox\logs\selftest\` | `--label-overlay-test` 的截图与结论 |
-| `%LOCALAPPDATA%\hexbox\data\` | （可选）用户放进去的数据快照 |
+| `文档\hexbox\data\` | 数据目录（旧版 `%LOCALAPPDATA%\hexbox\data\` / `resources\data` 仍只读回退） |
 | `%TEMP%\hexbox-update\` | 「检查更新」下载下来的安装包（启动安装程序后可以删） |
 
 > 托盘菜单里的 `打开日志` / `打开数据目录` **已按用户要求移除** ——
@@ -369,18 +370,19 @@ pnpm --filter @hexbox/overlay package:win
 | 1 | **UAC 级别** | `requireAdministrator`（已实现） | 改成 `asInvoker` = 每次启动不弹窗，但国服下选人/局内标签全部不可用 |
 | 2 | **安装形态** | NSIS 每用户为主 + 便携版附带（已实现） | 只出便携版：免安装但每次自解压、且用户数据不跨次保留 |
 | 3 | **诊断入口是否随包** | 不随包，自测改成主入口的 `--label-overlay-test`（已实现） | 想要真机录制进安装版：删 2 行 `files` 排除并改 `output`，同时要把 `debug-augment.ts` 的产物目录从 `cwd\debug` 改到 `%LOCALAPPDATA%` |
-| 4 | **首次运行反馈** | 建议加：读不到凭证时弹**一次性**系统通知 + 常驻托盘图标（含"打开日志/退出"） | 现在的行为是"什么都看不到"；不加就等于用户必须知道日志路径。**已实现**：托盘菜单 = 状态 / 数据更新时间 / 检查更新 / 退出（见 §十四；`打开日志`与`打开数据目录`按用户要求**已移除**） |
+托盘菜单 = 状态 / 统计日期 / 更新数据
 | 5 | **代码签名** | 暂不签名（无证书），按 §六 的文案提示用户 | 签名后才能免 SmartScreen 警告、企业环境可用 |
-| 6 | **数据自更新** | 暂不做（快照 + 用户目录覆盖） | 做的话要先解决 §三-② 的三个坑 |
+| 6 | **数据自更新** | ✅ **已实现**（2026-11）：托盘「更新数据」+ 启动检查（方案 ③） | 首次运行下载到文档目录（只读回退旧快照）；自动静默下载未做（用户明确选择“先确认再更新”） |
 
 ## 十二、本次实测到什么程度（诚实清单）
 
-已验证（打包后的真实程序）：
+已验证（打包后的真实程序，**2026-10 的实测**；2026-11 起数据不再随包）：
 
 * 产物存在：`release\hexbox-setup-0.1.0-x64.exe` 77.46 MB、
-  `release\hexbox-portable-0.1.0-x64.exe` 77.24 MB；
+  `release\hexbox-portable-0.1.0-x64.exe` 77.24 MB（含当时的内置数据）；
 * asar 内容只有 `dist/**` + `package.json`（0.76 MB，无 node_modules/debug/data）；
-* `resources\data\` 里 5 个 json 齐备（6.26 MB）；
+* `resources\data\` 里 5 个 json 齐备（6.26 MB）—— **该目录已从打包配置移除**，
+  新安装包首次启动会询问下载到 `文档\hexbox\data`；
 * 程序能起、能读数据（图鉴 248/245/870、榜单 173/211、详情 173、模板 245+245）；
 * `--label-overlay-test` / `--log-file` / `--data-dir` 等命令行开关生效；
 * **覆盖窗自测 ✅**（窗口可见 + 置顶 + 画布出像素，退出码 0），
@@ -567,19 +569,20 @@ for (const name of HEXBOX_GRAPHICS_SWITCHES) app.commandLine.appendSwitch(name)
 * 便携版（`hexbox-portable-*.exe`）与安装包**没有逐个点开跑过**（它们内嵌同一份
   `app.asar`，而免安装目录那一份已经验过）。
 
-## 十四、托盘菜单（用户 2026-10 拍板的最终形态）
+## 十四、托盘菜单（2026-10 拍板；2026-11 新增「更新数据」）
 
-覆盖层**没有可见窗口**，托盘是它唯一的交互入口与唯一的退出方式。菜单**就这四项**
+覆盖层**没有可见窗口**，托盘是它唯一的交互入口与唯一的退出方式。菜单**就这五项**
 （中间两条分隔线），顺序与可点性都是用户逐条点名的：
 
 | # | 菜单项 | 可点 | 来源 |
 |---|---|---|---|
 | 1 | `状态：选人中 / 局内 / 等待客户端 …` | ❌ 灰 | 已有（`vision/overlay-status.ts` 的 `trayStatus()`，保留） |
-| 2 | `数据更新时间：2026-10-05（统计日期）` | ❌ 灰 | **新增**（`vision/data-update-stamp.ts`） |
+| 2 | `统计日期：2026-10-05`
 | — | 分隔线 | — | |
-| 3 | `检查更新` | ✅ | **新增**（`main/update-flow.ts`，见 §十五） |
+| 3 | `更新数据` | ✅ | **新增**（2026-11，`main/data-update-flow.ts`，见 §三-③） |
+| 4 | `检查更新` | ✅ | **新增**（`main/update-flow.ts`，见 §十五） |
 | — | 分隔线 | — | |
-| 4 | `退出` | ✅ | 已有（复用 `quitApp()`，**唯一**真退出入口） |
+| 5 | `退出` | ✅ | 已有（复用 `quitApp()`，**唯一**真退出入口） |
 
 **用户明确要求移除的两项**（原来在 1 与 3 之间）：`打开日志`、`打开数据目录`。
 移除后支持路径改为：① 日志**绝对路径在启动日志第一行打印**（保留，见 §九）；
@@ -589,21 +592,21 @@ for (const name of HEXBOX_GRAPHICS_SWITCHES) app.commandLine.appendSwitch(name)
 
 | 来源 | 何时用 | 菜单文案 |
 |---|---|---|
-| `meta.dataDate`（`rankings.json` / `builds.json`，形如 `20261005`） | 有就用（**优先**） | `数据更新时间：2026-10-05（统计日期）` |
-| `dataset.json` 的文件 mtime | 没有官方统计日期时回退 | `数据更新时间：2026-10-06（文件时间）` |
-| 两个都没有 | 数据没同步过 | `数据更新时间：未知` |
+| `meta.dataDate`（`rankings.json` / `builds.json`，形如 `20261005`） | 有就用（**优先**） | `统计日期：2026-10-05` |
+| `dataset.json` 的文件 mtime | 没有官方统计日期时回退 | `文件时间：2026-10-06` |
+| 两个都没有 | 数据没同步过 | `统计日期：未知` |
 
 为什么优先官方统计日期：`meta.dataDate` 是**腾讯官方那份榜单统计的是哪一天**
 （启动日志里那行"统计日期 20261005"就是它），用户拿它对照官方页能对上；
 而 mtime 只是"这台机器什么时候同步过"，重新同步一次或拷一份旧数据都会变。
-两者含义不同，所以回退口径**在菜单里明写**`（文件时间）`，不让它冒充官方日期。
+两者含义不同，所以回退口径用**不同前缀** `文件时间：`，不让它冒充官方统计日期。
 实现在 `vision/data-update-stamp.ts`（纯函数 + 单测；日期切片与回退优先级都被锁住），
 主进程只在 `loadDataset()` 里**定型一次**（不在每 2 秒的托盘刷新里 statSync）。
 
 ### 自测（**托盘菜单在自动化里点不了**，所以必须能打印出来）
 
 ```powershell
-& …\hexbox.exe --tray-autotest 8000        # 打印菜单逐项（文本 + 禁用/可点 + 类型）+ 六条对照 ✅/❌
+& …\hexbox.exe --tray-autotest 8000        # 打印菜单逐项（文本 + 禁用/可点 + 类型）+ 七条对照 ✅/❌
 ```
 
 证据（打包版实测，见 §十六）：
@@ -623,6 +626,9 @@ for (const name of HEXBOX_GRAPHICS_SWITCHES) app.commandLine.appendSwitch(name)
           ✅ 5 检查更新（新增、可点）
           ✅ 6 退出（保留、可点）
 ```
+
+> 上面是 **2026-10** 的实测输出（当时 6 项）。2026-11 新增 `更新数据` 后菜单为 **7 项**
+> （状态 / 统计日期 / — / 更新数据
 
 ## 十五、发布与更新（「检查更新」）
 

@@ -66,9 +66,9 @@ pnpm dev:web                                  # http://localhost:5273
 
 `pnpm typecheck` → `pnpm test` → `pnpm build` (CI runs the same on `windows-latest`).
 Node's built-in runner; `pnpm --filter @hexbox/core test` is faster. **Keep them green
-and add tests for new behavior.** Current: **982** — core 55 / vision 685 / lcu 129 /
-overlay 31 / provider-communitydragon 12 / provider-tencent 43 / data-store 17 /
-data-cli 10 (`pnpm test` is the source of truth; the overlay's Electron runtime is not
+and add tests for new behavior.** Current: **1034** — core 55 / vision 707 / lcu 129 /
+overlay 41 / provider-communitydragon 12 / provider-tencent 43 / data-store 17 /
+data-cli 30 (`pnpm test` is the source of truth; the overlay's Electron runtime is not
 testable — its tests cover replay-safe parts and the self-test scenario logic only).
 
 ## Rules that must not be broken
@@ -129,6 +129,14 @@ Read the doc named per area first; every rule below cost a real bug.
   (we write only the top 1) — that overlap is official, not a bug.
 - **No date-dependent tests** (stat dates come from the real clock); keep the
   `isDirectRun()` guard in `packages/data-cli/src/cli.ts`.
+- **Data update = one pipeline**: the overlay calls `runDefaultSync()` (data-cli) only —
+  never a second fetch path in `apps/overlay`; an empty/failed stage **never overwrites**
+  an existing file (atomic per-file writes); cancel goes through the flow's `AbortSignal`
+  so quitting never leaves hundreds of pending requests. The app writes to the **user**
+  dir (`文档\hexbox\data`, resolved by `vision/data-location.ts`; legacy
+  `%LOCALAPPDATA%\hexbox\data` and old `resources\data` are read-only fallbacks),
+  never the install dir. The installer ships **no** data: **startup auto-syncs** silently
+  (first run downloads it; later runs download only when the official date is newer).
 
 **TypeScript / style**
 
@@ -149,7 +157,7 @@ in `debug-augment.ts`.
 | `HEXBOX_AUGMENT_REROLL_POLL_MS` / `_OPEN_SAMPLE_MS` / `_IDLE_MS` / `_ACTIVE_MS` / `_PROBE_MS` / `_TAIL_MS` | open-panel sampling (400 / 4000) and cadence (1000/250/6000/20000) |
 | `HEXBOX_AUGMENT_FORENSICS` / `_CLOSED_SAMPLES` / `_API_TRACE` / `_CLOSE_HEAL_PROBE` / `_PENDING_PROBE_MS` | opt-in diagnostics; both probes are **off** (strict zero frames) |
 | `HEXBOX_AUGMENT_RECORD` / `_RECORD_DIR` / `_OUT` / `_SECONDS` / `_MAX_MINUTES` / `_DRAW` / `_BADGE` | session recording (**off**), labels (on), badge size `small` / `medium` / `large` |
-| `HEXBOX_OVERLAY_AUGMENT` / `HEXBOX_CHAMP_SELECT_CARDS` / `HEXBOX_DATA_DIR` / `HEXBOX_LOG_FILE` / `HEXBOX_SMOKE` / `HEXBOX_TRAY_*` / `HEXBOX_NOTICE_TEST` / `HEXBOX_LCU_CREDENTIALS(_FILE)` / `HEXBOX_LABEL_OVERLAY_TEST(_MS)` / `HEXBOX_DEBUG_FORCE` / `_SELFTEST_CADENCE` | chain toggle / card source `geometry` / `legacy` / `off` / data dir / log tee / smoke / tray self-test + icon / balloon test / LCU credentials / self-tests |
+| `HEXBOX_OVERLAY_AUGMENT` / `HEXBOX_CHAMP_SELECT_CARDS` / `HEXBOX_DATA_DIR` / `HEXBOX_DATA_CHECK` / `HEXBOX_LOG_FILE` / `HEXBOX_SMOKE` / `HEXBOX_TRAY_*` / `HEXBOX_NOTICE_TEST` / `HEXBOX_LCU_CREDENTIALS(_FILE)` / `HEXBOX_LABEL_OVERLAY_TEST(_MS)` / `HEXBOX_DEBUG_FORCE` / `_SELFTEST_CADENCE` | chain toggle / card source `geometry` / `legacy` / `off` / data dir（默认 `文档\hexbox\data`） / `0` = 关闭启动数据检查 / log tee / smoke / tray self-test + icon / balloon test / LCU credentials / self-tests |
 
 ## Game-free checks (no game required)
 

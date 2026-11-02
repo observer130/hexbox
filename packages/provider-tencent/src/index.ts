@@ -794,6 +794,8 @@ export interface HeroDetailOptions {
   concurrency?: number;
   /** 进度回调（预抓时打印进度）。 */
   onProgress?: (done: number, total: number) => void;
+  /** 取消信号（悬浮窗「更新数据」要能中途取消，不留 245 个挂起请求）。 */
+  signal?: AbortSignal;
 }
 
 /**
@@ -813,6 +815,7 @@ export async function fetchHeroDetail(
   const doFetch = options.fetchImpl ?? fetch;
   try {
     const res = await doFetch(`${url}?championid=${championId}`, {
+      ...(options.signal ? { signal: options.signal } : {}),
       headers: { 'user-agent': DEFAULT_UA },
     });
     if (!res.ok) return null;
@@ -852,6 +855,7 @@ export async function fetchHeroDetails(
 
   const worker = async (): Promise<void> => {
     for (;;) {
+      if (options.signal?.aborted) return;
       const i = idx++;
       if (i >= championIds.length) return;
       const id = championIds[i]!;

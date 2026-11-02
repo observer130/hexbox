@@ -66,8 +66,12 @@ export * from './augment-presence.ts';
 export * from './augment-close-confirm.ts';
 // 常驻覆盖层的**用户可见状态文案**（托盘菜单那一行 + tooltip；纯函数）
 export * from './overlay-status.ts';
-// 托盘菜单「数据更新时间」的口径（官方 meta.dataDate 优先、文件 mtime 回退）
+// 托盘菜单「统计日期」的口径（官方 meta.dataDate 优先、文件 mtime 回退）
 export * from './data-update-stamp.ts';
+// 「更新数据」（应用内同步）的阶段与文案：菜单项 / 确认框 / 结果弹窗（纯函数）
+export * from './data-update-phase.ts';
+// 数据目录的解析：文档目录优先、旧位置只读回退、写目标永远与安装目录解耦（纯函数）
+export * from './data-location.ts';
 // 「检查更新」的判据：版本比较 + GitHub Release 解析/资产挑选 + 菜单文案（纯函数）
 export * from './update-version.ts';
 export * from './update-check.ts';

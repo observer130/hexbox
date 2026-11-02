@@ -35,6 +35,11 @@ pnpm dev:overlay
 `builds.json` 单英雄详情），全部由 `pnpm sync` 预抓，**只读本地、离线可用**。
 截屏覆盖层另需 `pnpm templates` 生成的 `data/templates.json`（头像模板 + 名字指纹）。
 
+> **应用内更新**：托盘「更新数据」调用 `@hexbox/data-cli` 的 `runDefaultSync()`（与
+> `pnpm sync` **同一条流水线**），写入 `文档\hexbox\data\`（与安装包解耦）后重读；
+> 启动时每天最多检查一次官方统计日期，有新数据**自动后台下载**（不弹确认框）。
+> 实现在 `src/main/data-update-flow.ts`，文案在 `@hexbox/vision` 的 `data-update-phase.ts`。
+
 ### 截屏覆盖层（S2）
 
 技术事实、坐标换算与调参依据见 [docs/SCREENSHOT-DEV.md](../../docs/SCREENSHOT-DEV.md)；
@@ -420,7 +425,7 @@ node --experimental-strip-types scripts/preview-augment-labels.mts `
 src/main/index.ts       主进程：LCU 轮询、数据读取、窗口定位/穿透
                         + 阶段启停局内链路 + 画布归属（选人/局内）交接
                         + **单实例锁** + 托盘接线 + 「关窗口 = 最小化到托盘」
-src/main/tray.ts        **托盘图标**（常驻覆盖层唯一的交互入口）：菜单（状态/数据更新时间/
+**托盘图标**（常驻覆盖层唯一的交互入口）：菜单（状态/统计日期/
                         检查更新/退出）、气泡、退出标志 `quitting`、`close → hide` 拦截
 src/main/update-config.ts 「检查更新」的**单一来源配置**：GitHub 仓库 slug（来自 git remote）、
                         API 根（自测可覆盖）、超时
@@ -503,7 +508,8 @@ data/builds.json   ─┘
 | 托盘菜单项 | 作用 |
 |---|---|
 | `状态：等待客户端 / 选人中 / 局内 / …`（**只读、灰**） | 当前状态；来自**现成**阶段读数（纯函数 `vision/overlay-status.ts` 的 `trayStatus()`）|
-| `数据更新时间：2026-10-05（统计日期）`（**只读、灰**） | 当前数据是哪天的：优先官方统计日期 `meta.dataDate`，没有才退回 `dataset.json` 的文件时间（**文案里标明口径**）。纯函数 `vision/data-update-stamp.ts` |
+| `统计日期：2026-10-05`（**只读、灰**） | 当前数据的官方统计日期（`meta.dataDate`）；没有官方日期时显示 `文件时间：…`，两种口径不会混用 |
+| `更新数据` | 立即重新拉取图鉴/榜单/详情（确认后开始；运行中再点同一项 = 取消） |
 | `检查更新` | 查 GitHub Release 最新版本 → 有更新就下载 `hexbox-setup-*.exe` 并启动安装程序。**只在点它时才联网**（启动不检查、不自动下载）；阶段直接写在菜单文案里（`正在检查更新…` / `正在下载更新… 42%`）。见 `main/update-flow.ts` |
 | `退出` | **唯一的真退出**：`quitApp()` 置 `quitting` → `app.quit()` → 复用既有 `before-quit` 清理（停屏幕流 + 销毁 worker + 清标签）|
 
@@ -533,7 +539,7 @@ data/builds.json   ─┘
 
 ```powershell
 # 自测：8s 后模拟"关窗口"（应最小化到托盘、进程仍在），再过 3s 模拟"托盘菜单退出"
-# 日志里应看到：菜单逐项清单（文本 + 禁用/可点）→ 六条对照 ✅
+# 日志里应看到：菜单逐项清单（文本 + 禁用/可点）→ 七条对照 ✅
 #              → 两行「已最小化到托盘」→「关窗口之后进程仍在运行 = true」→「退出清理…」
 cd apps/overlay
 node run-electron.mjs . --tray-autotest 8000 --log-file D:\hexbox-dev.log   # 开发入口（实测可用）
@@ -565,8 +571,8 @@ pnpm --filter @hexbox/overlay package:dir      # 只出 release/win-unpacked（�
 
 只发**常驻覆盖层**（`dist/debug-*.cjs` 等诊断入口不进安装包）；
 "覆盖窗自测"改为主入口的命令行开关 `--label-overlay-test`。
-数据（`data/*.json`）作为快照打进 `resources/data`，日志落在
-`%LOCALAPPDATA%\hexbox\logs\overlay.log`。
+数据（图鉴/榜单/详情/模板）**不再打进安装包**：首次启动**自动后台下载**到 `文档hexboxdata`，
+之后每天最多检查一次、有新数据自动下载；也可从托盘手动触发。日志落在 `%LOCALAPPDATA%hexboxlogsoverlay.log`。
 完整事实（UAC 取舍、代码签名、数据更新、网络镜像、失败点）见
 [docs/RELEASE-WINDOWS.md](../../docs/RELEASE-WINDOWS.md)。
 

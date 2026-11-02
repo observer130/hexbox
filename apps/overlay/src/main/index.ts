@@ -16,8 +16,8 @@
  *   - 局内：在**选海克斯 / 出装** → 给该英雄口径的海克斯强度与出装建议
  */
 
-import { app, BrowserWindow, ipcMain, screen } from 'electron';
-import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import { app, BrowserWindow, dialog, ipcMain, screen } from 'electron';
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { inspect } from 'node:util';
 
@@ -524,8 +524,12 @@ import {
   credentialNoticeText,
   decideCredentialNotice,
   INITIAL_CREDENTIAL_NOTICE_STATE,
-  // 托盘「数据更新时间」的口径 + 「检查更新」的判据（纯函数，单测在 @hexbox/vision）
+  // 托盘「统计日期」的口径 + 「检查更新」的判据（纯函数，单测在 @hexbox/vision）
   dataUpdateStamp,
+  DATA_DIR_SOURCE_LABEL,
+  resolveDataLocation,
+  type DataLocation,
+  DATA_UPDATE_PHASE_IDLE,
   parseUpdateSelfTestMode,
   UPDATE_PHASE_IDLE,
   type AugmentChainState,
@@ -578,7 +582,8 @@ import {
   type TrayHandle,
 } from './tray.ts';
 import { createUpdateFlow, type UpdateFlow } from './update-flow.ts';
-import { packagedDataDir, packagedLogFile } from './user-paths.ts';
+import { createDataUpdateFlow, type DataUpdateFlow } from './data-update-flow.ts';
+import { dataCheckStatePath, documentsDataDir, packagedDataDir, packagedLogFile } from './user-paths.ts';
 
 // ---------------------------------------------------------------------------
 // 悬浮窗状态
@@ -757,7 +762,7 @@ let lastConnected = false;
 let tray: TrayHandle | null = null;
 
 /**
- * 托盘菜单「数据更新时间」那一行（纯函数 `dataUpdateStamp()` 的结果）。
+ * 托盘菜单「统计日期」那一行（纯函数 `dataUpdateStamp()` 的结果）。
  *
  * ⚠️ 在 `loadDataset()` 里**定型一次**：数据在一次运行内不变，而托盘每 2 秒
  * 刷新一次菜单 —— 放进刷新里就等于每 2 秒 statSync 一次，并且会在数据目录
@@ -774,6 +779,12 @@ let dataStamp: DataUpdateStamp = dataUpdateStamp({});
  * 启动时**不检查、不轮询、不自动下载**（用户明确要求）。
  */
 let updateFlow: UpdateFlow | null = null;
+/**
+ * 「更新数据」流程（应用内同步）。
+ *
+ * 与「检查更新」（发版）刻意分开：一个换的是数据快照，一个换的是程序本身。
+ */
+let dataUpdateFlow: DataUpdateFlow | null = null;
 
 /** 自测：启动后等多久再跑「检查更新」（让托盘/数据先就绪；避免自测日志与启动日志交错）。 */
 const UPDATE_SELFTEST_DELAY_MS = 4000;
@@ -910,42 +921,25 @@ async function positionOverlay(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
- * 解析数据目录（仓库根的 `data/`）。
+ * 数据目录解析（纯决策在 `@hexbox/vision` 的 `resolveDataLocation()`，这里只做 IO）。
  *
- * ⚠️ 真机教训（覆盖层"永远是暂无数据"的根因）：原实现只用
- * `join(app.getAppPath(), '..', '..', 'data')`。它解析成
- * `apps/overlay/data`（不存在）→ dataset/rankings/templates 全部读不到：
- *   · rankings = null  → 所有英雄都显示「暂无数据」
- *   · 名字指纹 = 空    → 卡片名字永远识别不出
- * 而 `debug:capture` 用的是另一套算法（`debug/..` = 仓库根），
- * 于是出现"调试工具能识别、实时运行不能"的诡异现象。
+ * 读取优先级（2026-11 起，与安装目录解耦）：
+ *   1. `HEXBOX_DATA_DIR` / `--data-dir`；
+ *   2. `文档\hexbox\data`（新默认 —— 用户可见、可备份，升级/卸载不删）；
+ *   3. `%LOCALAPPDATA%\hexbox\data`（0.2 及以前的用户覆盖，只读回退）；
+ *   4. 旧安装包 `resources\data`（只读回退，兼容已升级的旧版本）；
+ *   5. 开发仓库 `data/`。
  *
- * ⚠️ 也不要用固定的 `..\..\` 层级：打包后 `__dirname` 是 `dist/main`，
- * 而 `process.cwd()` 取决于启动方式（`electron .` 与直接跑 bundle 不同）。
- * 唯一稳妥的做法是**向上遍历、以 `data/dataset.json` 是否存在为准**。
- *
- * ⚠️ 打包后多两条候选（顺序即优先级）：
- *   1. `HEXBOX_DATA_DIR` / `--data-dir`（显式指定，永远最高）；
- *   2. `%LOCALAPPDATA%\hexbox\data`（**用户覆盖**：往里放一份 dataset.json
- *      就整套用它 —— 数据更新不必重新打包/重装，见 docs/RELEASE-WINDOWS.md）；
- *   3. 向上遍历（打包后会在 `…\resources\data\` 命中 extraResources 打进去的快照）。
+ * ⚠️ 历史教训：曾经用固定的 `..\..\data`，解析成 `apps/overlay/data`（不存在），
+ *    导致"覆盖层永远暂无数据"；也不能只靠 cwd（双击跑时可能是 System32）。
  */
-function resolveDataDir(): string {
-  const envDir = process.env['HEXBOX_DATA_DIR'];
-  if (envDir) return envDir;
+let cachedLocation: DataLocation | null = null;
 
-  if (app.isPackaged) {
-    const userData = packagedDataDir();
-    if (existsSync(join(userData, 'dataset.json'))) {
-      console.log(`[hexbox] 使用用户目录里的数据覆盖：${userData}`);
-      return userData;
-    }
-  }
-
+/** 开发版：向上遍历找仓库根的 `data/dataset.json`（打包版不参与）。 */
+function findDevRepoDataDir(): { dir: string | null; tried: string[] } {
   const tried: string[] = [];
   const seen = new Set<string>();
-  // `process.resourcesPath`：打包后 = `…\resources`，数据快照就在它下面的 `data/`
-  const starts = [__dirname, app.getAppPath(), process.resourcesPath, process.cwd()];
+  const starts = [__dirname, app.getAppPath(), process.cwd()];
   for (const start of starts) {
     let dir = start;
     for (let depth = 0; depth < 6; depth++) {
@@ -953,28 +947,112 @@ function resolveDataDir(): string {
       if (!seen.has(cand)) {
         seen.add(cand);
         tried.push(cand);
-        if (existsSync(join(cand, 'dataset.json'))) return cand;
+        if (existsSync(join(cand, 'dataset.json'))) return { dir: cand, tried };
       }
       const parent = join(dir, '..');
       if (parent === dir) break; // 已到盘根
       dir = parent;
     }
   }
-  console.warn(
-    `[hexbox] ⚠ 未找到 data/dataset.json（已尝试 ${tried.length} 个候选目录，例如：\n` +
-      `         ${tried.slice(0, 4).join('\n         ')}\n` +
-      '         开发环境请先运行 pnpm sync；或用 HEXBOX_DATA_DIR / --data-dir 指定数据目录；\n' +
-      `         打包版可把数据快照放进 ${packagedDataDir()}` +
-      (app.isPackaged ? '（推荐）' : '（打包后生效）') +
-      '）',
-  );
-  // 打包后不要退回 cwd（双击运行时 cwd 可能是 System32 之类）：退回用户数据目录
-  return app.isPackaged ? packagedDataDir() : join(process.cwd(), 'data');
+  return { dir: null, tried };
+}
+
+/** 解析一次并缓存（目录在一次运行内不会变）。 */
+function dataLocation(): DataLocation {
+  if (cachedLocation) return cachedLocation;
+  const dev = app.isPackaged ? { dir: null, tried: [] } : findDevRepoDataDir();
+  const legacyDir = packagedDataDir();
+  const snapshotDir = join(process.resourcesPath, 'data');
+
+  cachedLocation = resolveDataLocation({
+    isPackaged: app.isPackaged,
+    explicit: process.env['HEXBOX_DATA_DIR'] ?? null,
+    documentsDir: documentsDataDir(),
+    documentsExists: existsSync(join(documentsDataDir(), 'dataset.json')),
+    legacyDir,
+    legacyExists: existsSync(join(legacyDir, 'dataset.json')),
+    installSnapshotDir: snapshotDir,
+    installSnapshotExists: existsSync(join(snapshotDir, 'dataset.json')),
+    devRepoDir: dev.dir,
+    devRepoExists: dev.dir !== null,
+  });
+
+  if (
+    dev.dir === null &&
+    !app.isPackaged &&
+    !process.env['HEXBOX_DATA_DIR'] &&
+    !cachedLocation.legacyRead
+  ) {
+    console.warn(
+      `[hexbox] ⚠ 仓库里没找到 data/dataset.json（试过 ${dev.tried.length} 个候选）` +
+        ' —— 先运行 pnpm sync（或设置 HEXBOX_DATA_DIR）',
+    );
+  }
+  return cachedLocation;
+}
+
+/** 读数据的目录（可能是旧位置，只读回退）。 */
+function resolveDataDir(): string {
+  return dataLocation().dir;
+}
+
+/**
+ * 「更新数据」写哪里（**永远与安装目录解耦**）。
+ *
+ *   · 显式指定 → 那个目录；
+ *   · 开发版有仓库 `data/` → 仓库（与 `pnpm sync` 对账方便）；
+ *   · 其余 → `文档\hexbox\data`。
+ */
+function dataUpdateTargetDir(): string {
+  return dataLocation().writeDir;
+}
+
+/**
+ * 把安装包里唯一的数据文件（海克斯名字指纹库）补进用户数据目录。
+ *
+ * 为什么只有这一个文件随包：它是**构建期从系统字体生成**的（不能从上游拉），
+ * 缺了它局内认不出海克斯名 → 一张强度标签都不画；而图鉴/榜单/详情/头像模板
+ * 都能在「更新数据」时从上游重建，所以不随包（安装包因此小 ~6MB）。
+ */
+function ensureAugmentLibrary(dir: string): void {
+  const target = join(dir, 'augment-names.json');
+  if (existsSync(target)) return;
+  const seed = join(process.resourcesPath, 'data', 'augment-names.json');
+  if (!existsSync(seed)) return;
+  try {
+    mkdirSync(dir, { recursive: true });
+    copyFileSync(seed, target);
+    console.log(`[hexbox] 已把海克斯名字指纹库拷到数据目录：${target}`);
+  } catch (e) {
+    console.warn(
+      `[hexbox] ⚠ 拷贝 augment-names.json 失败：${e instanceof Error ? e.message : String(e)}` +
+        '（局内识别会认不出海克斯名）',
+    );
+  }
 }
 
 async function loadDataset(): Promise<void> {
-  const dir = resolveDataDir();
-  console.log(`[hexbox] 数据目录: ${dir}`);
+  const location = dataLocation();
+  const dir = location.dir;
+  console.log(`[hexbox] 数据目录: ${dir}（${DATA_DIR_SOURCE_LABEL[location.source]}）`);
+  if (location.legacyRead) {
+    console.warn(
+      `[hexbox] ⚠ 当前读的是旧位置（${location.source}）；` +
+        `托盘「更新数据」会写到 ${location.writeDir}（文档目录）`,
+    );
+  }
+  if (location.source === 'none') {
+    console.warn(
+      `[hexbox] ℹ 首次运行：还没有数据。托盘「更新数据」会下载到 ${location.writeDir}` +
+        '（需要联网，几分钟）',
+    );
+  }
+
+  // 名字指纹库是随包的那一个文件：补到当前读取目录（以及已存在的写入目录）
+  ensureAugmentLibrary(dir);
+  if (location.writeDir !== dir && existsSync(location.writeDir)) {
+    ensureAugmentLibrary(location.writeDir);
+  }
 
   try {
     dataset = await readDataset(dir);
@@ -1012,7 +1090,7 @@ async function loadDataset(): Promise<void> {
     builds = null;
   }
 
-  // ── 托盘菜单「数据更新时间」的那一行（**在数据读完这一刻定型**）──────────
+  // ── 托盘菜单「统计日期」的那一行（**在数据读完这一刻定型**）──────────
   // 口径（纯函数 `dataUpdateStamp()`，有单测）：
   //   ① `meta.dataDate`（官方统计日期，形如 20261005）—— 用户问"数据更新到几号"要的是它；
   //   ② 拿不到才退回 `dataset.json` 的文件 mtime（**并在菜单文案里标成"文件时间"**，
@@ -1024,7 +1102,7 @@ async function loadDataset(): Promise<void> {
     dataDate: builds?.meta.dataDate ?? rankings?.meta.dataDate ?? null,
     mtimeMs: datasetFileMtimeMs(dir),
   });
-  console.log(`[hexbox] 数据更新时间：${dataStamp.date === '' ? '未知' : dataStamp.date}（${dataStamp.detail}）`);
+  console.log(`[hexbox] 统计日期：${dataStamp.date === '' ? '未知' : dataStamp.date}（${dataStamp.detail}）`);
 
   // 数据读完立刻刷一次托盘：否则菜单里那一行要等下一轮 2 秒轮询才出现
   tray?.refresh();
@@ -1946,7 +2024,7 @@ function trayAutotestMs(): number {
  *
  * 为什么必须有这个：托盘菜单在自动化里点不了（机器人没有鼠标），而这次改动
  * 全部落在菜单形态上 —— "到底是哪几项、哪几项是灰的、`打开日志`/`打开数据目录`
- * 是不是真的没了"是唯一能被机器证明的部分。用户点名要的六条逐条对照也在这里。
+ * 是不是真的没了"是唯一能被机器证明的部分。用户点名的七条逐条对照也在这里。
  */
 function logTrayMenuItems(what: string): void {
   if (tray === null) {
@@ -1959,15 +2037,16 @@ function logTrayMenuItems(what: string): void {
     const kind = item.type === 'separator' ? '分隔线' : item.enabled ? '可点' : '禁用';
     console.log(`         ${String(i + 1).padStart(2)}. [${kind}] ${item.label}`);
   });
-  // 用户原话的六条 → 逐条核对（移除的两项**必须不在**）
+  // 用户原话的七条（2026-11 起含「更新数据」） → 逐条核对（移除的两项**必须不在**）
   const labels = items.map((i) => i.label).join(' | ');
   const checks: [string, boolean][] = [
     ['1 状态：xxx（保留、禁用）', items.some((i) => i.label.startsWith('状态：') && !i.enabled)],
-    ['2 数据更新时间（新增、禁用）', items.some((i) => i.label.startsWith('数据更新时间：') && !i.enabled)],
+    ['2 统计日期（新增、禁用）', items.some((i) => i.label.startsWith('统计日期：') && !i.enabled)],
     ['3 打开日志（**已移除**）', !labels.includes('打开日志')],
     ['4 打开数据目录（**已移除**）', !labels.includes('打开数据目录')],
-    ['5 检查更新（新增、可点）', items.some((i) => i.label.startsWith('检查更新') && i.enabled)],
-    ['6 退出（保留、可点）', items.some((i) => i.label === '退出' && i.enabled)],
+    ['5 更新数据（新增、可点）', items.some((i) => i.label === '更新数据' && i.enabled)],
+    ['6 检查更新（新增、可点）', items.some((i) => i.label.startsWith('检查更新') && i.enabled)],
+    ['7 退出（保留、可点）', items.some((i) => i.label === '退出' && i.enabled)],
   ];
   for (const [name, ok] of checks) {
     console.log(`         ${ok ? '✅' : '❌'} ${name}`);
@@ -2045,6 +2124,58 @@ app.whenReady().then(() => {
     quit: (reason) => quitApp(reason),
   });
 
+  // ── 「更新数据」流程（应用内同步；确认后才联网）────────────
+  // 先建流程再建托盘：菜单项文案要读实时阶段（`正在更新数据…（单英雄详情 42/173）`）。
+  dataUpdateFlow = createDataUpdateFlow({
+    // 懒求值：resolveDataDir() 在"找不到"时会打警告，启动阶段只该打一次
+    get dataDir() {
+      return dataUpdateTargetDir();
+    },
+    checkStatePath: dataCheckStatePath(),
+    hasLocalData: () => dataset !== null,
+    localDate: () => rankings?.meta.dataDate ?? builds?.meta.dataDate ?? null,
+    notify: (title, content) => {
+      if (tray === null) {
+        console.warn(`[hexbox] ⚠ 没有托盘 → 弹不出气泡「${title}」（日志里仍有这条消息）`);
+        return;
+      }
+      tray.notify(title, content);
+    },
+    onPhaseChange: () => tray?.refresh(),
+    reload: async () => {
+      // 更新可能把"读旧位置"变成"读文档目录"（首次下载/迁移）：必须重新解析
+      cachedLocation = null;
+      await loadDataset();
+      // 模板包可能被重建（英雄集合变化）：名字指纹/头像也要跟着换，否则要重启才生效
+      await loadNameLibrary();
+    },
+    // 确认框/结果弹窗：Electron 的 dialog 只在主进程里拼，流程模块自己保持可在 Node 单测
+    confirmUpdate: async (text) => {
+      const r = await dialog.showMessageBox({
+        type: 'question',
+        title: 'hexbox 更新数据',
+        message: text.message,
+        detail: text.detail,
+        buttons: ['开始更新', '取消'],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+      });
+      return r.response === 0;
+    },
+    showResult: async (ok, text) => {
+      await dialog.showMessageBox({
+        type: ok ? 'info' : 'warning',
+        title: text.title,
+        message: text.message,
+        detail: text.detail,
+        buttons: ['确定'],
+        defaultId: 0,
+        noLink: true,
+      });
+    },
+  });
+
   // ── 托盘：常驻覆盖层**唯一**的交互入口（本体没有可见窗口）──────────────
   // 必须在建窗口之后、pollLoop 之前：pollLoop 每轮会刷新托盘状态。
   tray = createTray({
@@ -2055,12 +2186,23 @@ app.whenReady().then(() => {
         // 局内"面板开没开"是"为什么没标签"的第一个分叉（控制器还没建时 = unknown）
         panel: augment?.panelState,
       }),
-    // 数据更新时间：在 loadDataset() 里定型（官方统计日期优先、文件 mtime 回退）
+    // 统计日期：在 loadDataset() 里定型（官方统计日期优先、文件 mtime 回退）
     dataUpdate: () => dataStamp,
     // 检查更新的实时阶段（菜单项文案 + 是否可点）
     updatePhase: () => updateFlow?.phase() ?? UPDATE_PHASE_IDLE,
     // 点「检查更新」→ 交给流程（联网只在这一刻之后发生）
     onCheckUpdate: () => updateFlow?.check(),
+    // 「更新数据」：确认后跑 `@hexbox/data-cli` 的同一条流水线（阶段实时显示）
+    dataUpdatePhase: () => dataUpdateFlow?.phase() ?? DATA_UPDATE_PHASE_IDLE,
+    // 运行中这一项变成「取消更新」（文案由 vision 的 dataUpdateMenuText 决定）
+    onUpdateData: () => {
+      if (dataUpdateFlow === null) return;
+      if (dataUpdateFlow.phase().kind === 'syncing') {
+        dataUpdateFlow.cancel('用户从托盘取消');
+        return;
+      }
+      dataUpdateFlow.update();
+    },
   });
   // 关窗口 = 最小化到托盘（只有托盘菜单的「退出」才真退出）。
   // ⚠️ 只挂常驻覆盖层自己这两扇窗：截屏 worker 窗口是故意 destroy() 的
@@ -2068,7 +2210,8 @@ app.whenReady().then(() => {
   if (win) attachCloseToTrayHide(win, '侧边面板');
   if (overlayWin) attachCloseToTrayHide(overlayWin, '全屏标签画布');
 
-  void loadDataset();
+  // 数据读完再检查「上游有没有新数据」（每 24h 一次、只探一个日期、不自动下载）
+  void loadDataset().then(() => dataUpdateFlow?.checkOnStartup());
   void loadNameLibrary();
   visionLoop = new VisionLoop({
     // getter 形式:指纹/榜单是异步加载的,每轮识别取最新值
@@ -2210,6 +2353,8 @@ app.on('before-quit', () => {
     augmentState = 'idle';
     // ⚠️ 这里是**少数几个明确要求清标签**的地方之一（窗口马上销毁，
     // 不留残留字母）；局内正常的"离开对局"停止**不清标签**
+    // 同步可能正在拉 173 个英雄详情：先中止，别让一个 245 请求的长任务拖住退出
+    dataUpdateFlow?.cancel('程序退出');
     augment?.stop('程序退出', { clearLabels: true });
     // LCU 事件订阅收工（它会自己清掉待执行的重连，不会再建连接）
     phaseEvents?.stop();

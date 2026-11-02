@@ -1,5 +1,5 @@
 /**
- * 「数据更新时间」口径测试（CI 里 Electron 跑不起来 —— 判据必须在纯函数上锁住）
+ * 「统计日期」口径测试（CI 里 Electron 跑不起来 —— 判据必须在纯函数上锁住）
  *
  * 为什么值得测：
  *   · 托盘菜单那一行是用户判断"我这份数据是哪天的"的唯一依据，
@@ -12,9 +12,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
-  DATA_UPDATE_FALLBACK_NOTE,
+  DATA_UPDATE_FALLBACK_PREFIX,
   DATA_UPDATE_LABEL_PREFIX,
-  DATA_UPDATE_OFFICIAL_NOTE,
   dataUpdateStamp,
   formatLocalDate,
   parseDataDate,
@@ -38,21 +37,23 @@ test('formatLocalDate：本地时区补零（mtime 口径）', () => {
   assert.equal(formatLocalDate(new Date(2026, 0, 9)), '2026-01-09');
 });
 
-test('dataUpdateStamp：优先官方统计日期（并在文案里标出口径）', () => {
+test('dataUpdateStamp：优先官方统计日期（文案就是 `统计日期：yyyy-mm-dd`）', () => {
   const s = dataUpdateStamp({ dataDate: '20261005', mtimeMs: Date.UTC(2026, 9, 6, 11, 36) });
   assert.equal(s.source, 'data-date');
   assert.equal(s.date, '2026-10-05');
-  assert.equal(s.label, `${DATA_UPDATE_LABEL_PREFIX}2026-10-05（${DATA_UPDATE_OFFICIAL_NOTE}）`);
+  assert.equal(s.label, `${DATA_UPDATE_LABEL_PREFIX}2026-10-05`);
+  assert.equal(s.label, '统计日期：2026-10-05');
   assert.match(s.detail, /20261005/);
 });
 
-test('dataUpdateStamp：没有官方统计日期 → 退回文件时间，且**必须标成回退口径**', () => {
+test('dataUpdateStamp：没有官方统计日期 → 退回文件时间，并用**不同前缀**标出口径', () => {
   const mtimeMs = new Date(2026, 9, 6, 19, 36, 50).getTime();
   const s = dataUpdateStamp({ dataDate: null, mtimeMs });
   assert.equal(s.source, 'file-mtime');
-  assert.equal(s.label, `${DATA_UPDATE_LABEL_PREFIX}2026-10-06（${DATA_UPDATE_FALLBACK_NOTE}）`);
+  assert.equal(s.label, `${DATA_UPDATE_FALLBACK_PREFIX}2026-10-06`);
+  assert.equal(s.label, '文件时间：2026-10-06');
   // 回退口径绝不能被误认为官方统计日期（两者含义不同，见模块头注释）
-  assert.notEqual(DATA_UPDATE_FALLBACK_NOTE, DATA_UPDATE_OFFICIAL_NOTE);
+  assert.notEqual(DATA_UPDATE_FALLBACK_PREFIX, DATA_UPDATE_LABEL_PREFIX);
 });
 
 test('dataUpdateStamp：非法 dataDate 不能挡住 mtime 回退', () => {

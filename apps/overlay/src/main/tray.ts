@@ -23,8 +23,8 @@
  *      冒烟模式那种"直接 app.quit()"的老写法必须改走 `quitApp()`。
  *
  * ── 菜单形态（用户 2026-10 拍板，**别再改**）─────────────────────────────
- *   `状态：xxx` / `数据更新时间：yyyy-mm-dd`（都是灰、不可点）/ 分隔 /
- *   `检查更新` / 分隔 / `退出`。
+ *   `状态：xxx` / `统计日期：yyyy-mm-dd`（都是灰、不可点）/ 分隔 /
+ *   `更新数据` / `检查更新` / 分隔 / `退出`。
  *   **用户明确移除了 `打开日志` 与 `打开数据目录`** —— 排查入口改由文档与
  *   启动日志承担（日志绝对路径在启动第一行打印，位置见 README / RELEASE-WINDOWS）。
  *   逐条理由见下面 `menuTemplate()` 的注释。
@@ -41,10 +41,13 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
+  dataUpdateMenuEnabled,
+  dataUpdateMenuText,
   TRAY_TOOLTIP_HINT,
   trayTooltipText,
   updateMenuEnabled,
   updateMenuText,
+  type DataUpdatePhase,
   type DataUpdateStamp,
   type TrayStatus,
   type UpdatePhase,
@@ -205,7 +208,7 @@ export interface TrayDeps {
   /** 当前状态（纯函数 `trayStatus()` 的结果；只读菜单项与 tooltip 同一个源）。 */
   readonly status: () => TrayStatus;
   /**
-   * 数据更新时间（纯函数 `dataUpdateStamp()` 的结果）。
+   * 统计日期（纯函数 `dataUpdateStamp()` 的结果）。
    *
    * ⚠️ 口径（官方 `meta.dataDate` 优先、`dataset.json` 的 mtime 回退）由
    * `@hexbox/vision/data-update-stamp.ts` 决定并在**菜单文案里标明**；
@@ -219,8 +222,15 @@ export interface TrayDeps {
    * 所以它必须来自流程的**实时**状态，而不是这里自己维护一份。
    */
   readonly updatePhase: () => UpdatePhase;
+  /**
+   * 「更新数据」当前阶段（与发版检查**独立**：一个在拉数据时另一个仍可检查发版）。
+   * 文案同样是实时状态：`正在更新数据…（单英雄详情 42/173）`。
+   */
+  readonly dataUpdatePhase: () => DataUpdatePhase;
   /** 点「检查更新」→ 交给 `main/update-flow.ts`（联网只在这一次点击之后发生）。 */
   readonly onCheckUpdate: () => void;
+  /** 点「更新数据」→ 交给 `main/data-update-flow.ts`（**确认之后**才联网）。 */
+  readonly onUpdateData: () => void;
 }
 
 export interface TrayHandle {
@@ -243,7 +253,7 @@ export interface TrayHandle {
  * 菜单模板（用户 2026-10 拍板的**六条**，逐条对应）。
  *
  *   1. `状态：xxx`            —— 保留（灰、不可点）
- *   2. `数据更新时间：yyyy-mm-dd`—— **新增**（灰、不可点；口径写在文案里）
+ *   2. `统计日期：yyyy-mm-dd`—— **新增**（灰、不可点；口径写在文案里）
  *   3. ~~打开日志~~           —— **移除**（用户明确要求；日志绝对路径在启动时打印，
  *                                位置见 README/RELEASE-WINDOWS；**不新增菜单项**）
  *   4. ~~打开数据目录~~        —— **移除**（同上）
@@ -257,11 +267,17 @@ function menuTemplate(deps: TrayDeps): Electron.MenuItemConstructorOptions[] {
   const status = deps.status();
   const data = deps.dataUpdate();
   const phase = deps.updatePhase();
+  const dataPhase = deps.dataUpdatePhase();
   return [
     // 两条只读信息：用户判断"它到底在干什么 / 数据是哪天的"的唯一现场依据
     { label: `状态：${status.text}`, enabled: false },
     { label: data.label, enabled: false },
     { type: 'separator' },
+    {
+      label: dataUpdateMenuText(dataPhase),
+      enabled: dataUpdateMenuEnabled(dataPhase),
+      click: () => deps.onUpdateData(),
+    },
     {
       label: updateMenuText(phase),
       enabled: updateMenuEnabled(phase),
@@ -306,6 +322,7 @@ export function createTray(deps: TrayDeps): TrayHandle | null {
   const refresh = (): void => {
     const status = deps.status();
     const update = deps.updatePhase();
+    const dataUpdate = deps.dataUpdatePhase();
     tray.setToolTip(trayTooltipText(status));
     // 每 2 秒轮询都会调一次 refresh：只有内容真的变了才重建菜单并打日志
     //（Menu 对象每次都重建会白造垃圾；日志每 2 秒一行会把真机日志淹掉）
@@ -317,6 +334,7 @@ export function createTray(deps: TrayDeps): TrayHandle | null {
       deps.dataUpdate().label,
       update.kind,
       updateMenuText(update),
+      dataUpdateMenuText(dataUpdate),
     ].join('\u0000');
     if (key === lastKey) return;
     lastKey = key;

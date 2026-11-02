@@ -20,6 +20,9 @@ importers:
       '@hexbox/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@hexbox/data-cli':
+        specifier: workspace:*
+        version: link:../../packages/data-cli
       '@hexbox/data-store':
         specifier: workspace:*
         version: link:../../packages/data-store

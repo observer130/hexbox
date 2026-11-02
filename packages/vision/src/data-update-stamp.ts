@@ -1,8 +1,9 @@
 /**
- * 托盘菜单「数据更新时间」的口径（纯函数，可单测）
+ * 托盘菜单「统计日期」的口径（纯函数，可单测）
  *
  * ── 用户要的是什么 ──────────────────────────────────────────────────────
- *   托盘的菜单里要有一行灰的、不可点的 `数据更新时间：yyyy-mm-dd`。
+ *   托盘的菜单里要有一行灰的、不可点的 `统计日期：yyyy-mm-dd`
+ *   （没有官方日期时改成 `文件时间：yyyy-mm-dd`，两种口径绝不混用）。
  *   "数据"指程序读的那份快照（`data/*.json`，见 docs/RELEASE-WINDOWS.md §三）：
  *   它决定卡片上的胜率、局内海克斯强度与出装建议是哪一天的官方统计。
  *
@@ -48,14 +49,11 @@ export interface DataUpdateInput {
   readonly mtimeMs?: number | null;
 }
 
-/** 菜单文案前缀（自测断言与文案漂移都看它）。 */
-export const DATA_UPDATE_LABEL_PREFIX = '数据更新时间：';
+/** 官方统计日期的菜单文案前缀（2026-11 用户要求：`统计日期：yyyy-mm-dd`）。 */
+export const DATA_UPDATE_LABEL_PREFIX = '统计日期：';
 
-/** 官方统计日期的括号说明（**必须在菜单里能看出口径**，用户就是这么要求的）。 */
-export const DATA_UPDATE_OFFICIAL_NOTE = '统计日期';
-
-/** 回退口径的括号说明（不能让它看起来像官方统计日期）。 */
-export const DATA_UPDATE_FALLBACK_NOTE = '文件时间';
+/** 回退口径的前缀（不能让它看起来像官方统计日期）。 */
+export const DATA_UPDATE_FALLBACK_PREFIX = '文件时间：';
 
 /**
  * 官方统计日期 `20261005` → `2026-10-05`。
@@ -86,7 +84,7 @@ export function dataUpdateStamp(input: DataUpdateInput): DataUpdateStamp {
     return {
       source: 'data-date',
       date: official,
-      label: `${DATA_UPDATE_LABEL_PREFIX}${official}（${DATA_UPDATE_OFFICIAL_NOTE}）`,
+      label: `${DATA_UPDATE_LABEL_PREFIX}${official}`,
       detail: `官方统计日期 meta.dataDate=${String(input.dataDate).trim()}`,
     };
   }
@@ -97,7 +95,7 @@ export function dataUpdateStamp(input: DataUpdateInput): DataUpdateStamp {
     return {
       source: 'file-mtime',
       date,
-      label: `${DATA_UPDATE_LABEL_PREFIX}${date}（${DATA_UPDATE_FALLBACK_NOTE}）`,
+      label: `${DATA_UPDATE_FALLBACK_PREFIX}${date}`,
       detail: '没有官方统计日期 meta.dataDate → 退回 dataset.json 的文件修改时间（可能与数据本身不同天）',
     };
   }

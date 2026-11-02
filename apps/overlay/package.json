@@ -1,6 +1,6 @@
 {
   "name": "@hexbox/overlay",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "游戏内悬浮窗（不注入 / 不读内存 / 不打开游戏进程句柄）",
@@ -19,6 +19,7 @@
   "author": "hexbox",
   "dependencies": {
     "@hexbox/core": "workspace:*",
+    "@hexbox/data-cli": "workspace:*",
     "@hexbox/data-store": "workspace:*",
     "@hexbox/lcu": "workspace:*",
     "@hexbox/vision": "workspace:*"

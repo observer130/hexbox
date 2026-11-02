@@ -9,7 +9,11 @@
  * 行为：
  *   - sync  : 静态图鉴源 → 合并落盘 dataset.json
  *             排行榜源 → 独立落盘 rankings.json
+ *             单英雄详情 → builds.json；头像模板 → templates.json（按需）
  *   - status: 显示当前缓存的新鲜度与统计
+ *
+ * 流水线本身在 `sync.ts`：**悬浮窗的「更新数据」跑的是同一份引擎**，
+ * 这里只负责把进度打印成人看的文字（别在 CLI 里另写一套拉取顺序）。
  *
  * 失败策略：单个 provider 失败**不**导致整体失败 ——
  * 图鉴与排行榜互相独立，统计数据缺失不应影响图鉴可用性。
@@ -22,18 +26,19 @@ import { pathToFileURL } from 'node:url';
 import {
   checkFreshness,
   checkRankingsFreshness,
-  readBuilds,
   readDataset,
   readRankings,
-  writeBuilds,
-  writeDataset,
-  writeRankings,
   writeTemplates,
 } from '@hexbox/data-store';
 import { createRankingProviders, createStaticProviders } from '@hexbox/provider-registry';
-import { fetchHeroDetails } from '@hexbox/provider-tencent';
-import { buildEntry, encodePack, type TemplateEntry, type TemplatePack } from '@hexbox/vision';
-import type { ChampionDetailSet, Dataset, RankingSnapshot } from '@hexbox/core';
+import { encodePack, type TemplatePack } from '@hexbox/vision';
+import type { Dataset } from '@hexbox/core';
+
+import { fetchTemplates, runDefaultSync, type SyncProgress } from './sync.ts';
+
+// 历史入口：单测与本包其它调用方一直从 `cli.ts` 取这两个纯函数。
+// 实现已搬到 `sync.ts`（CLI 与应用共用），这里保留 re-export 以免调用方/SDK 漂移。
+export { championIconUrl, fetchTemplates, mergeDatasets } from './sync.ts';
 
 const DEFAULT_STORE = resolve(process.cwd(), 'data');
 
@@ -41,17 +46,35 @@ function formatBytes(n: number): string {
   return n > 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${(n / 1024).toFixed(0)} KB`;
 }
 
-/** 多源合并：后者只补前者没有的部分（当前 = CDragon 全量 + 腾讯补国服图鉴）。 */
-export function mergeDatasets(datasets: readonly Dataset[]): Dataset {
-  if (datasets.length === 0) throw new Error('没有可合并的数据集');
-  const [primary, ...rest] = datasets;
-  const merged: Dataset = { ...primary! };
-  for (const extra of rest) {
-    if (merged.hextechs.length === 0 && extra.hextechs.length > 0) {
-      (merged as { hextechs: Dataset['hextechs'] }).hextechs = extra.hextechs;
+/** 进度事件 → 终端一行（`\r` 覆盖同一行，避免 173 行刷屏）。 */
+function printProgress(p: SyncProgress): void {
+  if (p.stage === 'details') {
+    if (p.done !== undefined && p.total !== undefined) {
+      process.stdout.write(`\r  · ${p.label} … ${p.done}/${p.total}   `);
     }
+    return;
   }
-  return merged;
+  if (p.stage === 'static') {
+    if (p.done === 0) process.stdout.write(`  · ${p.label} … `);
+    else if (p.ok === true) console.log(`✓  [${p.message ?? ''}]`);
+    else if (p.ok === false) {
+      console.log('✗ 失败');
+      console.error(`      ${p.message ?? ''}`);
+    }
+    return;
+  }
+  if (p.stage === 'rankings') {
+    if (p.done === 0) process.stdout.write(`  · ${p.label} … `);
+    else if (p.ok === true) console.log(`✓  [${p.message ?? ''}]`);
+    else if (p.ok === false) {
+      console.log('✗ 失败');
+      console.error(`      ${p.message ?? ''}`);
+    }
+    return;
+  }
+  if (p.stage === 'templates' && p.done === 0) {
+    process.stdout.write(`\n  · ${p.label} … `);
+  }
 }
 
 async function cmdSync(storeRoot: string): Promise<number> {
@@ -60,219 +83,40 @@ async function cmdSync(storeRoot: string): Promise<number> {
   console.log(
     `▶ 同步开始：静态源 ${staticProviders.length} 个，排行榜源 ${rankingProviders.length} 个\n`,
   );
-
-  let failures = 0;
-
-  // ---- 静态图鉴 ----
-  const datasets: Dataset[] = [];
-  for (const p of staticProviders) {
-    const label = `${p.info.displayName} (${p.info.id})`;
-    process.stdout.write(`  · ${label} … `);
-    const t0 = Date.now();
-    try {
-      const ds = await p.load();
-      datasets.push(ds);
-      console.log(
-        `✓ ${Date.now() - t0}ms  ` +
-          `[海克斯(cd) ${ds.augments.length} / 海克斯(cn) ${ds.hextechs.length} / ` +
-          `英雄 ${ds.champions.length} / 装备 ${ds.items.length}]`,
-      );
-    } catch (err) {
-      failures++;
-      console.log(`✗ 失败`);
-      console.error(`      ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
-  if (datasets.length === 0) {
-    console.error('\n✗ 所有静态数据源均失败，未写入 dataset.json。');
-    const cached = await readDataset(storeRoot);
-    if (cached) {
-      console.error(`  现有缓存仍可用（抓取于 ${cached.meta.fetchedAt}）。`);
-    }
-  } else {
-    const merged = mergeDatasets(datasets);
-    const path = await writeDataset(storeRoot, merged);
-    const { size } = await stat(path);
-    console.log(`\n✓ 已写入 ${path}  (${formatBytes(size)})`);
-  }
-
-  // ---- 排行榜 ----
-  let snapshot: RankingSnapshot | null = null;
-  for (const p of rankingProviders) {
-    const label = `${p.info.displayName} (${p.info.id})`;
-    process.stdout.write(`\n  · ${label} … `);
-    const t0 = Date.now();
-    try {
-      snapshot = await p.load();
-      if (snapshot.augments.length === 0 && snapshot.heroes.length === 0) {
-        console.log(`△ 无数据（上游统计未更新或维护中）`);
-      } else {
-        console.log(
-          `✓ ${Date.now() - t0}ms  ` +
-            `[海克斯榜 ${snapshot.augments.length} / 英雄榜 ${snapshot.heroes.length}] ` +
-            `统计日期 ${snapshot.meta.dataDate || '未知'}`,
-        );
-      }
-    } catch (err) {
-      failures++;
-      snapshot = null;
-      console.log(`✗ 失败`);
-      console.error(`      ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-  if (snapshot && (snapshot.augments.length > 0 || snapshot.heroes.length > 0)) {
-    const path = await writeRankings(storeRoot, snapshot);
-    const { size } = await stat(path);
-    console.log(`✓ 已写入 ${path}  (${formatBytes(size)})`);
-  }
-
-  // ---- 单英雄海斗详情（出装 / 海克斯强度 / 加点）----
-  // 依赖图鉴里的英雄列表；图鉴失败则跳过（不阻断整体）
-  const championIds = (await readDataset(storeRoot))?.champions.map((c) => c.id) ?? [];
-  if (championIds.length === 0) {
-    console.log('\n  · 单英雄详情 … △ 跳过（无英雄列表，请先确保图鉴同步成功）');
-  } else {
-    await cmdSyncBuilds(storeRoot, championIds);
-  }
-
-  if (failures > 0) console.log(`\n⚠ ${failures} 个数据源失败，数据可能不完整`);
-  return 0;
-}
-
-/**
- * 预抓全部英雄的海斗详情并落盘。
- *
- * 为什么预抓而不是运行时拉：悬浮窗需保持「只读本地、离线可用」。
- * 245 个英雄、并发 6，只打一次上游。
- */
-async function cmdSyncBuilds(storeRoot: string, championIds: readonly number[]): Promise<void> {
-  const total = championIds.length;
-  process.stdout.write(`\n  · 单英雄海斗详情 (${total} 个英雄) … `);
   const t0 = Date.now();
 
-  let lastPrint = 0;
-  const details = await fetchHeroDetails(championIds, {
-    concurrency: 6,
-    onProgress: (done, all) => {
-      // 每 ~10% 打一次进度，避免 245 行刷屏
-      if (done - lastPrint >= Math.ceil(all / 10) || done === all) {
-        lastPrint = done;
-        process.stdout.write(`\r  · 单英雄海斗详情 … ${done}/${all}   `);
-      }
-    },
-  }).catch((err: unknown) => {
-    console.error(`\n      ${err instanceof Error ? err.message : String(err)}`);
-    return [];
+  const report = await runDefaultSync({
+    storeRoot,
+    onProgress: printProgress,
   });
 
-  if (details.length === 0) {
-    console.log(`\r  · 单英雄海斗详情 … ✗ 全部失败（未写入）`);
-    return;
-  }
+  // 详情/模板阶段的进度行是 `\r` 覆盖的，收尾补一个换行
+  if (process.stdout.isTTY) process.stdout.write('\n');
 
-  const set: ChampionDetailSet = {
-    meta: {
-      source: 'tencent-hero-detail',
-      dataDate: details[0]?.dataDate ?? '',
-      fetchedAt: new Date().toISOString(),
-      count: details.length,
-    },
-    details,
-  };
-
-  const path = await writeBuilds(storeRoot, set);
-  const { size } = await stat(path);
-  const miss = total - details.length;
-  console.log(
-    `\r  · 单英雄海斗详情 … ✓ ${Date.now() - t0}ms  ` +
-      `[${details.length}/${total} 个英雄${miss > 0 ? `，${miss} 个无数据` : ''}] ` +
-      `统计日期 ${set.meta.dataDate || '未知'}`,
-  );
-  console.log(`✓ 已写入 ${path}  (${formatBytes(size)})`);
-}
-
-/**
- * 构建英雄头像模板包（截屏识别的构建期产物）。
- *
- * 为什么构建期做：运行时（悬浮窗）必须离线、且不应为识别
- * 单独引图像解码依赖 —— 见 packages/vision/src/templates.ts 头注。
- *
- * 图标 URL 映射（实测确认，勿改回）：
- *   dataset.json 的 iconPath 是 **LCU 内部资产路径**
- *   （`/lol-game-data/assets/v1/champion-icons/<id>.png`），
- *   该前缀在 CDragon 上**不存在**（404）。CDragon 的真实布局是
- *   `<plugins>/rcp-be-lol-game-data/global/default/v1/champion-icons/<id>.png`，
- *   因此这里按英雄 ID 直接构造，而不是拼接 iconPath。
- *
- * 单个头像失败只跳过该英雄（缺失模板 = 该英雄可能识别不出，可接受），
- * 全部失败才整体报错。
- */
-export function championIconUrl(
-  championId: number,
-  baseUrl = 'https://raw.communitydragon.org/latest/plugins',
-): string {
-  return `${baseUrl}/rcp-be-lol-game-data/global/default/v1/champion-icons/${championId}.png`;
-}
-
-export async function fetchTemplates(
-  champions: readonly { readonly id: number; readonly name: string; readonly alias: string; readonly iconPath?: string }[],
-  options: {
-    readonly size?: number;
-    readonly baseUrl?: string;
-    readonly concurrency?: number;
-    readonly timeoutMs?: number;
-  } = {},
-): Promise<TemplatePack> {
-  const { decodePng, extractGray } = await import('@hexbox/vision');
-  const size = options.size ?? 24;
-  const baseUrl = options.baseUrl ?? 'https://raw.communitydragon.org/latest/plugins';
-  const concurrency = options.concurrency ?? 8;
-  const timeoutMs = options.timeoutMs ?? 10_000;
-
-  const entries: TemplateEntry[] = [];
-  let failed = 0;
-  let cursor = 0;
-
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      const idx = cursor++;
-      if (idx >= champions.length) return;
-      const c = champions[idx]!;
-      const url = championIconUrl(c.id, baseUrl);
-      try {
-        const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const png = decodePng(new Uint8Array(await res.arrayBuffer()));
-        // 头像整图缩放为模板（PNG 自带方形画布，无需再抠内框）
-        const gray = extractGray(
-          { width: png.width, height: png.height, data: png.data },
-          { x: 0, y: 0, w: 1, h: 1 },
-          size,
-        );
-        if (!gray) throw new Error('extractGray 返回空');
-        entries.push(buildEntry({ id: c.id, name: c.name, alias: c.alias }, gray, size));
-      } catch {
-        failed++;
-      }
+  for (const w of report.wrote) {
+    const path = resolve(storeRoot, `${w}.json`);
+    try {
+      const { size } = await stat(path);
+      console.log(`✓ 已写入 ${path}  (${formatBytes(size)})`);
+    } catch {
+      console.log(`✓ 已写入 ${path}`);
     }
-  };
-  await Promise.all(Array.from({ length: concurrency }, () => worker()));
-
-  entries.sort((a, b) => a.championId - b.championId);
-  if (entries.length === 0) {
-    throw new Error(`全部 ${champions.length} 个头像拉取失败（网络异常？）`);
   }
 
-  return {
-    version: 1,
-    size,
-    createdAt: new Date().toISOString(),
-    sourceUrl: baseUrl,
-    count: entries.length,
-    templates: entries,
-    // failed 不入包：包内容只与「成功模板」有关，失败数仅打日志
-  } as TemplatePack & { __failed?: number };
+  for (const s of report.skipped) {
+    if (s.stage === 'templates') console.log(`  · 头像模板 … △ 跳过（${s.reason}）`);
+  }
+
+  console.log(
+    report.ok
+      ? `\n✓ 同步完成：${Date.now() - t0}ms，统计日期 ${report.dataDate || '未知'}`
+      : '\n✗ 没有写入任何文件（全部数据源失败或已取消）',
+  );
+  if (report.failures.length > 0) {
+    console.log(`⚠ ${report.failures.length} 个阶段失败，数据可能不完整`);
+  }
+  if (report.aborted) console.log('（已取消：已写下的文件仍然有效）');
+  return 0;
 }
 
 async function cmdTemplates(storeRoot: string): Promise<number> {
@@ -329,7 +173,8 @@ async function cmdTemplates(storeRoot: string): Promise<number> {
   return 0;
 }
 
-async function cmdStatus(storeRoot: string): Promise<number> {  const ds = await readDataset(storeRoot);
+async function cmdStatus(storeRoot: string): Promise<number> {
+  const ds = await readDataset(storeRoot);
   const f = checkFreshness(ds);
 
   console.log('静态图鉴');
@@ -425,4 +270,3 @@ if (isDirectRun()) {
     process.exitCode = 1;
   });
 }
-

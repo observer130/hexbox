@@ -4,6 +4,11 @@
   "private": true,
   "type": "module",
   "description": "数据同步 CLI（拉取 → 规范化 → 落盘）",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "dependencies": {
     "@hexbox/core": "workspace:*",
     "@hexbox/data-store": "workspace:*",
