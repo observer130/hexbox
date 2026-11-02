@@ -320,6 +320,18 @@ pnpm --filter @hexbox/overlay package:win
 第一次之后就离线了。没有镜像也没关系 —— 只是慢，可能撞上 600 s 超时，
 重跑一次会接着用已下好的部分。）
 
+**卡在 `unpacking default Electron distribution`（2026-11 本机遇到：CPU 几乎为 0、迟迟不产出 `win-unpacked`）**：
+electron-builder 解压 Electron zip 时被 Defender / 文件锁卡住。直接用仓库里已安装的
+`node_modules/electron/dist`（版本必须与 `electron` 依赖一致）打包，跳过解压：
+
+```powershell
+pnpm --filter @hexbox/overlay exec electron-builder --win --publish never `
+  -c.electronDist="D:\Projects\hexbox\node_modules\electron\dist"
+ode_moduleselectrondist"
+```
+
+先用 `--dir` 只出 `release/win-unpacked` 验证，再跑完整的 NSIS/portable。
+
 > 本机**不需要**额外下载 NSIS/winCodeSign 之外的东西；`electron-builder`
 > 每次构建会"signing with signtool.exe"——**没有证书时这一步只是改写 exe 资源**，
 > 不产生签名。
