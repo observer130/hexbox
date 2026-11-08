@@ -66,8 +66,8 @@ pnpm dev:web                                  # http://localhost:5273
 
 `pnpm check:docs` → `pnpm typecheck` → `pnpm test` → `pnpm build` (CI runs the same on
 `windows-latest`). Node's built-in runner; `pnpm --filter @hexbox/core test` is faster.
-**Keep them green and add tests for new behavior.** Current: **1100** — core 55 /
-vision 709 / lcu 144 / overlay 61 / provider-communitydragon 12 / provider-tencent 43 /
+**Keep them green and add tests for new behavior.** Current: **1104** — core 55 /
+vision 710 / lcu 144 / overlay 61 / provider-communitydragon 12 / provider-tencent 46 /
 data-store 19 / data-cli 53 / web 4 (`pnpm test` is the source of truth; the overlay's
 Electron runtime is not testable — its tests cover replay-safe parts and the self-test
 scenario logic only). `pnpm typecheck` also checks `scripts/*.mts`

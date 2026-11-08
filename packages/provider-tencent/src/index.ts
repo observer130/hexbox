@@ -770,12 +770,41 @@ export function createTencentRankingProvider(options: TencentOptions = {}): Rank
   };
 }
 
+/**
+ * 上游统计日期用的是**北京时间**的日历日。
+ *
+ * ⚠️ 以前这里用 `toISOString().slice(0,10)`（= **UTC** 日期）来推候选日：
+ * 北京时间 00:00~08:00 之间，UTC 还停在**前一天** → 首个候选日整体早一天。
+ * 那个时间窗正好是"凌晨查一次数据"的常见时刻，表现是每天第一次查询
+ * 白跑一个不存在的日期（多一次请求，且日志里的候选日与界面上的统计日期对不上）。
+ *
+ * 也不能用本机时区（`getFullYear()` 那套）：海外用户的"今天"与上游的"今天"
+ * 不是同一天。所以固定 +8 小时再按 UTC 字段读 —— 与宿主机时区无关。
+ */
+export function shanghaiYmd(date: Date): string {
+  const shifted = new Date(date.getTime() + 8 * 3_600_000);
+  const y = shifted.getUTCFullYear();
+  const m = String(shifted.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(shifted.getUTCDate()).padStart(2, '0');
+  return `${y}${m}${d}`;
+}
+
+/**
+ * 近 `days` 天的候选统计日期（T-1 起），格式 `YYYYMMDD`，**北京时间口径**。
+ *
+ * 抽成纯函数是为了能测：以前这段逻辑内联在 `fallbackStatDates()` 里、
+ * 用 `Date.now()` 直接取「今天」，测试只能复制同一份 UTC 公式 —— 复制出来的
+ * 断言与实现一起错，等于没测（"测试锁住 bug"的典型）。
+ */
+export function statDateCandidates(now: Date, days = 5): string[] {
+  return Array.from({ length: days }, (_, i) =>
+    shanghaiYmd(new Date(now.getTime() - (i + 1) * 86_400_000)),
+  );
+}
+
 /** 近 5 天（T-1 起）的候选统计日期，格式 YYYYMMDD。 */
 function fallbackStatDates(): string[] {
-  return Array.from({ length: 5 }, (_, i) => {
-    const d = new Date(Date.now() - (i + 1) * 86_400_000);
-    return d.toISOString().slice(0, 10).replace(/-/g, '');
-  });
+  return statDateCandidates(new Date());
 }
 
 /* ------------------------------------------------------------------ */

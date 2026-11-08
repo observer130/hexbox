@@ -61,13 +61,26 @@ export const DATA_UPDATE_FALLBACK_PREFIX = '文件时间：';
  * 非法（位数不对 / 月份日期越界 / 空）一律返回 `null` —— **宁可显示"未知"，
  * 也不显示一个错位的日期**：把 `2026105` 硬切成 `2026-10-5` 之类会让用户
  * 以为数据是那天的。
+ *
+ * ⚠️ "月 1..12、日 1..31"挡不住**月内不存在的日期**（`20260231`）。上游换版时
+ * 真出现过这种占位值，落到界面上就是 `2026-02-31`。所以再过一遍日历回读：
+ * 用 UTC 构造再读回三个字段，对不上就是非法（不用本机时区，跨时区同结果）。
  */
 export function parseDataDate(raw: string | null | undefined): string | null {
   const text = (raw ?? '').trim();
   if (!/^\d{8}$/.test(text)) return null;
+  const year = Number(text.slice(0, 4));
   const month = Number(text.slice(4, 6));
   const day = Number(text.slice(6, 8));
   if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  if (
+    probe.getUTCFullYear() !== year ||
+    probe.getUTCMonth() !== month - 1 ||
+    probe.getUTCDate() !== day
+  ) {
+    return null;
+  }
   return `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6, 8)}`;
 }
 

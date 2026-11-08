@@ -104,10 +104,17 @@ await cp(join(here, 'src', 'capture', 'worker.html'), join(out, 'renderer', 'cap
 //     为什么值得单独写一段：产物路径一旦错位，渲染端是**静默什么都不做**
 //     （不抛异常、不打日志），表现为"画布空白/尺寸还是默认值"，极难定位。
 //     这里让它在**构建期**就红掉，并把期望路径打出来。
+//
+//     ⚠️ 匹配范围要足够宽：以前只认 `"./…"` 这种**双引号 + 显式 ./** 的写法，
+//     换成单引号或写成 `renderer.js` 就**整条跳过检查**（而"没有任何本地引用"
+//     的兜底只在**全部**匹配不到时才报，一条漏网就无声无息）。现在排除带协议的
+//     URL 与纯锚点后，其余一律当本地路径校验。
 for (const rel of HTML_FILES) {
   const file = join(out, rel);
   const html = await readFile(file, 'utf8');
-  const refs = [...html.matchAll(/(?:src|href)="(\.\/[^"]+)"/g)].map((m) => m[1]);
+  const refs = [...html.matchAll(/(?:src|href)\s*=\s*(["'])([^"']+)\1/g)]
+    .map((m) => m[2].split(/[?#]/)[0])
+    .filter((r) => r && !/^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(r));
   if (refs.length === 0) {
     console.error(`✗ ${rel} 里没有任何本地 script/link 引用 —— HTML 被改坏了？`);
     process.exit(1);

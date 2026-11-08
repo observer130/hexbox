@@ -18,6 +18,8 @@ import {
   parseAugmentRankList,
   parseDataDate,
   parseHeroRankList,
+  shanghaiYmd,
+  statDateCandidates,
   parseRankChange,
   type RawKiwiAugment,
 } from './index.ts';
@@ -265,10 +267,10 @@ test('排行榜 provider：上游报错时返回空快照而非抛出', async ()
 test('排行榜 provider：HTTP 失败后回退到更早日期', async () => {
   // 不能写死「T-1 = 某天」：候选窗口由真实当前日期生成，写死会让测试
   // 随日历漂移而失效（日期一过，首个候选日就不再是被 mock 失败的那天）。
-  // 这里改为让「首个候选日」动态失败，其余日期成功。
-  const firstCandidate = Array.from({ length: 5 }, (_, i) =>
-    new Date(Date.now() - (i + 1) * 86_400_000).toISOString().slice(0, 10).replace(/-/g, ''),
-  )[0]!;
+  // 这里让「首个候选日」动态失败，其余日期成功 —— 用**实现同一份**
+  // `statDateCandidates()`，避免像以前那样在测试里复制一遍 UTC 公式
+  //（复制出来的断言会和实现一起错）。
+  const firstCandidate = statDateCandidates(new Date())[0]!;
 
   let failures = 0;
   const tried: string[] = [];
@@ -287,4 +289,36 @@ test('排行榜 provider：HTTP 失败后回退到更早日期', async () => {
   assert.ok(failures >= 2, `首个候选日 ${firstCandidate} 失败后应重试更早日期`);
   assert.ok(new Set(tried).size >= 2, '应尝试过至少两个不同日期');
   assert.ok(snap.augments.length > 0);
+});
+
+/* ------------------------------------------------------------------ */
+/* 统计日期的时区口径                                                   */
+/* ------------------------------------------------------------------ */
+
+test('shanghaiYmd：按**北京时间**取日历日，与宿主机时区无关', () => {
+  // 北京 2026-11-08 00:00 = UTC 2026-11-07 16:00 —— 边界必须翻日
+  assert.equal(shanghaiYmd(new Date('2026-11-07T15:59:59Z')), '20261107');
+  assert.equal(shanghaiYmd(new Date('2026-11-07T16:00:00Z')), '20261108');
+  assert.equal(shanghaiYmd(new Date('2026-11-07T17:30:00Z')), '20261108');
+});
+
+test('statDateCandidates：从 T-1 起往回数，用北京日期（不是 UTC）', () => {
+  // 北京时间已经是 11-08 凌晨（UTC 还是 11-07 傍晚）。
+  // 旧实现（toISOString）会把 T 当成 11-07 → 首个候选日 20261106（白跑一天）。
+  const got = statDateCandidates(new Date('2026-11-07T17:30:00Z'));
+  assert.deepEqual(got, ['20261107', '20261106', '20261105', '20261104', '20261103']);
+  assert.equal(got[0], '20261107', 'T-1 必须是 11-07，而不是 UTC 口径的 11-06');
+});
+
+test('statDateCandidates：跨月/跨年边界不跳日', () => {
+  // 北京 2026-01-01 03:00（UTC 2025-12-31 19:00）
+  assert.deepEqual(statDateCandidates(new Date('2025-12-31T19:00:00Z'), 2), [
+    '20251231',
+    '20251230',
+  ]);
+  // 北京 2026-03-01 01:00（UTC 2026-02-28 17:00）
+  assert.deepEqual(statDateCandidates(new Date('2026-02-28T17:00:00Z'), 2), [
+    '20260228',
+    '20260227',
+  ]);
 });

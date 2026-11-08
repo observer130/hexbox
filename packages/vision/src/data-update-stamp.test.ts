@@ -32,6 +32,16 @@ test('parseDataDate：非法输入一律 null（宁显示未知，也不显示�
   assert.equal(parseDataDate(null), null);
 });
 
+test('parseDataDate：**月内不存在的日期**也要判非法（20260231 曾真出现过）', () => {
+  // 旧的"月 1..12 / 日 1..31"检查放过了这些，界面上就显示 2026-02-31。
+  for (const bad of ['20260231', '20260230', '20260431', '20260631', '20230229']) {
+    assert.equal(parseDataDate(bad), null, `应判为非法：${bad}`);
+  }
+  // 闰年 2 月 29 必须仍然合法
+  assert.equal(parseDataDate('20240229'), '2024-02-29');
+  assert.equal(parseDataDate('20260228'), '2026-02-28');
+});
+
 test('formatLocalDate：本地时区补零（mtime 口径）', () => {
   assert.equal(formatLocalDate(new Date(2026, 9, 6)), '2026-10-06');
   assert.equal(formatLocalDate(new Date(2026, 0, 9)), '2026-01-09');

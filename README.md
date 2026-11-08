@@ -190,7 +190,7 @@ pnpm dev:overlay    # 需要管理员权限 + 真实桌面会话；CI 里跑不�
 
 ```bash
 pnpm typecheck
-pnpm test        # 当前 1100 项；以 pnpm test 的实际输出为准
+pnpm test        # 当前 1104 项；以 pnpm test 的实际输出为准
 pnpm build
 ```
 

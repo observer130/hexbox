@@ -15,12 +15,20 @@
 #    所以打包**不需要** node_modules —— 也因此不可能把仓库源码、
 #    `data/`、`debug/`（真机截图，含个人信息）带进安装包。
 #
-# 3. 数据（`data/*.json`）走 `extraResources` → 落到 `resources/data/`。
-#    主进程的 resolveDataDir() 会向上遍历找到它（见 src/main/index.ts），
-#    所以**运行时不需要额外配置**。这里打进去的是**基线快照**（新装用户开箱即用）。
-#    日常更新 = 托盘「更新数据」（`main/data-update-flow.ts`，2026-11）：
-#    写到 `%LOCALAPPDATA%\hexbox\data\`（优先级更高），不需要重新打包；
-#    发新版时再重跑 `pnpm sync` / `pnpm templates` 刷新基线快照。
+# 3. **不随包发数据集**（2026-11 用户决策：数据与安装位置解耦，见第 6 条）。
+#    唯一的例外是海克斯名字指纹库 `data/augment-names.json`：它由构建期脚本从
+#    系统字体生成、运行时无法重建，缺了它局内一张强度标签都画不出来
+#    （`extraResources` 里那条带 filter 的就是它，别删）。
+#    ⚠️ 打包前置：那份文件不在仓库里（`data/` 已 gitignore）——
+#    先跑 `pnpm sync`（或 `scripts/render-augment-name-fingerprints.ps1`），
+#    否则这条 extraResources 找不到源文件。
+#    主进程启动时会把它拷进用户数据目录（`main/index.ts` 的 ensureAugmentLibrary），
+#    所以**运行时不需要额外配置**。
+#    数据集本体（dataset/rankings/builds/templates）**一律不在包里**：它们在用户
+#    文档目录 `文档\hexbox\data`（见 `main/user-paths.ts` 与
+#    `vision/data-location.ts`），首次运行由托盘「更新数据」下载。
+#    日常更新走托盘（`main/data-update-flow.ts`），不需要重新打包；
+#    旧版本内置的 `resources\data` 仍被当作**只读回退**识别，升级用户无感。
 #
 # 4. `requestedExecutionLevel` 见 docs/RELEASE-WINDOWS.md §权限：
 #    国服（WeGame）客户端的 `LeagueClient\lockfile` 实测为 **0 字节**，
@@ -123,8 +131,9 @@ nsis:
   # 中文安装界面（2052 = 简体中文）
   language: '2052'
   artifactName: hexbox-setup-${version}-${arch}.${ext}
-  # 卸载时保留 %LOCALAPPDATA%\hexbox（日志与用户放进去的数据），
-  # 想彻底清干净就手动删这个目录
+  # 卸载时保留 %LOCALAPPDATA%\hexbox（日志等运行时产物），想彻底清干净就手动删。
+  # ⚠️ **数据不在这个目录里**：数据集与录制产物在 `文档\hexbox\data`、
+  #    `文档\hexbox\…`（见 main/user-paths.ts），卸载本来就不会碰它们。
   deleteAppDataOnUninstall: false
 
 portable:

@@ -146,6 +146,8 @@ const PRELOAD_PATH = resolvePreloadPath();
 export class AugmentStream {
   private readonly deps: AugmentStreamDeps;
   private win: BrowserWindow | null = null;
+  /** 只告警一次（外来 IPC 可能每秒来一条，别刷屏）。 */
+  private warnedForeignSender = false;
   private display: Electron.Display | null = null;
   private ready = false;
   private started = false;
@@ -159,14 +161,39 @@ export class AugmentStream {
 
   constructor(deps: AugmentStreamDeps) {
     this.deps = deps;
-    this.onFrameMsg = (_e, frame) => {
+    // ⚠️ 四个通道只认**本采集窗口**发来的消息（2026-11 审查）。
+    // 三个窗口共用同一份 preload，`sendWorkerFrame` 之类的 API 对所有窗口可见 ——
+    // 不校验发信方的话，任何一个渲染端都能往这里灌**伪造的帧/识别结果**，
+    // 而这条链路的输出就是屏幕上的强度标签（等于允许伪造"官方数据"）。
+    this.onFrameMsg = (e, frame) => {
+      if (!this.fromWorker(e)) return;
       this.sawAnyFrame = true;
       this.frameCount = frame.frames;
       this.deps.onFrame(frame);
     };
-    this.onStatusMsg = (_e, s) => this.deps.onStatus(s.message, s.error === true);
-    this.onRecognizedMsg = (_e, r) => this.deps.onRecognized?.(r);
-    this.onRecordMsg = (_e, payload) => this.deps.onRecordFrame?.(payload);
+    this.onStatusMsg = (e, s) => {
+      if (!this.fromWorker(e)) return;
+      this.deps.onStatus(s.message, s.error === true);
+    };
+    this.onRecognizedMsg = (e, r) => {
+      if (!this.fromWorker(e)) return;
+      this.deps.onRecognized?.(r);
+    };
+    this.onRecordMsg = (e, payload) => {
+      if (!this.fromWorker(e)) return;
+      this.deps.onRecordFrame?.(payload);
+    };
+  }
+
+  /** 这条 IPC 是否来自本对象的采集窗口（`win` 在 `loadURL` 之前就赋值了）。 */
+  private fromWorker(e: Electron.IpcMainEvent): boolean {
+    const wc = this.win?.webContents;
+    if (wc && e.sender === wc) return true;
+    if (!this.warnedForeignSender) {
+      this.warnedForeignSender = true;
+      console.warn('[augment] ⚠ 忽略了非采集窗口发来的 worker IPC（可能是别的渲染端在灌数据）');
+    }
+    return false;
   }
 
   /** 建立隐藏窗口 + 屏幕流。返回是否成功发出启动指令。 */
