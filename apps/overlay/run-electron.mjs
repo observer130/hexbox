@@ -13,7 +13,7 @@
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -39,6 +39,28 @@ if (!existsSync(exe)) {
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE; // 关键：恢复完整的 Electron 运行时
 
+/**
+ * 录制产物目录（**两边必须用同一个值**，真机教训 2026-11）。
+ *
+ * ⚠️ 以前这里写 `join(process.cwd(), 'debug', 'augment', '.stop')`，而
+ * `pnpm --filter @hexbox/overlay debug:augment` 的 cwd 是 `apps/overlay`，
+ * 录制程序（`dist/debug-augment.cjs`）按 `__dirname` 算出来却是**仓库根**的
+ * `debug/augment` —— 于是 Ctrl+C 写的哨兵录不到，4 秒后被强杀，
+ * `report.json`/`recorder.close()` 永远不执行（一整局的 golden 就没了）。
+ *
+ * 现在：从本文件位置算出仓库根，**并把同一个绝对路径通过环境变量下发给子进程**
+ * （录制程序优先读它），两边不再各算一遍。
+ */
+const repoRoot = resolve(here, '..', '..');
+const augmentOut = (() => {
+  const raw = (process.env.HEXBOX_AUGMENT_OUT ?? '').trim();
+  if (raw === '') return join(repoRoot, 'debug', 'augment');
+  // 与前缀语义保持一致（见 debug-augment.ts 的 OUT_DIR）：绝对路径直接使用，
+  // 相对名字落到 `debug/<名字>`，而不是相对 cwd（cwd 是 apps/overlay）。
+  return isAbsolute(raw) ? raw : join(repoRoot, 'debug', raw);
+})();
+env.HEXBOX_AUGMENT_OUT = augmentOut;
+
 const child = spawn(exe, [entry, ...process.argv.slice(3)], {
   stdio: 'inherit',
   env,
@@ -56,7 +78,7 @@ const child = spawn(exe, [entry, ...process.argv.slice(3)], {
  * （写 report.json / api-trigger.csv / 识别结果），然后再等一会儿才退出，
  * 避免把子进程连带杀掉、白丢一整局数据。
  */
-const sentinel = join(process.cwd(), 'debug', 'augment', '.stop');
+const sentinel = join(augmentOut, '.stop');
 let stopping = false;
 const requestStop = (signal) => {
   if (stopping) return;

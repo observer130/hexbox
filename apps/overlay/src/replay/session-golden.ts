@@ -204,6 +204,20 @@ export function compareGolden(
     );
   }
 
+  // 识别次数：golden 记的是"整批识别"的条数，回放记的是调用次数。
+  //
+  // ⚠️ 以前这两个数只被算进结果、**从不比较** —— 于是真机上"回放多认了一次"
+  // 仍然会打印"✔ 逐项一致"（2026-10-12 真机会话实测 8 次 vs 7 条）。
+  // 但两者本来就允许小幅不等：单卡刷新/失败重试会让回放多调一次，而且 golden
+  // 只记"成功的那几次"。所以只在**明显漂移**时报警（>2），并把差值写清楚。
+  const recognitionGap = Math.abs(golden.recognitions.length - replay.recognizeCalls);
+  if (recognitionGap > 2) {
+    diffs.push(
+      `识别次数明显不一致：golden ${golden.recognitions.length} 条 vs 回放 ${replay.recognizeCalls} 次` +
+        `（差 ${recognitionGap}；±2 以内通常是重试，再多说明开边沿判定或重试策略漂移了）`,
+    );
+  }
+
   return {
     source: golden.source,
     toleranceMs,

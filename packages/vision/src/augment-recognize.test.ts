@@ -294,8 +294,10 @@ test('recognizeReroll：只重认指定卡、几何一律用**冻结矩形**、�
   assert.match(out.notes[0]!, /翻牌动画中间帧/);
 });
 
-test('recognizeReroll：没有冻结矩形时退回本帧检测矩形；两者都没有 → 认不出（清标签）', () => {
+test('recognizeReroll：没有冻结矩形 → 认不出（**不许**用本帧检测矩形兜底）', () => {
   const native = makeFrameWithNames(PATTERNS);
+  // 旧实现会退回 `latestCards[0].rect` —— 那正是翻牌动画的中间帧几何。
+  // 一旦那样做，OCR 出来的名字会被挂到动画帧的矩形上，并把整排基准带走。
   const withDetected = recognizeReroll({
     pixels: bitmapPixels(native),
     only: [0],
@@ -306,7 +308,16 @@ test('recognizeReroll：没有冻结矩形时退回本帧检测矩形；两者�
     tookMs: 10,
   });
   assert.equal(withDetected.report.ok, true);
-  assert.deepEqual(withDetected.report.cards[0]!.rect, CARDS[0]);
+  assert.deepEqual(
+    withDetected.report.cards[0]!.rect,
+    { x: 0, y: 0, w: 0, h: 0 },
+    '没有冻结几何就不画，而不是拿动画帧的矩形顶上',
+  );
+  assert.equal(withDetected.report.cards[0]!.augmentId, null);
+  assert.ok(
+    withDetected.notes.some((n) => /没有冻结矩形/.test(n)),
+    '跳过这件事要留痕（回放复盘时要能看出"这轮为什么没重认"）',
+  );
 
   const nothing = recognizeReroll({
     pixels: bitmapPixels(native),

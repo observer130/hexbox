@@ -46,7 +46,7 @@ apps/      web       data query site
                      replay/ (frame-store driven closed-loop replay)
 data/      generated + gitignored   scripts/  diagnostics + one-offs
 docs/      ROADMAP, OVERLAY-STAGES, build-slots, SCREENSHOT-DEV, AUGMENT-PANEL,
-           SESSION-REPLAY, RELEASE-WINDOWS, SESSION-NOTES
+           SESSION-REPLAY, RELEASE-WINDOWS, SESSION-NOTES, VERIFY-P1（真机验收清单）
 ```
 
 ## Setup / environment
@@ -66,8 +66,8 @@ pnpm dev:web                                  # http://localhost:5273
 
 `pnpm typecheck` → `pnpm test` → `pnpm build` (CI runs the same on `windows-latest`).
 Node's built-in runner; `pnpm --filter @hexbox/core test` is faster. **Keep them green
-and add tests for new behavior.** Current: **1077** — core 55 / vision 709 / lcu 143 /
-overlay 52 / provider-communitydragon 12 / provider-tencent 43 / data-store 17 /
+and add tests for new behavior.** Current: **1084** — core 55 / vision 709 / lcu 143 /
+overlay 59 / provider-communitydragon 12 / provider-tencent 43 / data-store 17 /
 data-cli 46 (`pnpm test` is the source of truth; the overlay's Electron runtime is not
 testable — its tests cover replay-safe parts and the self-test scenario logic only).
 

@@ -551,7 +551,7 @@ import {
   type Dataset,
   type RankingSnapshot,
 } from '@hexbox/core';
-import { VisionLoop, type VisionOverlayMsg } from './vision-loop.ts';
+import { createVisionLoop, type VisionLoop, type VisionOverlayMsg } from './vision-loop.ts';
 import {
   attachLabelOverlayDiagnostics,
   clearLabelOverlay,
@@ -2213,7 +2213,7 @@ app.whenReady().then(() => {
   // 数据读完再检查「上游有没有新数据」（每 24h 一次、只探一个日期、不自动下载）
   void loadDataset().then(() => dataUpdateFlow?.checkOnStartup());
   void loadNameLibrary();
-  visionLoop = new VisionLoop({
+  visionLoop = createVisionLoop({
     // getter 形式:指纹/榜单是异步加载的,每轮识别取最新值
     nameLibrary: () => nameLibrary,
     portraits: () => portraits,

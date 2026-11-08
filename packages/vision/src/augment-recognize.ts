@@ -314,10 +314,14 @@ export function recognizeReroll(input: RecognizeRerollInput): RecognizeRerollOut
   for (const index of only) {
     refreshed.push(index);
     const panelCard = input.latestCards[index];
-    // ⚠️ **一律用冻结矩形**：面板存续期间卡片不动，本帧检测出来的是翻牌动画中间帧，
-    //    改了它 = 整排标签下移（真机二次验收的缺陷就是这么来的）。
-    const rect = input.frozenRects?.[index] ?? panelCard?.rect ?? null;
+    // ⚠️ **只认冻结矩形**：面板存续期间卡片不动，本帧检测出来的是翻牌动画中间帧，
+    //    拿它当几何 = 整排标签下移（真机二次验收的缺陷就是这么来的）。
+    //
+    // 没有冻结矩形时**绝不回退到本帧检测矩形**（那正好是动画帧）：宁可这一轮不画，
+    // 也不能把中间的几何/内容当成结果 —— 这是"宁漏勿错"在单卡刷新上的落地。
+    const rect = input.frozenRects?.[index] ?? null;
     if (!rect) {
+      notes.push(`卡${index}：没有冻结矩形 → 跳过识别（不许用本帧检测矩形兜底）`);
       cards.push(emptyCard({ x: 0, y: 0, w: 0, h: 0 }));
       continue;
     }

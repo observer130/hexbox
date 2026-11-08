@@ -16,7 +16,7 @@
  */
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import {
   parseApiTraceCsv,
@@ -444,11 +444,22 @@ function dumpSession(dir: string, session: LoadedSession, frameSourceDir: string
   // 帧图也复制过去：会话格式的约定是“`file` 相对于**会话目录**”。
   // 不复制就会得到一个“看着像会话、实际拿不到帧”的目录：
   // 回放时每一帧都解码失败 → “0 帧采样”（当场踩到过）。
+  //
+  // ⚠️ 必须**保留 `file` 里的子目录**（`gating/…` / `native/…`）：索引是原样写出的，
+  // 而 `FrameStore` 按 `join(sessionDir, ref.file)` 读 —— 以前把图平铺到目录根，
+  // 于是 dump 出来的会话"看着像会话、实际 0 帧"（正是上面注释警告的那个坑）。
   for (const f of session.frames) {
     const src = join(frameSourceDir, f.file);
-    if (existsSync(src)) copyFileSync(src, join(dir, basename(f.file)));
+    if (!existsSync(src)) continue;
+    const dst = join(dir, f.file);
+    mkdirSync(dirname(dst), { recursive: true });
+    copyFileSync(src, dst);
   }
   writeFileSync(join(dir, 'api.jsonl'), session.api.map((s) => JSON.stringify(s)).join('\n') + '\n');
+  // golden（录制当时的 report.json）也一并带上：否则 dump 出来的会话做不了
+  // "逐项比对"，只能看时序 —— 而那正是人工复核最需要的东西。
+  const goldenSrc = join(frameSourceDir, 'report.json');
+  if (existsSync(goldenSrc)) copyFileSync(goldenSrc, join(dir, 'report.json'));
 }
 
 const dumpArg = argv.find((a) => a.startsWith('--dump='));

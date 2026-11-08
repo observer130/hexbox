@@ -14,6 +14,8 @@
  */
 
 import { desktopCapturer, screen } from 'electron';
+import { VisionLoop } from './vision-loop-driver.ts';
+import type { VisionPickState } from './vision-loop-driver.ts';
 
 import {
   cardLabelFor,
@@ -33,7 +35,6 @@ import {
   findGameWindowRectCached,
   makeScreenGeometry,
   matchNameCareful,
-  createLabelMemory,
   probeTopLevelWindows,
   slotLabelFor,
   topBarSlotRects,
@@ -122,7 +123,7 @@ export interface VisionLoopDeps {
    * ⚠️ 没有它时只能用"顶栏是否有头像"猜阶段：真机反馈二阶段仍画着卡片
    * 标签（像素占用判不准就会这样），所以主进程应尽量提供本字段。
    */
-  readonly pickState?: () => 'picking' | 'locked' | 'unknown';
+  readonly pickState?: () => VisionPickState;
   /**
    * 第一阶段卡片几何的来源（`HEXBOX_CHAMP_SELECT_CARDS`）。
    *
@@ -660,124 +661,31 @@ export async function runVisionRound(
   });
 }
 
+/* ------------------------------------------------------------------ */
+/* 生产装配：把 Electron 绑定的那一半注入给可单测的驱动层                 */
+/* ------------------------------------------------------------------ */
+
+// 类本体在 `vision-loop-driver.ts`（不 import Electron，因此 CI 可测）；
+// 这里保持原有导出路径不变，调用方（index.ts）不必改 import。
+export { VisionLoop };
+export type { VisionPickState, VisionRoundResult } from './vision-loop-driver.ts';
+
 /**
- * 视觉循环控制器。
+ * 构造视觉循环（**唯一的生产装配点**）。
  *
- * `setActive(true)` 在进入 ChampSelect 时调用;离开时 `setActive(false)`。
- * 内部串行执行（上一轮完成才开始下一轮）,避免截屏堆积。
- *
- * 标签记忆（真机 bug 修复,2026-09-28）：卡片检测对动画/光效敏感,
- * 「3 张卡某轮只检出 2 张」的部分失败会以 active=true 覆盖旧结果,
- * 第三张卡片的胜率因此消失。现在每轮结果先经 `rememberLabels`
- * 按**位置**补齐 TTL 内缺失的旧标签,再推送 —— 显示连续性不受
- * 单轮检测抖动影响（TTL 6 轮 × 1.5s = 9s,足够覆盖检测闪烁）。
+ * 为什么要有这个工厂：驱动层只认注入的 `round` / `primaryDisplay`，而真正碰屏幕的
+ * `runVisionRound`（desktopCapturer + 窗口探针）必须留在这个文件里。把两者在这里
+ * 拼起来，既让 `VisionLoop` 能在 Node/CI 里用假实现测时序（"在途轮次 + stop"），
+ * 又不让驱动层反向依赖 Electron。
  */
-export class VisionLoop {
-  private readonly deps: VisionLoopDeps;
-  private readonly intervalMs: number;
-  private timer: NodeJS.Timeout | null = null;
-  private running = false;
-  /** 标签记忆（rememberLabels 的状态体）。 */
-  private memory = createLabelMemory();
-  private round = 0;
-  private failCount = 0;
-  /** 上一轮所处的子阶段（用于检测切换并立刻清空记忆）。 */
-  private lastPickState: 'picking' | 'locked' | 'unknown' | null = null;
-  /**
-   * 上一轮**真正落在**的子阶段（`runVisionRound` 回报；`null` = 还没有证据）。
-   *
-   * ⚠️ 为什么不能只看 `pickState`（真机 bug，2026-10-11）：LCU 的 `pickState`
-   * 可能是 `unknown`/'picking' 而屏幕上顶栏已经有头像（占用 > 0）→
-   * `isPhase2` 为真、走顶栏分支，但 `pickState` 一直没变 → 换阶段判据**永不触发**
-   * → 卡片标签以 TTL 挂在二阶段（日志 L86：`第二阶段(locked): 顶栏占用 2 格,
-   * 识别成功 0 格` 却仍推送 3 个卡片标签）。所以换阶段要按**实际阶段**判。
-   */
-  private lastStage: VisionStage | null = null;
-
-  constructor(deps: VisionLoopDeps, intervalMs = 1500) {
-    this.deps = deps;
-    this.intervalMs = intervalMs;
-  }
-
-  start(): void {
-    if (this.timer) return;
-    const tick = async (): Promise<void> => {
-      if (this.running) return;
-      this.running = true;
-      try {
-        // ⚠️ **每 tick 只读一次** `pickState`，并把同一个值传进 `runVisionRound`：
-        // 截屏 await 有 1~2 秒，期间 LCU（每 2 秒轮询）完全可能把 picking 翻成
-        // locked —— 两次读取会得到两个阶段，于是"用于重置记忆的阶段"与
-        // "用于画标签的阶段"不一致（真机日志 L86 的成因）。
-        const pickState = this.deps.pickState?.() ?? 'unknown';
-        const { msg, display, stage } = await runVisionRound(this.deps, pickState);
-        this.round++;
-        // 子阶段切换（第一阶段⇄第二阶段）时**立刻**清空标签记忆 —— 否则
-        // 卡片胜率会在选定后继续残留最多 6 轮（≈9 秒），真机反馈为
-        // "进入二阶段还不消失"。卡片与顶栏的标签位置完全不同，不能混用。
-        //
-        // 两条判据都留着（各自覆盖对方漏掉的情形）：
-        //   · `pickState` 变化（LCU 说得清时最灵敏）；
-        //   · **实际阶段**变化（LCU 说 unknown/picking、靠顶栏占用进二阶段时，
-        //     `pickState` 根本不会变 —— 只有这条能兜住）。
-        // 重置放在本轮输出之后、`memory.update()` 之前：效果与"轮前重置"等价，
-        // 而且用的是**本轮真正使用的**那个阶段。
-        const pickChanged = this.lastPickState !== null && pickState !== this.lastPickState;
-        const stageChanged = stage !== null && this.lastStage !== null && stage !== this.lastStage;
-        if (pickChanged || stageChanged) {
-          this.memory.reset();
-        }
-        this.lastPickState = pickState;
-        if (stage !== null) this.lastStage = stage;
-
-        const active = msg !== null && msg.active;
-        // 记忆补齐:本轮识别到的标签 + TTL 内未过期的旧标签
-        const produced = msg?.labels.length ?? 0;
-        const labels = this.memory.update(msg?.labels ?? [], this.round, active);
-        if (active) {
-          this.failCount = 0;
-        } else {
-          this.failCount++;
-        }
-        const shown = active || labels.length > 0;
-        // ⚠️ 诊断必须把"**本轮产出 X 个 → 实际推出 Y 个**"打在同一行：
-        // 幽灵标签那个 bug 里，两行日志（产出 3 / 推送 4）要靠人工对比才发现
-        //（真机日志 L40 vs L34）。
-        const flow = `本轮产出 ${produced} → 实际推出 ${labels.length}`;
-        this.deps.onResult(
-          shown
-            ? { active: true, labels, diag: `${msg?.diag ?? '记忆保持'}（${flow}）` }
-            : { active: false, labels: [], diag: `${msg?.diag ?? '未找到游戏窗口'}（${flow}）` },
-          display,
-        );
-      } catch {
-        this.deps.onResult(
-          { active: false, labels: [], diag: '识别异常' },
-          screen.getPrimaryDisplay(),
-        );
-      } finally {
-        this.running = false;
-      }
-    };
-    void tick();
-    this.timer = setInterval(() => void tick(), this.intervalMs);
-  }
-
-  stop(): void {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
-    this.memory.reset();
-    this.round = 0;
-    this.failCount = 0;
-    // 新会话不该继承上一段的阶段（否则第一 tick 会拿着旧阶段做一次无意义的重置）
-    this.lastPickState = null;
-    this.lastStage = null;
-    this.deps.onResult({ active: false, labels: [] }, screen.getPrimaryDisplay());
-  }
-
-  get isRunning(): boolean {
-    return this.timer !== null;
-  }
+export function createVisionLoop(deps: VisionLoopDeps, intervalMs = 1500): VisionLoop {
+  return new VisionLoop(
+    {
+      pickState: () => deps.pickState?.() ?? 'unknown',
+      round: (pickState) => runVisionRound(deps, pickState),
+      primaryDisplay: () => screen.getPrimaryDisplay(),
+      onResult: deps.onResult,
+    },
+    intervalMs,
+  );
 }

@@ -144,3 +144,27 @@ test('compareGolden：golden 缺整批识别锚点（旧产物）→ 只报"配�
   assert.equal(r.goldenRecognitions, 0);
   assert.equal(r.openEdgeExtra, 1, 'golden 没有锚点可比 → 只能报"回放多出"，不能假装命中');
 });
+
+test('compareGolden：识别次数**明显**漂移要报出来（以前只看边沿，这项从不比较）', () => {
+  const g = parseGoldenReport(realGoldenText(), 'report.json');
+  const replay = { ...alignedReplay(), recognizeCalls: 20 }; // golden 5 条 vs 回放 20 次
+  const r = compareGolden(replay, g);
+
+  assert.equal(r.goldenRecognitions, 5);
+  assert.equal(r.replayRecognizeCalls, 20);
+  assert.ok(
+    r.diffs.some((d) => /识别次数明显不一致/.test(d)),
+    '差 15 次属于"开边沿判定/重试策略漂移"，必须让回放的人看见',
+  );
+});
+
+test('compareGolden：识别次数小幅不等（重试噪声）不误报', () => {
+  const g = parseGoldenReport(realGoldenText(), 'report.json');
+  // golden 5 条 / 回放 7 次 —— 真机上就是这种 ±2 的重试差异
+  const r = compareGolden({ ...alignedReplay(), recognizeCalls: 7 }, g);
+  assert.equal(
+    r.diffs.some((d) => /识别次数/.test(d)),
+    false,
+    '±2 以内是重试，不该被当成漂移（否则每次真机回放都红）',
+  );
+});
