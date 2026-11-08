@@ -34,7 +34,7 @@ import { createRankingProviders, createStaticProviders } from '@hexbox/provider-
 import { encodePack, type TemplatePack } from '@hexbox/vision';
 import type { Dataset } from '@hexbox/core';
 
-import { fetchTemplates, runDefaultSync, type SyncProgress } from './sync.ts';
+import { fetchTemplates, runDefaultSync, syncExitCode, type SyncProgress } from './sync.ts';
 
 // 历史入口：单测与本包其它调用方一直从 `cli.ts` 取这两个纯函数。
 // 实现已搬到 `sync.ts`（CLI 与应用共用），这里保留 re-export 以免调用方/SDK 漂移。
@@ -116,7 +116,8 @@ async function cmdSync(storeRoot: string): Promise<number> {
     console.log(`⚠ ${report.failures.length} 个阶段失败，数据可能不完整`);
   }
   if (report.aborted) console.log('（已取消：已写下的文件仍然有效）');
-  return 0;
+  // ⚠️ 不能无条件 return 0：全失败时 CI/脚本要能看出来（判据在 sync.ts，有单测）。
+  return syncExitCode(report);
 }
 
 async function cmdTemplates(storeRoot: string): Promise<number> {

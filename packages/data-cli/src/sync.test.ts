@@ -27,7 +27,14 @@ import {
   championIdKey,
   datasetHasContent,
   decideTemplatesRebuild,
+  detailSkipReason,
+  detailsRequiredCount,
+  mayOverwriteDetails,
+  mergeRankingSnapshot,
+  mergeStaticDatasets,
   runDataSync,
+  syncExitCode,
+  templatesRequiredCount,
   type SyncProgress,
   type SyncStore,
 } from './sync.ts';
@@ -283,8 +290,13 @@ test('runDataSync：三个文件都写、报告统计日期与计数', async () 
 });
 
 test('runDataSync：部分静态源失败 → 仍写合并后的图鉴，并记失败', async () => {
+  // 旧文件里**已经有**国服图鉴（hextechs）。腾讯源这次挂了 → 合并结果里
+  // hextechs 是空数组，旧实现会直接写回，把 248 条国服图鉴静默清零。
   const { store, files } = memoryStore({
-    dataset: ds('old', { champions: [champion(1)] }),
+    dataset: ds('old', {
+      champions: [champion(1)],
+      hextechs: [hex(1001, '旧国服海克斯')],
+    }),
     templates: encodePack(packOf([1], true)),
   });
   const report = await runDataSync({
@@ -303,9 +315,56 @@ test('runDataSync：部分静态源失败 → 仍写合并后的图鉴，并记�
 
   assert.equal(report.ok, true);
   assert.deepEqual(report.wrote, ['dataset']);
-  assert.equal(report.failures.length, 1);
   assert.match(report.failures[0]!.message, /503/);
-  assert.equal((files.get('dataset') as Dataset).meta.source, 'cdragon');
+  const written = files.get('dataset') as Dataset;
+  assert.equal(written.meta.source, 'cdragon');
+  assert.equal(
+    written.hextechs.length,
+    1,
+    '失败源的 hextechs 必须沿用旧文件，不能被空数组覆盖',
+  );
+  assert.equal(written.hextechs[0]!.id, 1001);
+  assert.ok(
+    report.failures.some((f) => f.label === '静态图鉴合并' && /hextechs/.test(f.message)),
+    '回退这件事必须出现在报告里（否则用户以为数据是全新的）',
+  );
+});
+
+test('runDataSync：CDragon 失败 → 英雄/装备/海克斯沿用旧文件，不被腾讯单源清空', async () => {
+  const { store, files } = memoryStore({
+    dataset: ds('old', {
+      champions: [champion(1), champion(2)],
+      augments: [{} as never],
+      items: [{} as never],
+      hextechs: [hex(1001, '旧国服海克斯')],
+    }),
+    templates: encodePack(packOf([1, 2], true)),
+  });
+  const report = await runDataSync({
+    storeRoot: 'memory',
+    store,
+    staticProviders: [
+      staticProvider('cdragon', async () => {
+        throw new Error('CDragon 超时');
+      }),
+      // 腾讯一方只提供 hextechs（真实口径）
+      staticProvider('tencent', async () => ds('tencent', { hextechs: [hex(1002, '新国服海克斯')] })),
+    ],
+    rankingProviders: [],
+    fetchDetails: async (ids) => ids.map((id) => detail(id)),
+    buildTemplates: async () => packOf([1, 2]),
+    encodeTemplates: (pack) => encodePack(pack),
+  });
+
+  const written = files.get('dataset') as Dataset;
+  assert.equal(written.champions.length, 2, '英雄表不许被单源清空');
+  assert.equal(written.augments.length, 1, '海克斯(cd) 不许被清空');
+  assert.equal(written.items.length, 1, '装备表不许被清空');
+  // 成功的那一半照常更新
+  assert.equal(written.hextechs.length, 1);
+  assert.equal(written.hextechs[0]!.id, 1002, '成功源的新数据要优先于旧值');
+  // 详情阶段还能继续（英雄列表没丢）
+  assert.equal(report.counts.details, 2);
 });
 
 test('runDataSync：静态源全失败 → 不写 dataset（保留旧文件）', async () => {
@@ -504,4 +563,226 @@ test('runDataSync：详情途中取消 → 不写 builds（不许用局部结果
   assert.equal(report.aborted, true);
   // 图鉴是原子写，已经成功写入的那份保留
   assert.ok(writes.includes('dataset'));
+});
+
+/* ------------------------------------------------------------------ */
+/* S1/S3：按集合回退（纯函数）                                          */
+/* ------------------------------------------------------------------ */
+
+test('mergeStaticDatasets：无旧文件时不做任何回退', () => {
+  const merged = mergeStaticDatasets([ds('cdragon', { champions: [champion(1)] })], null);
+  assert.deepEqual(merged.backfilled, []);
+  assert.equal(merged.dataset.champions.length, 1);
+  assert.equal(merged.dataset.hextechs.length, 0);
+});
+
+test('mergeStaticDatasets：空集合按字段回退到旧文件（成功源的新数据优先）', () => {
+  const previous = ds('old', {
+    champions: [champion(9)],
+    augments: [{} as never],
+    items: [{} as never],
+    hextechs: [hex(1001, '旧')],
+  });
+  const merged = mergeStaticDatasets(
+    [
+      ds('cdragon', { champions: [champion(1)] }),
+      ds('tencent', { hextechs: [hex(1002, '新')] }),
+    ],
+    previous,
+  );
+
+  assert.deepEqual(merged.backfilled, ['augments', 'items'], '只有真正为空的集合才回退');
+  assert.equal(merged.dataset.champions.length, 1);
+  assert.equal(merged.dataset.champions[0]!.id, 1, '新数据不许被旧值盖掉');
+  assert.equal(merged.dataset.hextechs[0]!.id, 1002, '新数据不许被旧值盖掉');
+  assert.equal(merged.dataset.augments.length, 1, '空集合取旧值');
+  assert.equal(merged.dataset.items.length, 1, '空集合取旧值');
+});
+
+test('mergeStaticDatasets：旧文件也为空 → 不回退（保持"没有就是没有"）', () => {
+  const merged = mergeStaticDatasets(
+    [ds('cdragon', { champions: [champion(1)] })],
+    ds('old'),
+  );
+  assert.deepEqual(merged.backfilled, []);
+  assert.equal(merged.dataset.hextechs.length, 0);
+});
+
+test('mergeRankingSnapshot：单边为空时逐列表回退', () => {
+  const previous = snapshot('20261001', { heroes: [{} as never] });
+  const merged = mergeRankingSnapshot(snapshot('20261005', { augments: [{} as never] }), previous);
+
+  assert.deepEqual(merged.backfilled, ['heroes']);
+  assert.equal(merged.snapshot.augments.length, 1, '新榜保留');
+  assert.equal(merged.snapshot.heroes.length, 1, '空的那张榜取旧值');
+  assert.equal(merged.snapshot.meta.dataDate, '20261005', '统计日期仍用新快照的');
+});
+
+test('mergeRankingSnapshot：两张榜都为空且无旧数据 → 不回退', () => {
+  const merged = mergeRankingSnapshot(snapshot('20261005'), null);
+  assert.deepEqual(merged.backfilled, []);
+  assert.equal(merged.snapshot.augments.length, 0);
+  assert.equal(merged.snapshot.heroes.length, 0);
+});
+
+/* ------------------------------------------------------------------ */
+/* S2/S4：覆盖率下限（纯函数）                                          */
+/* ------------------------------------------------------------------ */
+
+test('detailsRequiredCount：90% 向上取整，边界不允许漏', () => {
+  assert.equal(detailsRequiredCount(173), 156);
+  assert.equal(detailsRequiredCount(2), 2);
+  assert.equal(detailsRequiredCount(1), 1);
+  assert.equal(detailsRequiredCount(0), 0);
+  assert.equal(detailsRequiredCount(Number.NaN), 0);
+});
+
+test('mayOverwriteDetails：60/173 必须被拒，156/173 允许', () => {
+  assert.equal(mayOverwriteDetails(60, 173), false, '大面积失败不许覆盖完整文件');
+  assert.equal(mayOverwriteDetails(0, 173), false);
+  assert.equal(mayOverwriteDetails(155, 173), false);
+  assert.equal(mayOverwriteDetails(156, 173), true, '恰好到下限要允许（容忍个别抖动）');
+  assert.equal(mayOverwriteDetails(173, 173), true);
+});
+
+test('detailSkipReason：取消 / 全失败 / 覆盖率不足三种文案可区分', () => {
+  assert.match(detailSkipReason({ fetched: 3, expected: 10, aborted: true }), /已取消/);
+  assert.match(detailSkipReason({ fetched: 0, expected: 10, aborted: false }), /全部失败/);
+  const short = detailSkipReason({ fetched: 3, expected: 10, aborted: false });
+  assert.match(short, /3\/10/);
+  assert.match(short, /低于 9 个的下限/);
+});
+
+test('templatesRequiredCount：与详情同一套下限口径', () => {
+  assert.equal(templatesRequiredCount(245), 221);
+  assert.equal(templatesRequiredCount(2), 2);
+  assert.equal(templatesRequiredCount(0), 0);
+});
+
+/* ------------------------------------------------------------------ */
+/* S5：退出码                                                          */
+/* ------------------------------------------------------------------ */
+
+test('syncExitCode：一个文件都没写成 → 非零（CI 要能判出来）', () => {
+  assert.equal(syncExitCode({ ok: false }), 1);
+  assert.equal(syncExitCode({ ok: true }), 0);
+});
+
+/* ------------------------------------------------------------------ */
+/* 集成：部分成功不许覆盖（S1–S4）                                      */
+/* ------------------------------------------------------------------ */
+
+test('runDataSync：详情只有 3/10 → 不写 builds，并记一条覆盖率失败', async () => {
+  const { store, writes } = memoryStore();
+  const report = await runDataSync({
+    storeRoot: 'memory',
+    store,
+    staticProviders: [
+      staticProvider('cdragon', async () =>
+        ds('cdragon', { champions: Array.from({ length: 10 }, (_, i) => champion(i + 1)) }),
+      ),
+    ],
+    rankingProviders: [],
+    // 只成功 3 个英雄
+    fetchDetails: async () => [1, 2, 3].map((id) => detail(id)),
+    buildTemplates: async () => packOf([1]),
+  });
+
+  assert.equal(writes.includes('builds'), false, '30% 覆盖率不许覆盖');
+  assert.ok(report.skipped.some((s) => s.stage === 'details'));
+  assert.ok(
+    report.failures.some((f) => f.stage === 'details' && /3\/10/.test(f.message)),
+    '覆盖率不足要进报告',
+  );
+});
+
+test('runDataSync：详情 10/10 → 照常写入（下限不误杀正常情况）', async () => {
+  const { store, writes } = memoryStore();
+  await runDataSync({
+    storeRoot: 'memory',
+    store,
+    staticProviders: [
+      staticProvider('cdragon', async () =>
+        ds('cdragon', { champions: Array.from({ length: 10 }, (_, i) => champion(i + 1)) }),
+      ),
+    ],
+    rankingProviders: [],
+    fetchDetails: async (ids) => ids.map((id) => detail(id)),
+    buildTemplates: async () => packOf([1]),
+  });
+
+  assert.ok(writes.includes('builds'));
+});
+
+test('runDataSync：英雄榜为空但海克斯榜有数据 → 旧英雄榜被保留，不被删掉', async () => {
+  const previous = snapshot('20261001', {
+    augments: [{} as never],
+    heroes: [{ championId: 63, rank: 1 } as never],
+  });
+  const { store, files } = memoryStore({ rankings: previous });
+  const report = await runDataSync({
+    storeRoot: 'memory',
+    store,
+    staticProviders: [],
+    rankingProviders: [
+      // 海克斯榜有新数据，英雄榜这次是空的（真实故障形态）
+      rankingProvider('tencent', async () => snapshot('20261005', { augments: [{} as never] })),
+    ],
+    fetchDetails: async () => [],
+  });
+
+  const written = files.get('rankings') as RankingSnapshot;
+  assert.equal(written.augments.length, 1);
+  assert.equal(written.heroes.length, 1, '旧英雄榜不许被"半边成功"删除');
+  assert.ok(report.failures.some((f) => f.label === '排行榜合并' && /heroes/.test(f.message)));
+});
+
+test('runDataSync：取消后模板构建才返回 → 不写 templates', async () => {
+  const previousPack = packOf([1], true);
+  const { store, writes } = memoryStore({
+    dataset: ds('old', { champions: [champion(1)] }),
+    templates: encodePack(previousPack),
+  });
+  const controller = new AbortController();
+  const report = await runDataSync({
+    storeRoot: 'memory',
+    store,
+    staticProviders: [
+      staticProvider('cdragon', async () => ds('cdragon', { champions: [champion(1), champion(2)] })),
+    ],
+    rankingProviders: [],
+    signal: controller.signal,
+    fetchDetails: async (ids) => ids.map((id) => detail(id)),
+    buildTemplates: async () => {
+      controller.abort(); // 构建期间用户点了取消
+      return packOf([1, 2]);
+    },
+  });
+
+  assert.equal(writes.includes('templates'), false, '取消后不许写残缺模板包');
+  assert.ok(report.skipped.some((s) => s.stage === 'templates' && /已取消/.test(s.reason)));
+});
+
+test('runDataSync：模板只拿到 1/10 → 不写，并记覆盖率失败', async () => {
+  const { store, writes } = memoryStore({
+    dataset: ds('old', { champions: [champion(1)] }),
+    templates: encodePack(packOf([1], true)),
+  });
+  const report = await runDataSync({
+    storeRoot: 'memory',
+    store,
+    // 英雄集合变化 → 触发重建
+    staticProviders: [
+      staticProvider('cdragon', async () =>
+        ds('cdragon', { champions: Array.from({ length: 10 }, (_, i) => champion(i + 1)) }),
+      ),
+    ],
+    rankingProviders: [],
+    fetchDetails: async (ids) => ids.map((id) => detail(id)),
+    buildTemplates: async () => packOf([1]), // 1/10
+  });
+
+  assert.equal(writes.includes('templates'), false, '10% 的包不许覆盖好的包');
+  assert.equal(report.templatesRebuilt, false);
+  assert.ok(report.failures.some((f) => f.stage === 'templates' && /1\/10/.test(f.message)));
 });

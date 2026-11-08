@@ -78,6 +78,164 @@ export function datasetHasContent(dataset: Dataset | null): dataset is Dataset {
 }
 
 /* ------------------------------------------------------------------ */
+/* 按集合回退（**只有存在旧文件时才生效**）                              */
+/* ------------------------------------------------------------------ */
+
+/** 数据集里可以独立回退的四类内容。 */
+export type DatasetCollection = 'augments' | 'champions' | 'items' | 'hextechs';
+
+const DATASET_COLLECTIONS: readonly DatasetCollection[] = [
+  'augments',
+  'champions',
+  'items',
+  'hextechs',
+];
+
+/** 去掉 `readonly` 的内存视图（回退时只改这一份浅拷贝，不动入参）。 */
+type MutableDataset = { -readonly [K in keyof Dataset]: Dataset[K] };
+
+/** 某一类内容为空时，用旧文件里的那一份补上（返回是否补了）。 */
+function backfillDatasetCollection<K extends DatasetCollection>(
+  key: K,
+  merged: MutableDataset,
+  previous: Dataset | null,
+): boolean {
+  if (merged[key].length > 0) return false;
+  const old = previous?.[key];
+  if (!old || old.length === 0) return false;
+  merged[key] = old;
+  return true;
+}
+
+/**
+ * 多源合并 + **按集合回退**到上一份好数据。
+ *
+ * 为什么必须有（真机风险，2026-11 审查）：
+ *   静态图鉴是**两个源分工**拼出来的 —— CDragon 出 `augments/champions/items`，
+ *   腾讯一方出 `hextechs`（国服图鉴）。任一方失败时，`mergeDatasets` 得到的
+ *   那一类是**空数组**，而 `datasetHasContent` 是"任一字段非空"的 OR 判据，
+ *   于是"另一半"会被空数组**静默覆盖**：腾讯挂了 = 248 条国服图鉴清零；
+ *   CDragon 挂了 = 英雄/装备/海克斯全清零（详情阶段随后还会因"没有英雄列表"
+ *   而整体跳过）。这两条都发生在**启动静默自动同步**里，用户看不到任何提示。
+ *
+ * 判据：**失败源的那一类内容沿用旧文件**，其余照常写入；`backfilled` 交给
+ *   调用方记成 failure，让"数据可能不完整"这件事在报告里看得见。
+ *
+ * @param fresh 本次**成功**的静态源（顺序有意义，见 `mergeDatasets`）
+ * @param previous 上一份好数据（无则为 null → 不做任何回退）
+ */
+export function mergeStaticDatasets(
+  fresh: readonly Dataset[],
+  previous: Dataset | null,
+): { readonly dataset: Dataset; readonly backfilled: readonly DatasetCollection[] } {
+  const merged = mergeDatasets(fresh) as MutableDataset;
+  const backfilled: DatasetCollection[] = [];
+  for (const key of DATASET_COLLECTIONS) {
+    if (backfillDatasetCollection(key, merged, previous)) backfilled.push(key);
+  }
+  return { dataset: merged, backfilled };
+}
+
+/** 排行榜里可以独立回退的两张榜。 */
+export type RankingList = 'augments' | 'heroes';
+
+/** 去掉 `readonly` 的内存视图。 */
+type MutableRankingSnapshot = {
+  -readonly [K in keyof RankingSnapshot]: RankingSnapshot[K];
+};
+
+/** 某一榜为空时用旧榜单补上（泛型保证两侧同一字段类型）。 */
+function backfillRankingList<K extends RankingList>(
+  merged: MutableRankingSnapshot,
+  key: K,
+  previous: RankingSnapshot | null,
+): boolean {
+  if (merged[key].length > 0) return false;
+  const old = previous?.[key];
+  if (!old || old.length === 0) return false;
+  merged[key] = old;
+  return true;
+}
+
+/**
+ * 排行榜**逐列表**回退。
+ *
+ * 与 `mergeStaticDatasets` 同一个病：上游是两个独立接口（`fuwen_aram_rune_rank_v2`
+ * 与 `fuwen_aram_hero_rank_v2`），其中一个报错时快照里那张榜是空数组，而写盘判据
+ * 是"任一榜非空" —— 于是"半边成功"会删掉另一张完整的榜（245 条英雄榜）。
+ */
+export function mergeRankingSnapshot(
+  fresh: RankingSnapshot,
+  previous: RankingSnapshot | null,
+): { readonly snapshot: RankingSnapshot; readonly backfilled: readonly RankingList[] } {
+  const merged = { ...fresh } as MutableRankingSnapshot;
+  const backfilled: RankingList[] = [];
+  for (const key of ['augments', 'heroes'] as const) {
+    if (backfillRankingList(merged, key, previous)) backfilled.push(key);
+  }
+  return { snapshot: merged, backfilled };
+}
+
+/* ------------------------------------------------------------------ */
+/* 写入前的覆盖率下限（防"部分成功"覆盖完整文件）                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 单英雄详情的最低覆盖率。
+ *
+ * 为什么是 90% 而不是 100%：个别英雄偶发超时/无数据是常态，要求满覆盖会让
+ * 一次抖动就把整次更新卡死；而 60/173 这种"大面积失败"必须挡住 —— 它会把
+ * 113 个英雄的强度表**静默删掉**（详情逐条累计，`details` 就是最终文件）。
+ */
+export const DETAILS_MIN_COVERAGE = 0.9;
+
+/** 头像模板包的最低覆盖率（同上：挡住大面积失败，容忍个别头像 404）。 */
+export const TEMPLATES_MIN_COVERAGE = 0.9;
+
+/** 覆盖率下限（向上取整，至少 1；`expected <= 0` 时为 0 = 无从判断）。 */
+function coverageFloor(expected: number, ratio: number): number {
+  const total = Number.isFinite(expected) && expected > 0 ? Math.floor(expected) : 0;
+  if (total === 0) return 0;
+  return Math.max(1, Math.ceil(total * ratio));
+}
+
+/** 这次至少要拿到多少个英雄详情才允许覆盖 `builds.json`。 */
+export function detailsRequiredCount(expected: number): number {
+  return coverageFloor(expected, DETAILS_MIN_COVERAGE);
+}
+
+/** 这次至少要拿到多少个头像模板才允许覆盖 `templates.json`。 */
+export function templatesRequiredCount(expected: number): number {
+  return coverageFloor(expected, TEMPLATES_MIN_COVERAGE);
+}
+
+/**
+ * 这批详情够不够格覆盖旧文件（纯函数，写盘前的唯一判据）。
+ *
+ * 与 `aborted()` 分开判断：取消是"用户不要了"，覆盖率是"数据不完整"，
+ * 两条都必须拒绝写入，但报告文案不同。
+ */
+export function mayOverwriteDetails(fetched: number, expected: number): boolean {
+  if (!Number.isFinite(fetched) || fetched <= 0) return false;
+  return fetched >= detailsRequiredCount(expected);
+}
+
+/** 详情未落盘时的**人话原因**（报告与 skipped 共用，纯函数便于单测）。 */
+export function detailSkipReason(input: {
+  readonly fetched: number;
+  readonly expected: number;
+  readonly aborted: boolean;
+}): string {
+  if (input.aborted) return '已取消（详情不完整，不覆盖旧文件）';
+  if (input.fetched <= 0) return '全部失败，保留现有英雄详情';
+  const required = detailsRequiredCount(input.expected);
+  return (
+    `只拿到 ${input.fetched}/${input.expected} 个英雄（低于 ${required} 个的下限，` +
+    '保留现有英雄详情）'
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* 类型                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -133,6 +291,17 @@ export interface SyncReport {
   readonly counts: SyncCounts;
   readonly fetchedAt: string;
   readonly templatesRebuilt: boolean;
+}
+
+/**
+ * `pnpm sync` 的退出码：**一个文件都没写成**才算失败。
+ *
+ * 为什么需要它（2026-11 审查）：`cmdSync` 以前无条件 `return 0`，
+ * 于是"全部数据源失败"也返回 0 —— CI 与脚本据此完全看不出失败。
+ * 部分阶段失败仍返回 0（已有文件被更新，CLI 会另行打印 ⚠ 警告）。
+ */
+export function syncExitCode(report: Pick<SyncReport, 'ok'>): number {
+  return report.ok ? 0 : 1;
 }
 
 /** 写盘接口（默认实现 = `@hexbox/data-store`；测试注入内存版）。 */
@@ -434,7 +603,8 @@ export async function runDataSync(options: SyncOptions): Promise<SyncReport> {
 
   let dataset: Dataset | null = null;
   if (datasets.length > 0) {
-    dataset = mergeDatasets(datasets);
+    const mergedStatic = mergeStaticDatasets(datasets, previousDataset);
+    dataset = mergedStatic.dataset;
     if (datasetHasContent(dataset)) {
       await store.writeDataset(root, dataset);
       wrote.push('dataset');
@@ -442,6 +612,16 @@ export async function runDataSync(options: SyncOptions): Promise<SyncReport> {
       counts.hextechs = dataset.hextechs.length;
       counts.champions = dataset.champions.length;
       counts.items = dataset.items.length;
+      if (mergedStatic.backfilled.length > 0) {
+        // ⚠️ 这几类内容这次**一个源都没给出来**（对应静态源失败，或上游返回空），
+        //    已回退成旧文件里的那一份 —— 记成 failure，让"数据可能不完整"看得见。
+        //    不记的话，失败源的那一半会被静默沿用，报告却显示一切正常。
+        failures.push({
+          stage: 'static',
+          label: '静态图鉴合并',
+          message: `${mergedStatic.backfilled.join(' / ')} 本次没有数据，沿用旧文件（未清空）`,
+        });
+      }
     } else {
       skipped.push({ stage: 'static', reason: '合并结果为空，保留现有图鉴' });
       dataset = null;
@@ -485,16 +665,33 @@ export async function runDataSync(options: SyncOptions): Promise<SyncReport> {
         snapshot = null;
       }
     }
-    if (snapshot && (snapshot.augments.length > 0 || snapshot.heroes.length > 0)) {
-      await store.writeRankings(root, snapshot);
-      wrote.push('rankings');
-      counts.rankingAugments = snapshot.augments.length;
-      counts.rankingHeroes = snapshot.heroes.length;
-      dataDate = snapshot.meta.dataDate || dataDate;
+    if (snapshot) {
+      // 逐列表回退：两张榜来自两个独立接口，一边失败不许删掉另一边。
+      const mergedRanking = mergeRankingSnapshot(snapshot, previousRankings);
+      const next = mergedRanking.snapshot;
+      if (next.augments.length > 0 || next.heroes.length > 0) {
+        await store.writeRankings(root, next);
+        wrote.push('rankings');
+        counts.rankingAugments = next.augments.length;
+        counts.rankingHeroes = next.heroes.length;
+        dataDate = next.meta.dataDate || dataDate;
+        if (mergedRanking.backfilled.length > 0) {
+          failures.push({
+            stage: 'rankings',
+            label: '排行榜合并',
+            message: `${mergedRanking.backfilled.join(' / ')} 本次为空，沿用旧榜单（未清空）`,
+          });
+        }
+      } else {
+        skipped.push({
+          stage: 'rankings',
+          reason: aborted() ? '已取消' : '上游无数据（维护中或未更新），保留现有榜单',
+        });
+      }
     } else {
       skipped.push({
         stage: 'rankings',
-        reason: aborted() ? '已取消' : '上游无数据（维护中或未更新），保留现有榜单',
+        reason: aborted() ? '已取消' : '所有排行榜源均失败，保留现有榜单',
       });
     }
   }
@@ -519,8 +716,11 @@ export async function runDataSync(options: SyncOptions): Promise<SyncReport> {
         return [] as readonly ChampionDetail[];
       });
 
-      // 取消时**不写**：详情是逐条累计的，局部结果会用 50 个英雄覆盖掉完整的 173 个
-      if (details.length > 0 && !aborted()) {
+      // 两条拒绝条件，文案分开：
+      //   · 取消 —— 详情是逐条累计的，局部结果会用 50 个英雄覆盖掉完整的 173 个；
+      //   · 覆盖率不足 —— 个别超时无所谓，但 60/173 这种大面积失败必须挡住
+      //     （以前只要 `details.length > 0` 就写，等于把 113 个英雄的表静默删掉）。
+      if (!aborted() && mayOverwriteDetails(details.length, total)) {
         const set: ChampionDetailSet = {
           meta: {
             source: 'tencent-hero-detail',
@@ -543,10 +743,16 @@ export async function runDataSync(options: SyncOptions): Promise<SyncReport> {
           message: `${details.length}/${total} 个英雄`,
         });
       } else {
-        skipped.push({
-          stage: 'details',
-          reason: aborted() ? '已取消（详情不完整，不覆盖旧文件）' : '全部失败，保留现有英雄详情',
+        const reason = detailSkipReason({
+          fetched: details.length,
+          expected: total,
+          aborted: aborted(),
         });
+        skipped.push({ stage: 'details', reason });
+        // 覆盖率不足属于"数据不完整"，要出现在报告里；取消是用户意图，不算失败。
+        if (!aborted() && details.length > 0) {
+          failures.push({ stage: 'details', label: '单英雄详情', message: reason });
+        }
       }
     }
   }
@@ -573,21 +779,34 @@ export async function runDataSync(options: SyncOptions): Promise<SyncReport> {
       const build = options.buildTemplates ?? fetchTemplates;
       try {
         const pack = await build(champions, { signal });
-        const encoded = (options.encodeTemplates ?? encodePack)(
-          carryNames(pack, previousTemplates),
-        );
-        await store.writeTemplates(root, encoded);
-        wrote.push('templates');
-        counts.templates = pack.count;
-        templatesRebuilt = true;
-        emit({
-          stage: 'templates',
-          label: '头像模板',
-          done: pack.count,
-          total: champions.length,
-          ok: true,
-          message: `${pack.count} 个模板`,
-        });
+        // ⚠️ `await` 之后**必须**再查一次取消：以前这里直接写盘，用户点取消也照样
+        //    落一个残缺包（`fetchTemplates` 只在"一个都没成功"时抛错）。
+        const required = templatesRequiredCount(champions.length);
+        if (aborted()) {
+          skipped.push({ stage: 'templates', reason: '已取消（不写残缺模板包）' });
+        } else if (pack.count <= 0 || pack.count < required) {
+          const reason =
+            `只拿到 ${pack.count}/${champions.length} 个模板（低于 ${required} 个的下限，` +
+            '保留现有模板包）';
+          failures.push({ stage: 'templates', label: '头像模板', message: reason });
+          skipped.push({ stage: 'templates', reason });
+        } else {
+          const encoded = (options.encodeTemplates ?? encodePack)(
+            carryNames(pack, previousTemplates),
+          );
+          await store.writeTemplates(root, encoded);
+          wrote.push('templates');
+          counts.templates = pack.count;
+          templatesRebuilt = true;
+          emit({
+            stage: 'templates',
+            label: '头像模板',
+            done: pack.count,
+            total: champions.length,
+            ok: true,
+            message: `${pack.count} 个模板`,
+          });
+        }
       } catch (err) {
         failures.push({ stage: 'templates', label: '头像模板', message: errorText(err) });
         skipped.push({ stage: 'templates', reason: `重建失败：${errorText(err)}` });
