@@ -95,6 +95,7 @@
 pnpm templates                                # 构建期生成头像模板包（一次即可）
 pnpm --filter @hexbox/overlay debug:capture   # 产出 debug/annotated.png
 pnpm --filter @hexbox/overlay debug:overlay-test   # 覆盖层渲染自测（不需要游戏）
+node --experimental-strip-types scripts/verify-champ-select-stage.mts  # 阶段判据复核（吃留存帧，不需要游戏）
 ```
 
 把标注图发回即可迭代定位/识别算法 —— 详见 [SCREENSHOT-DEV.md](SCREENSHOT-DEV.md)。

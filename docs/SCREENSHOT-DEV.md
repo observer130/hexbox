@@ -240,7 +240,15 @@ pnpm --filter @hexbox/overlay debug:capture
 ```bash
 pnpm --filter @hexbox/overlay debug:overlay-test
 # 真实显示 12 秒肉眼看：加 OVERLAY_TEST_VISIBLE=1
+
+# 阶段判据（顶栏几格）用**留存的真机帧**离线复核，不需要上机：
+node --experimental-strip-types scripts/verify-champ-select-stage.mts [帧目录]
 ```
+
+> `verify-champ-select-stage` 只吃**整窗帧**（宽高比 = 2400/1350）；裁剪片段会被
+> 自动跳过。它打印每帧的「占用格数 + 命中格序号 + 判出的阶段」，与屏幕实际阶段
+> 逐帧对照即可。2026-11-08 用 `debug/cards-check/` 的 7 张帧跑过：一阶段 4/4 →
+> 0 格，二阶段 3/3 → 1 格。
 
 ### S3 — 召唤师技能
 
