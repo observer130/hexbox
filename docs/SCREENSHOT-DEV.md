@@ -151,7 +151,7 @@ pnpm templates   # = data-cli「templates」命令
 卡片区下部有印刷体英雄名（白字,Microsoft YaHei,与游戏内字体同源）。
 `vision/ocr.ts`：名字带二值化 → 裁剪文字包围盒 → 统一网格拉伸 →
 与名字指纹库（`pnpm templates` 构建,`scripts/render-name-fingerprints.ps1`
-渲染 **245 条**名字 —— 173 真实英雄 + 72 条同一英雄的变体条目）做 Jaccard 匹配。
+渲染 **245 条**名字指纹；图鉴英雄条目现为 254 条 = 173 真实英雄 + 81 条变体条目）做 Jaccard 匹配。
 离线回放真机截图：2/2 正确（0.608/0.552,错误名 < 0.45）。
 
 **阶段 2 —— 确认态顶栏逐格匹配（2026-09-28 重做）**：

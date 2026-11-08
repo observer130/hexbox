@@ -691,11 +691,15 @@ GET https://api.github.com/repos/observer130/hexbox/releases/latest → 404     
 3. 建 Release，**tag 必须是合法的语义化版本**（`v0.2.0` / `0.2.0` 都认；`nightly-2026` 这种会被判"不是版本号"）：
 
    ```powershell
-   gh release create v0.2.0 `
-     release/hexbox-setup-0.2.0-x64.exe `
-     release/hexbox-portable-0.2.0-x64.exe `
-     --title "hexbox 0.2.0" --notes-file docs/CHANGELOG-0.2.0.md
+   gh release create v0.3.0 `
+     release/hexbox-setup-0.3.0-x64.exe `
+     release/hexbox-portable-0.3.0-x64.exe `
+     --title "hexbox 0.3.0" --notes-file docs/RELEASE-NOTES-v0.3.0.md
    ```
+
+   > 发布说明的文件名是 **`docs/RELEASE-NOTES-v<版本>.md`**（早期文档里写成
+   > `docs/CHANGELOG-0.2.0.md`，那个文件从来不存在 —— 照抄会让
+   > `gh release create` 直接失败）。
 
    * **必须**带 `hexbox-setup-<ver>-x64.exe`：更新流程只认它
      （`^hexbox-setup-.*\.exe$`，优先 `-x64`）；只发便携版会被判成

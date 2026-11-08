@@ -48,6 +48,11 @@ jobs:
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
 
+      # 文档对账：链接/测试数三处一致/引用的脚本存在。
+      # 不依赖数据与游戏，几秒就完；放在最前面，文档漂移能最快报出来。
+      - name: 文档对账
+        run: pnpm check:docs
+
       - name: 类型检查
         run: pnpm typecheck
 

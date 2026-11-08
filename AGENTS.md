@@ -64,14 +64,16 @@ pnpm dev:web                                  # http://localhost:5273
 
 ## Gates
 
-`pnpm typecheck` → `pnpm test` → `pnpm build` (CI runs the same on `windows-latest`).
-Node's built-in runner; `pnpm --filter @hexbox/core test` is faster. **Keep them green
-and add tests for new behavior.** Current: **1100** — core 55 / vision 709 / lcu 144 /
-overlay 61 / provider-communitydragon 12 / provider-tencent 43 / data-store 19 /
-data-cli 53 / web 4 (`pnpm test` is the source of truth; the overlay's Electron runtime
-is not testable — its tests cover replay-safe parts and the self-test scenario logic
-only). `pnpm typecheck` also checks `scripts/*.mts` (`scripts/tsconfig.json`) and
-`apps/web` (via `vue-tsc`).
+`pnpm check:docs` → `pnpm typecheck` → `pnpm test` → `pnpm build` (CI runs the same on
+`windows-latest`). Node's built-in runner; `pnpm --filter @hexbox/core test` is faster.
+**Keep them green and add tests for new behavior.** Current: **1100** — core 55 /
+vision 709 / lcu 144 / overlay 61 / provider-communitydragon 12 / provider-tencent 43 /
+data-store 19 / data-cli 53 / web 4 (`pnpm test` is the source of truth; the overlay's
+Electron runtime is not testable — its tests cover replay-safe parts and the self-test
+scenario logic only). `pnpm typecheck` also checks `scripts/*.mts`
+(`scripts/tsconfig.json`) and `apps/web` (via `vue-tsc`). `pnpm check:docs` fails on a
+broken local link, a test count that disagrees between AGENTS/README/ROADMAP, or a
+reference to a script that doesn't exist.
 
 ## Rules that must not be broken
 
@@ -109,9 +111,9 @@ Read the doc named per area first; every rule below cost a real bug.
 - Both entries run the **same** `AugmentController`, which must not import Electron
   (clock/capture/geometry/2999/identity injected) so replay can drive it; **replay
   drives, it never re-implements**, and `vision/augment-recognize.ts` is the single core.
-- **Never invent a tier**: the official per-champion table covers ~211 of 248 augments —
-  unknown, or unsure OCR → draw nothing. Show the **pick rate**, worded as this
-  champion's official stats, never as "what you were offered".
+- **Never invent a tier**: the official per-champion table covers 214 of the 235 CN
+  augments (≈91%) — unknown, or unsure OCR → draw nothing. Show the **pick rate**, worded
+  as this champion's official stats, never as "what you were offered".
 - **"Which champion am I" has one source: `me`** (`resolveMyChampionIdentity`) — never
   scan a list (a real bug showed a teammate's table); a high hit count proves nothing.
 - Label geometry/colors/text come only from `augment-label.ts`, `augment-tier-label.ts`
@@ -160,6 +162,7 @@ in `debug-augment.ts`.
 | `HEXBOX_AUGMENT_FORENSICS` / `_CLOSED_SAMPLES` / `_API_TRACE` / `_CLOSE_HEAL_PROBE` / `_PENDING_PROBE_MS` | opt-in diagnostics; both probes are **off** (strict zero frames) |
 | `HEXBOX_AUGMENT_RECORD` / `_RECORD_DIR` / `_OUT` / `_SECONDS` / `_MAX_MINUTES` / `_DRAW` / `_BADGE` | session recording (**off**), labels (on), badge size `small` / `medium` / `large` |
 | `HEXBOX_OVERLAY_AUGMENT` / `HEXBOX_CHAMP_SELECT_CARDS` / `HEXBOX_DATA_DIR` / `HEXBOX_DATA_CHECK` / `HEXBOX_LOG_FILE` / `HEXBOX_SMOKE` / `HEXBOX_TRAY_*` / `HEXBOX_NOTICE_TEST` / `HEXBOX_LCU_CREDENTIALS(_FILE)` / `HEXBOX_LABEL_OVERLAY_TEST(_MS)` / `HEXBOX_DEBUG_FORCE` / `_SELFTEST_CADENCE` | chain toggle / card source `geometry` / `legacy` / `off` / data dir（默认 `文档\hexbox\data`） / `0` = 关闭启动数据检查 / log tee / smoke / tray self-test + icon / balloon test / LCU credentials / self-tests |
+| `HEXBOX_GITHUB_TOKEN` / `HEXBOX_UPDATE_API_BASE` / `HEXBOX_UPDATE_CHECK_TEST` | 更新检查的可选 token（**只发给 `api.github.com`**，不跟去 CDN；录制元数据里会被脱敏）/ 自测用地址 / 自测模式（正常用户不会设）|
 
 ## Game-free checks (no game required)
 

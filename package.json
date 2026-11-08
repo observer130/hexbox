@@ -11,6 +11,7 @@
   "packageManager": "pnpm@11.7.0",
   "scripts": {
     "typecheck": "pnpm -r typecheck && tsc --noEmit -p scripts/tsconfig.json",
+    "check:docs": "node --experimental-strip-types scripts/check-docs.mts",
     "test": "pnpm -r test",
     "build": "pnpm -r build",
     "sync": "node --experimental-strip-types packages/data-cli/src/cli.ts sync",

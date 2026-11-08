@@ -2,8 +2,10 @@
 
 > 本文描述**当前**状态与**接下来**要做什么。
 > 历史决策过程见 [OVERLAY-STAGES.md](OVERLAY-STAGES.md) 与 git log。
-> 核对时间：2026-10-04（选人阶段那一轮的验收清单见 [SESSION-NOTES.md](SESSION-NOTES.md)，
-> 局内海克斯识别见 [AUGMENT-PANEL.md](AUGMENT-PANEL.md)）。
+> 核对时间：**2026-11-08**（数据规模/关联完整性按当日快照实测；测试数与包数按当日
+> `pnpm test` / `pnpm typecheck` 实测）。选人阶段的验收清单见 [SESSION-NOTES.md](SESSION-NOTES.md)，
+> 局内海克斯识别见 [AUGMENT-PANEL.md](AUGMENT-PANEL.md)，待跑的真机清单见
+> [VERIFY-P1.md](VERIFY-P1.md)。
 
 ## 一、现状
 
@@ -20,23 +22,32 @@
 
 ### 数据集实测规模（`data/*.json`）
 
+> 核对：**2026-11-08**，取自本机 2026-11-02 同步的快照（`dataset.meta.fetchedAt`）。
+> 上游每次换版都会变 —— `pnpm sync` 之后以 `cli status` 的输出为准。
+
 | 文件 | 内容 | 大小 |
 |---|---|---|
-| `dataset.json` | 海克斯 554（CDragon）+ 248（国服）/ **英雄 173**（+ 72 条同一英雄的变体条目 = 245 行）/ 装备 870 | ~0.87 MB |
-| `rankings.json` | 海克斯榜 211 / 英雄榜 173 | ~0.22 MB |
-| `builds.json` | 单英雄详情 **173** 个（= 全部真实英雄；图鉴里另 72 条是**同一英雄的变体条目**，没有独立统计）| ~4.5 MB |
-| `templates.json` | 245 条英雄头像模板（173 英雄 + 72 变体条目）+ 245 个名字指纹（gzip+base64）| ~0.46 MB |
+| `dataset.json` | 海克斯 594（CDragon）+ 235（国服）/ **英雄 173**（+ 81 条同一英雄的变体条目 = 254 行）/ 装备 863 | ~0.86 MB |
+| `rankings.json` | 海克斯榜 214 / 英雄榜 173 | ~0.22 MB |
+| `builds.json` | 单英雄详情 **173** 个（= 全部真实英雄；图鉴里另 81 条是**同一英雄的变体条目**，没有独立统计）| ~4.4 MB |
+| `templates.json` | 253 条英雄头像模板 + 245 个名字指纹（gzip+base64）| ~0.48 MB |
 
-`builds.json` 每个英雄平均 **125 条**海克斯强度；出装字段实测
+`builds.json` 每个英雄平均 **122 条**海克斯强度（93~157，中位数 122）；出装字段实测
 `itemone_json` **20 条**、`itemcore_json` **10 条**（173/173 英雄一致）。
 
 ### 关联完整性（实测）
 
 | 关联 | 命中 |
 |---|---|
-| 海克斯榜 ID → 国服图鉴 | 210 / 211 |
+| 海克斯榜 ID → 国服图鉴 | 214 / 214 |
 | 英雄榜 ID → 英雄表 | 173 / 173 |
-| `bestHeroes` → 英雄表 | 1266 / 1266 |
+| 详情 `partners` → 英雄表 | 865 / 865 |
+
+> 这三项现在由 `cli.ts status` 打印（`computeJoinCoverage`）。"文件非空但一条也 join
+> 不上"是本项目最容易悄悄发生的坏数据，所以它和"文件有多大"分开看。
+>
+> ⚠️ 旧表里的 `bestHeroes` 字段已不存在，现在叫 `partners`（字段名变了，语义同样是
+> "该英雄的搭档推荐"）。
 
 ## 二、已完成（摘要）
 
@@ -142,7 +153,7 @@ node --experimental-strip-types scripts/diag-augment-frames.mts <帧.png...>   #
 
 | 任务 | 说明 |
 |---|---|
-| 装备浏览页 | `items` 已抓 870 条，但前端只显示数量、无浏览页 |
+| 装备浏览页 | `items` 已抓 863 条，但前端只显示数量、无浏览页 |
 | 英雄详情页 | 跳转英雄的适配海克斯 |
 | 图鉴筛选 | 按「新海克斯」（`isNew`）筛选；展示国服 `tooltip` |
 | 补丁版本追踪 | `Dataset.meta.patch` 恒为 `null`，可接 CDragon `version.json` |
