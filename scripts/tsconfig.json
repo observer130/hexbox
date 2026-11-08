@@ -1,0 +1,10 @@
+{
+  // 诊断脚本的类型检查（以前这些文件**不属于任何 tsconfig** —— CI 碰不到，
+  // 改动它们等于没有护栏）。lib 要带 DOM：部分脚本用 ImageData/OffscreenCanvas 之类。
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM"],
+    "types": ["node"]
+  },
+  "include": ["**/*.mts"]
+}

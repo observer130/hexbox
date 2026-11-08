@@ -15,6 +15,11 @@ debug/
 .DS_Store
 *.log
 
+# 诊断脚本可能吐出的身份信息（summonerId/accountId/玩家名）——双保险：
+# dump-lcu-itemsets.ps1 现在写到 debug/，但万一有人改了路径也不许入库
+scripts/*-dump.txt
+scripts/lcu-itemsets*.txt
+
 # electron-builder 的产物（installer / portable exe / win-unpacked）
 # 配置在 apps/overlay/electron-builder.yml，命令见 docs/RELEASE-WINDOWS.md
 release/

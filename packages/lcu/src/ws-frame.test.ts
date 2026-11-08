@@ -166,6 +166,20 @@ test('解析器：协议错误逐个报出（掩码帧 / 未知 opcode / 控制�
   assert.equal(orphan[0]?.kind, 'error');
 });
 
+test('解析器：分片消息累积超上限必须判错（单帧上限管不住它）', () => {
+  // 每帧都远低于 8MB 单帧上限，但拼起来会吃穿内存 —— 以前没有任何累积判据。
+  const parser = createFrameParser();
+  const chunk = new Uint8Array(2 * 1024 * 1024);
+  const out: WsFrame[] = [];
+  // 第一条消息不分片（fin=false）作为开头，之后连发续帧
+  out.push(...parser.push(serverFrame(0x2, chunk, false)));
+  for (let i = 0; i < 4; i++) out.push(...parser.push(serverFrame(0x0, chunk, false)));
+
+  const err = out.find((f) => f.kind === 'error');
+  assert.ok(err, '超上限后必须报错，而不是继续攒');
+  assert.match(err.kind === 'error' ? err.reason : '', /分片消息累积超过上限/);
+});
+
 test('解析器：RSV 位非零（协商了扩展但我们不支持）也算协议错误', () => {
   const frame = serverFrame(0x1, utf8('x'));
   frame[0] = (frame[0] ?? 0) | 0x40; // RSV1

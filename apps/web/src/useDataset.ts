@@ -70,17 +70,6 @@ export function useDataset(): DataState {
   return { dataset, rankings, loading, error, load };
 }
 
-/** 稀有度显示配置。 */
-export const RARITY_META: Record<
-  Augment['rarity'],
-  { label: string; color: string; order: number }
-> = {
-  kPrismatic: { label: '棱彩', color: 'var(--prismatic)', order: 0 },
-  kGold: { label: '黄金', color: 'var(--gold)', order: 1 },
-  kSilver: { label: '白银', color: 'var(--silver)', order: 2 },
-  kEventChoice: { label: '事件抉择', color: 'var(--event)', order: 3 },
-};
-
 export const MODE_META: Record<string, { label: string; hint: string }> = {
   KIWI: { label: '海克斯乱斗', hint: '主模式海克斯池' },
   KIWI_JADE: { label: '海克斯乱斗 · Jade', hint: 'Jade 变体池（更大）' },

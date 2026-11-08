@@ -94,6 +94,36 @@ const DATASET_COLLECTIONS: readonly DatasetCollection[] = [
 /** 去掉 `readonly` 的内存视图（回退时只改这一份浅拷贝，不动入参）。 */
 type MutableDataset = { -readonly [K in keyof Dataset]: Dataset[K] };
 
+/**
+ * 一类内容的"缩水"容忍度：比旧文件少超 **20%** 就认为这次结果不可信。
+ *
+ * ── 为什么"非空"还不够（2026-11 实测）────────────────────────────────
+ *
+ * S1 的护栏只挡**空**数组。但上游换版本时完全可能"返回了一半"（分页截断、
+ * 单个分片 404、CDN 缓存了旧页），例如国服图鉴 248 → 235（-5%，正常波动，
+ * 不该报）。真正要挡的是 594 → 300 这种 —— 它非空、`datasetHasContent` 为真、
+ * 于是**整份覆盖**旧文件，而且发生在启动静默自动同步里。
+ *
+ * 20% 的取值：实测正常波动 <6%（CDragon 594/554、国服 235/248、英雄 254/245、
+ * 装备 863/870 都在 ±5% 内），留足余量；再低会把正常换版当异常。
+ */
+export const COLLECTION_SHRINK_TOLERANCE = 0.2;
+
+/**
+ * 本次比上一份少了超过容忍度？（纯函数）
+ *
+ * 两边都非空才判定 —— "变空"由按集合回退处理（它会连空数组一起补上），
+ * 这里只负责"非空但明显变少"。
+ */
+export function collectionShrank(
+  previousCount: number,
+  nextCount: number,
+  tolerance = COLLECTION_SHRINK_TOLERANCE,
+): boolean {
+  if (previousCount <= 0 || nextCount <= 0) return false;
+  return nextCount < previousCount * (1 - tolerance);
+}
+
 /** 某一类内容为空时，用旧文件里的那一份补上（返回是否补了）。 */
 function backfillDatasetCollection<K extends DatasetCollection>(
   key: K,
@@ -103,6 +133,24 @@ function backfillDatasetCollection<K extends DatasetCollection>(
   if (merged[key].length > 0) return false;
   const old = previous?.[key];
   if (!old || old.length === 0) return false;
+  merged[key] = old;
+  return true;
+}
+
+/**
+ * 某一类内容**非空但明显变少**时，用旧文件那一份顶替（返回是否顶替了）。
+ *
+ * 泛型是为了让 `merged[key] = old` 里两侧的类型收敛到同一个 `Dataset[K]` ——
+ * 用联合下标时 TS 会要求"同时是四种数组"，无法赋值（踩过）。
+ */
+function replaceShrunkCollection<K extends DatasetCollection>(
+  key: K,
+  merged: MutableDataset,
+  previous: Dataset | null,
+): boolean {
+  const old = previous?.[key];
+  if (!old || old.length === 0) return false;
+  if (!collectionShrank(old.length, merged[key].length)) return false;
   merged[key] = old;
   return true;
 }
@@ -127,13 +175,23 @@ function backfillDatasetCollection<K extends DatasetCollection>(
 export function mergeStaticDatasets(
   fresh: readonly Dataset[],
   previous: Dataset | null,
-): { readonly dataset: Dataset; readonly backfilled: readonly DatasetCollection[] } {
+): {
+  readonly dataset: Dataset;
+  readonly backfilled: readonly DatasetCollection[];
+  readonly shrunk: readonly DatasetCollection[];
+} {
   const merged = mergeDatasets(fresh) as MutableDataset;
   const backfilled: DatasetCollection[] = [];
+  const shrunk: DatasetCollection[] = [];
   for (const key of DATASET_COLLECTIONS) {
-    if (backfillDatasetCollection(key, merged, previous)) backfilled.push(key);
+    if (backfillDatasetCollection(key, merged, previous)) {
+      backfilled.push(key);
+      continue;
+    }
+    // 非空但明显变少（见 `collectionShrank`）：这份结果不可信，保留旧的一类
+    if (replaceShrunkCollection(key, merged, previous)) shrunk.push(key);
   }
-  return { dataset: merged, backfilled };
+  return { dataset: merged, backfilled, shrunk };
 }
 
 /** 排行榜里可以独立回退的两张榜。 */
@@ -157,6 +215,19 @@ function backfillRankingList<K extends RankingList>(
   return true;
 }
 
+/** 某一榜非空但明显变少时，用旧榜单顶替（同上，泛型收窄成同一字段类型）。 */
+function replaceShrunkRankingList<K extends RankingList>(
+  merged: MutableRankingSnapshot,
+  key: K,
+  previous: RankingSnapshot | null,
+): boolean {
+  const old = previous?.[key];
+  if (!old || old.length === 0) return false;
+  if (!collectionShrank(old.length, merged[key].length)) return false;
+  merged[key] = old;
+  return true;
+}
+
 /**
  * 排行榜**逐列表**回退。
  *
@@ -167,13 +238,74 @@ function backfillRankingList<K extends RankingList>(
 export function mergeRankingSnapshot(
   fresh: RankingSnapshot,
   previous: RankingSnapshot | null,
-): { readonly snapshot: RankingSnapshot; readonly backfilled: readonly RankingList[] } {
+): {
+  readonly snapshot: RankingSnapshot;
+  readonly backfilled: readonly RankingList[];
+  readonly shrunk: readonly RankingList[];
+} {
   const merged = { ...fresh } as MutableRankingSnapshot;
   const backfilled: RankingList[] = [];
+  const shrunk: RankingList[] = [];
   for (const key of ['augments', 'heroes'] as const) {
-    if (backfillRankingList(merged, key, previous)) backfilled.push(key);
+    if (backfillRankingList(merged, key, previous)) {
+      backfilled.push(key);
+      continue;
+    }
+    if (replaceShrunkRankingList(merged, key, previous)) shrunk.push(key);
   }
-  return { snapshot: merged, backfilled };
+  return { snapshot: merged, backfilled, shrunk };
+}
+
+/** 一条关联覆盖率（`status` 诊断用）。 */
+export interface JoinCoverage {
+  readonly label: string;
+  readonly hit: number;
+  readonly total: number;
+}
+
+/**
+ * 关联完整性（纯函数）。
+ *
+ * ── 为什么值得单独看这个数（2026-11 实测）──────────────────────────────
+ *
+ * "文件非空"和"数据可用"是两件事：国服图鉴缩水到 235 时，海克斯榜 214 条**仍然
+ * 全部 join 得上**（说明缩水是上游真删，不是我们抓残）；反过来，如果某次抓回来
+ * 的 id 口径换了（或 hextechs 整块回退成空），文件看着都有内容，榜单却一条也
+ * join 不到 —— 界面上表现为"全是 0%"。
+ *
+ * 所以 `status` 把它打出来，CI 侧由本函数的单测锁住口径。
+ */
+export function computeJoinCoverage(input: {
+  readonly dataset: Dataset;
+  readonly rankings: RankingSnapshot | null;
+  readonly builds: { readonly details: readonly { readonly championId: number }[] } | null;
+}): readonly JoinCoverage[] {
+  const augmentIds = new Set(input.dataset.hextechs.map((h) => h.id));
+  const championIds = new Set(input.dataset.champions.map((c) => c.id));
+  const hitOf = <T>(items: readonly T[], has: (x: T) => boolean): number =>
+    items.filter(has).length;
+
+  const out: JoinCoverage[] = [];
+  if (input.rankings) {
+    out.push({
+      label: '海克斯榜 → 国服图鉴',
+      hit: hitOf(input.rankings.augments, (a) => augmentIds.has(a.id)),
+      total: input.rankings.augments.length,
+    });
+    out.push({
+      label: '英雄榜 → 英雄表',
+      hit: hitOf(input.rankings.heroes, (h) => championIds.has(h.championId)),
+      total: input.rankings.heroes.length,
+    });
+  }
+  if (input.builds) {
+    out.push({
+      label: '单英雄详情 → 英雄表',
+      hit: hitOf(input.builds.details, (d) => championIds.has(d.championId)),
+      total: input.builds.details.length,
+    });
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ */
@@ -622,6 +754,17 @@ export async function runDataSync(options: SyncOptions): Promise<SyncReport> {
           message: `${mergedStatic.backfilled.join(' / ')} 本次没有数据，沿用旧文件（未清空）`,
         });
       }
+      if (mergedStatic.shrunk.length > 0) {
+        // 非空但**掉了一大截**（分页截断/分片 404 的典型表现）：这份结果不可信，
+        // 已保留旧数据。不报的话，用户会以为"官方删了这么多"。
+        failures.push({
+          stage: 'static',
+          label: '静态图鉴缩水',
+          message: `${mergedStatic.shrunk.join(' / ')} 缩水超过 ${Math.round(
+            COLLECTION_SHRINK_TOLERANCE * 100,
+          )}%（本次结果未采用，已保留旧数据）`,
+        });
+      }
     } else {
       skipped.push({ stage: 'static', reason: '合并结果为空，保留现有图鉴' });
       dataset = null;
@@ -680,6 +823,15 @@ export async function runDataSync(options: SyncOptions): Promise<SyncReport> {
             stage: 'rankings',
             label: '排行榜合并',
             message: `${mergedRanking.backfilled.join(' / ')} 本次为空，沿用旧榜单（未清空）`,
+          });
+        }
+        if (mergedRanking.shrunk.length > 0) {
+          failures.push({
+            stage: 'rankings',
+            label: '排行榜缩水',
+            message: `${mergedRanking.shrunk.join(' / ')} 缩水超过 ${Math.round(
+              COLLECTION_SHRINK_TOLERANCE * 100,
+            )}%（本次结果未采用，已保留旧数据）`,
           });
         }
       } else {

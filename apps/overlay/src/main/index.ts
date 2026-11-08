@@ -1990,8 +1990,28 @@ function applyClickThrough(on: boolean): void {
   win?.webContents.send('overlay:click-through', on);
 }
 
+/**
+ * 这条 IPC 是不是来自**我们自己的窗口**（2026-11 审查）。
+ *
+ * 三个窗口共用同一份 preload，暴露的 API 里有两个是"有副作用"的
+ *（切鼠标穿透、关面板）。渲染端一旦被注入/被不可信内容影响，任何 frame 都能
+ * 直接调它们。这里按 `event.sender` 的 webContents 身份白名单：
+ * 只接受侧边面板与标签画布这两扇窗。
+ *
+ * ⚠️ 更彻底的做法是按窗口拆 preload（只给需要的窗口暴露需要的方法），
+ *    那是一次结构性改动，留作后续；这一层至少挡住"任意 frame 都能调"。
+ */
+function isTrustedIpcSender(event: Electron.IpcMainInvokeEvent): boolean {
+  const sender = event.sender;
+  return sender === win?.webContents || sender === overlayWin?.webContents;
+}
+
 function registerIpc(): void {
-  ipcMain.handle('overlay:set-click-through', (_e, on: unknown) => {
+  ipcMain.handle('overlay:set-click-through', (e, on: unknown) => {
+    if (!isTrustedIpcSender(e)) {
+      console.warn(`[hexbox] ⚠ 忽略来自非本程序窗口的 IPC（overlay:set-click-through）`);
+      return clickThrough;
+    }
     applyClickThrough(Boolean(on));
     return clickThrough;
   });
@@ -1999,7 +2019,11 @@ function registerIpc(): void {
   //    这是侧边面板的关闭按钮那条通道，**不再**是退出 —— 真退出只在托盘菜单里。
   //    渲染端当前没调它（`renderer.ts` 只声明了接口），保留是为了别让
   //    旧渲染端/旧习惯一按就退出。
-  ipcMain.handle('overlay:close', () => {
+  ipcMain.handle('overlay:close', (e) => {
+    if (!isTrustedIpcSender(e)) {
+      console.warn('[hexbox] ⚠ 忽略来自非本程序窗口的 IPC（overlay:close）');
+      return;
+    }
     console.log(`[hexbox] 侧边面板：收到关闭请求（IPC overlay:close）→ 最小化到托盘（${TRAY_TOOLTIP_HINT}）`);
     win?.hide();
   });
@@ -2207,8 +2231,18 @@ app.whenReady().then(() => {
   // 关窗口 = 最小化到托盘（只有托盘菜单的「退出」才真退出）。
   // ⚠️ 只挂常驻覆盖层自己这两扇窗：截屏 worker 窗口是故意 destroy() 的
   //（destroy 不发 close 事件），不能给它加这一层。
-  if (win) attachCloseToTrayHide(win, '侧边面板');
-  if (overlayWin) attachCloseToTrayHide(overlayWin, '全屏标签画布');
+  //
+  // ⚠️⚠️ 托盘**创建失败**（`tray === null`）时绝不能挂这一层：没有托盘就没有
+  // 退出入口，而这一层会把关闭动作变成 hide —— 用户看到的是"关不掉、也退不出"
+  // 的隐藏进程，只能去任务管理器杀。宁可窗口能关（进程自己退出），也不要藏起来。
+  if (tray === null) {
+    console.warn(
+      '[hexbox] ⚠ 没有托盘（创建失败）→ 不启用"关闭即最小化"，窗口关闭将直接结束进程',
+    );
+  } else {
+    if (win) attachCloseToTrayHide(win, '侧边面板');
+    if (overlayWin) attachCloseToTrayHide(overlayWin, '全屏标签画布');
+  }
 
   // 数据读完再检查「上游有没有新数据」（每 24h 一次、只探一个日期、不自动下载）
   void loadDataset().then(() => dataUpdateFlow?.checkOnStartup());

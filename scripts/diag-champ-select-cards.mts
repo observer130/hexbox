@@ -175,7 +175,7 @@ const files = argv.filter((a) => !a.startsWith('--'));
 const wantOcr = flags.has('--ocr');
 const wantAnnotate = flags.has('--annotate');
 
-const cases: Case[] =
+const cases: readonly Case[] =
   files.length > 0
     ? files.map((f) => ({ file: f, kind: 'stage1-2card' as const, region: IDENT }))
     : CASES;

@@ -9,13 +9,13 @@
  */
 import { computed, ref } from 'vue';
 import {
-  RARITY_META,
   cnIconUrl,
   pct,
   rankChangeClass,
   rankChangeText,
   type RankingSnapshot,
 } from '../useDataset';
+import { rarityMeta } from '../rarity';
 import type { HextechStatic } from '@hexbox/core';
 
 const props = defineProps<{
@@ -134,9 +134,9 @@ function heroIcon(id: number): string {
                     <span
                       v-if="r.def"
                       class="rarity"
-                      :style="{ color: RARITY_META[r.def.rarity].color }"
+                      :style="{ color: rarityMeta(r.def.rarity).color }"
                     >
-                      {{ RARITY_META[r.def.rarity].label }}
+                      {{ rarityMeta(r.def.rarity).label }}
                     </span>
                     <span v-for="m in r.def?.modes ?? []" :key="m" class="mtag">
                       {{ m === 'KIWI_JADE' ? '乱斗 · Jade' : m === 'KIWI' ? '海克斯乱斗' : m }}

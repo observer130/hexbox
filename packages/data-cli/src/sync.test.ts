@@ -32,6 +32,8 @@ import {
   mayOverwriteDetails,
   mergeRankingSnapshot,
   mergeStaticDatasets,
+  collectionShrank,
+  computeJoinCoverage,
   runDataSync,
   syncExitCode,
   templatesRequiredCount,
@@ -785,4 +787,129 @@ test('runDataSync：模板只拿到 1/10 → 不写，并记覆盖率失败', as
   assert.equal(writes.includes('templates'), false, '10% 的包不许覆盖好的包');
   assert.equal(report.templatesRebuilt, false);
   assert.ok(report.failures.some((f) => f.stage === 'templates' && /1\/10/.test(f.message)));
+});
+
+/* ------------------------------------------------------------------ */
+/* 缩水护栏（"非空"还不够）                                             */
+/* ------------------------------------------------------------------ */
+
+test('collectionShrank：按 20% 容忍度判定，实测的正常波动不算缩水', () => {
+  // 真实波动（2026-11 实测）：国服 248→235（-5%）、CDragon 594→554（-7%）、
+  // 装备 870→863（-1%）、英雄 245→254（增）—— 都不该报。
+  assert.equal(collectionShrank(248, 235), false);
+  assert.equal(collectionShrank(594, 554), false);
+  assert.equal(collectionShrank(870, 863), false);
+  assert.equal(collectionShrank(245, 254), false);
+  // 真的坏数据：掉一半（分页截断/分片 404 的典型表现）
+  assert.equal(collectionShrank(594, 300), true);
+  assert.equal(collectionShrank(100, 79), true, '-21%');
+  assert.equal(collectionShrank(100, 81), false, '-19% 在容忍度内');
+});
+
+test('collectionShrank：任何一边为 0 都不算"缩水"（空的交给按集合回退）', () => {
+  assert.equal(collectionShrank(0, 0), false);
+  assert.equal(collectionShrank(0, 100), false, '首次同步不该报缩水');
+  assert.equal(collectionShrank(100, 0), false, '变空由 backfill 处理，这里不重复判');
+});
+
+test('mergeStaticDatasets：非空但掉 >20% → 保留旧数据并把这一类报成 shrunk', () => {
+  const previous = ds('tencent-static', {
+    hextechs: Array.from({ length: 100 }, (_, i) => hex(1000 + i, `H${i}`)),
+  });
+  // 只抓回 50 条（非空！旧实现会照单全收 → 静默删掉 50 条国服图鉴）
+  const fresh = ds('tencent-static', {
+    hextechs: Array.from({ length: 50 }, (_, i) => hex(1000 + i, `H${i}`)),
+  });
+
+  const merged = mergeStaticDatasets([fresh], previous);
+  assert.deepEqual(merged.shrunk, ['hextechs'], '要明确报出来，别让用户以为官方删了一半');
+  assert.equal(merged.dataset.hextechs.length, 100, '必须保留旧的那一份');
+  assert.deepEqual(merged.backfilled, [], '非空变少不属于 backfill，两者语义要分开');
+});
+
+test('mergeStaticDatasets：小幅波动照常采用新数据（不误伤正常换版）', () => {
+  const previous = ds('tencent-static', {
+    hextechs: Array.from({ length: 100 }, (_, i) => hex(1000 + i, `H${i}`)),
+  });
+  const fresh = ds('tencent-static', {
+    hextechs: Array.from({ length: 95 }, (_, i) => hex(1000 + i, `H${i}`)),
+  });
+
+  const merged = mergeStaticDatasets([fresh], previous);
+  assert.deepEqual(merged.shrunk, []);
+  assert.equal(merged.dataset.hextechs.length, 95, '正常换版要采用新数据');
+});
+
+test('mergeRankingSnapshot：单张榜掉 >20% → 保留旧榜，另一张照常采用', () => {
+  const previous = snapshot('20261101', {
+    augments: Array.from({ length: 100 }, (_, i) => ({ id: 2000 + i }) as never),
+    heroes: Array.from({ length: 173 }, (_, i) => ({ championId: i + 1 }) as never),
+  });
+  const fresh = snapshot('20261102', {
+    augments: Array.from({ length: 40 }, (_, i) => ({ id: 2000 + i }) as never),
+    heroes: Array.from({ length: 170 }, (_, i) => ({ championId: i + 1 }) as never),
+  });
+
+  const merged = mergeRankingSnapshot(fresh, previous);
+  assert.deepEqual(merged.shrunk, ['augments']);
+  assert.equal(merged.snapshot.augments.length, 100, '缩水的榜保留旧的');
+  assert.equal(merged.snapshot.heroes.length, 170, '正常的榜采用新的');
+});
+
+test('runDataSync：缩水被拦住时保留旧数据，失败清单里必须看得见', async () => {
+  const previous = ds('tencent-static', {
+    hextechs: Array.from({ length: 100 }, (_, i) => hex(1000 + i, `H${i}`)),
+  });
+  const store = memoryStore({ dataset: previous });
+  const shrunkDataset = ds('tencent-static', {
+    hextechs: Array.from({ length: 30 }, (_, i) => hex(1000 + i, `H${i}`)),
+  });
+  const report = await runDataSync({
+    storeRoot: 'memory',
+    store: store.store,
+    staticProviders: [staticProvider('tencent-static', async () => shrunkDataset)],
+    rankingProviders: [],
+    signal: new AbortController().signal,
+  });
+
+  // 会落盘，但**落下去的是保留下来的旧数据**（其余集合照常采用新值）
+  assert.equal(store.writes.includes('dataset'), true);
+  const written = store.files.get('dataset') as Dataset;
+  assert.equal(written.hextechs.length, 100, '写下去的必须是旧的那 100 条，不是抓残的 30 条');
+  assert.ok(
+    report.failures.some((f) => f.stage === 'static' && /缩水/.test(f.message)),
+    '拦下来这件事必须出现在失败清单里（否则用户以为一切正常）',
+  );
+});
+
+/* ------------------------------------------------------------------ */
+/* 关联完整性                                                           */
+/* ------------------------------------------------------------------ */
+
+test('computeJoinCoverage：口径正确，且能查出"文件非空但一条也 join 不上"', () => {
+  const dataset = ds('tencent-static', {
+    hextechs: [hex(1, 'A'), hex(2, 'B')],
+    champions: [champion(10), champion(11)],
+  });
+  const ranking = snapshot('20261101', {
+    augments: [{ id: 1 }, { id: 2 }, { id: 3 }] as never, // 3 号不在图鉴里
+    heroes: [{ championId: 10 }, { championId: 11 }] as never,
+  });
+  const builds = { details: [{ championId: 10 }, { championId: 99 }] } as never;
+
+  const coverage = computeJoinCoverage({ dataset, rankings: ranking, builds });
+  const byLabel = new Map(coverage.map((c) => [c.label, c]));
+  assert.deepEqual(byLabel.get('海克斯榜 → 国服图鉴'), {
+    label: '海克斯榜 → 国服图鉴',
+    hit: 2,
+    total: 3,
+  });
+  assert.equal(byLabel.get('英雄榜 → 英雄表')?.hit, 2);
+  assert.equal(byLabel.get('单英雄详情 → 英雄表')?.hit, 1, '99 号英雄不在表里');
+
+  // 最该抓的坏数据：图鉴整块为空（回退失败/首次同步中断）→ 覆盖率为 0
+  const broken = computeJoinCoverage({ dataset: ds('x', { champions: [] }), rankings: ranking, builds: null });
+  assert.equal(broken[0]?.hit, 0, 'hextechs 为空时海克斯榜一条也 join 不上');
+  assert.equal(broken[0]?.total, 3);
+  assert.equal(broken.length, 2, '没有 builds 时不产生详情那一行');
 });

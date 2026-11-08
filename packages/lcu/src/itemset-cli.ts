@@ -248,6 +248,24 @@ async function cmdClean(client: LcuClient): Promise<void> {
 
 async function main(): Promise<void> {
   const [cmd = 'list', ...rest] = process.argv.slice(2);
+
+  // ⚠️ `help`/未知命令不该去连客户端：以前 `connect()` 在 switch 之前，
+  //    于是只想看用法的人被要求"以管理员身份运行"（而这台机器上很可能
+  //    根本没开客户端）。先判命令，需要连接的分支里再连。
+  if (cmd !== 'list' && cmd !== 'write' && cmd !== 'clean') {
+    console.log(
+      [
+        '配装方案 CLI（需管理员权限）',
+        '',
+        '用法:',
+        '  list              查看既有方案（只读，建议先跑）',
+        '  write [英雄ID...]  写入配装方案（不传 ID 则为全部有数据的英雄）',
+        '  clean             移除本工具生成的方案（保留玩家手写的）',
+      ].join('\n'),
+    );
+    return;
+  }
+
   const client = await connect();
 
   switch (cmd) {
@@ -260,20 +278,8 @@ async function main(): Promise<void> {
         rest.map((x) => Number.parseInt(x, 10)).filter((x) => Number.isFinite(x) && x > 0),
       );
       break;
-    case 'clean':
-      await cmdClean(client);
-      break;
     default:
-      console.log(
-        [
-          '配装方案 CLI（需管理员权限）',
-          '',
-          '用法:',
-          '  list              查看既有方案（只读，建议先跑）',
-          '  write [英雄ID...]  写入配装方案（不传 ID 则为全部有数据的英雄）',
-          '  clean             移除本工具生成的方案（保留玩家手写的）',
-        ].join('\n'),
-      );
+      await cmdClean(client);
   }
 }
 

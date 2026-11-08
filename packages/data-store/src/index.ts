@@ -12,7 +12,7 @@
  * 因此本存储**必须**支持离线读取已缓存数据。
  */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -38,18 +38,67 @@ export function resolveStorePaths(root: string): StorePaths {
 }
 
 /**
- * 原子写：先写 `.tmp` 再 rename。
+ * 本次写入独占的临时文件名。
+ *
+ * ⚠️ 绝不能固定成 `${path}.tmp`（2026-11 审查）：托盘「更新数据」和命令行
+ * `pnpm sync` 完全可能同时跑，两个进程写同一个 `.tmp` 会互相覆盖，
+ * 先完成的那次 `rename` 就会把**另一个进程的半截文件**搬成正式数据。
+ * 文件名里带 pid + 随机后缀，各写各的；`rename` 依旧保证读方看不到半截文件。
+ */
+function tempPathFor(path: string): string {
+  const salt = Math.random().toString(36).slice(2, 10);
+  return `${path}.${process.pid}.${salt}.tmp`;
+}
+
+const RENAME_RETRYABLE = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+/**
+ * rename 到已存在的目标；Windows 上允许有界重试。
+ *
+ * ⚠️ 真机教训（由并发测试暴露）：两个进程同时写同一个文件时，第二个
+ * `MoveFileEx(REPLACE_EXISTING)` 会**瞬时**失败（EPERM/EACCES/EBUSY）——
+ * 目标文件正被另一个进程的 rename/读取句柄占着。这不是"写坏了"，等几毫秒
+ * 再试就成功。不重试的表现是：托盘「更新数据」和 `pnpm sync` 撞在一起时，
+ * 其中一个直接报错退出（数据是好的，但用户以为同步失败）。
+ */
+async function renameWithRetry(tmp: string, target: string): Promise<void> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      await rename(tmp, target);
+      return;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === undefined || !RENAME_RETRYABLE.has(code)) throw e;
+      lastError = e;
+      await new Promise((r) => setTimeout(r, 20 * (attempt + 1)));
+    }
+  }
+  throw lastError;
+}
+
+/** 原子写：临时文件 → rename；失败时清掉自己的临时文件（不留垃圾）。 */
+async function writeAtomic(path: string, text: string): Promise<string> {
+  const tmp = tempPathFor(path);
+  try {
+    await writeFile(tmp, text, 'utf8');
+    await renameWithRetry(tmp, path);
+  } catch (e) {
+    await rm(tmp, { force: true }).catch(() => undefined);
+    throw e;
+  }
+  return path;
+}
+
+/**
+ * 原子写 JSON：先写临时文件再 rename。
  *
  * rename 在同分区上是原子操作，因此读取方**永远看不到半截文件**
  * —— 这是三个数据文件共用的唯一写入路径。
  */
 async function writeJsonAtomic(path: string, value: unknown): Promise<string> {
   await mkdir(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp`;
-  await writeFile(tmp, JSON.stringify(value, null, 2), 'utf8');
-  const { rename } = await import('node:fs/promises');
-  await rename(tmp, path);
-  return path;
+  return writeAtomic(path, JSON.stringify(value, null, 2));
 }
 
 /** 读取 JSON；不存在返回 null，内容损坏则抛带路径的可诊断错误。 */
@@ -106,12 +155,7 @@ export async function readBuilds(root: string): Promise<ChampionDetailSet | null
  */
 export async function writeTemplates(root: string, packJson: string): Promise<string> {
   await mkdir(root, { recursive: true });
-  const path = resolveStorePaths(root).templates;
-  const tmp = `${path}.tmp`;
-  await writeFile(tmp, packJson, 'utf8');
-  const { rename } = await import('node:fs/promises');
-  await rename(tmp, path);
-  return path;
+  return writeAtomic(resolveStorePaths(root).templates, packJson);
 }
 
 /** 读取头像模板包（gzip+base64 字符串）；不存在返回 null。 */
@@ -134,8 +178,13 @@ export interface FreshnessInfo {
  */
 export function checkFreshness(dataset: Dataset | null, maxAgeHours = 24): FreshnessInfo {
   if (!dataset) return { exists: false, stale: true };
-  const ageMs = Date.now() - new Date(dataset.meta.fetchedAt).getTime();
-  const ageHours = ageMs / 3_600_000;
+  const t = new Date(dataset.meta.fetchedAt).getTime();
+  // ⚠️ 日期解析失败时 `NaN > maxAgeHours` 恒为 false → 会永远显示"新鲜"。
+  //    一个写坏的 fetchedAt（或旧版本留下的怪值）就会让启动检查再也不更新数据。
+  if (!Number.isFinite(t)) {
+    return { exists: true, fetchedAt: dataset.meta.fetchedAt, stale: true };
+  }
+  const ageHours = (Date.now() - t) / 3_600_000;
   return {
     exists: true,
     fetchedAt: dataset.meta.fetchedAt,
@@ -149,8 +198,12 @@ export function checkRankingsFreshness(
   maxAgeHours = 12,
 ): FreshnessInfo {
   if (!snapshot) return { exists: false, stale: true };
-  const ageMs = Date.now() - new Date(snapshot.meta.fetchedAt).getTime();
-  const ageHours = ageMs / 3_600_000;
+  const t = new Date(snapshot.meta.fetchedAt).getTime();
+  // 同 `checkFreshness`：NaN 时必须判过期，否则坏掉的 fetchedAt 永远不会再同步
+  if (!Number.isFinite(t)) {
+    return { exists: true, fetchedAt: snapshot.meta.fetchedAt, stale: true };
+  }
+  const ageHours = (Date.now() - t) / 3_600_000;
   return {
     exists: true,
     fetchedAt: snapshot.meta.fetchedAt,

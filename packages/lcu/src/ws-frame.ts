@@ -48,6 +48,15 @@ const OP_PONG = 0xa;
  */
 const MAX_PAYLOAD_BYTES = 8 * 1024 * 1024;
 
+/**
+ * 一条**分片**消息累积后的上限。
+ *
+ * ⚠️ 单帧上限管不住分片：对端可以合法地发 1 万个小续帧，每帧都远低于
+ * `MAX_PAYLOAD_BYTES`，拼起来却能把内存吃穿（2026-11 审查）。LCU 的事件
+ * JSON 都是几 KB，8MB 已经极其宽松。
+ */
+const MAX_FRAGMENT_TOTAL_BYTES = 8 * 1024 * 1024;
+
 /** 客户端 MUST 掩码；掩码键 4 字节。测试用注入的固定键，生产用随机键。 */
 function freshMaskKey(): Uint8Array {
   return new Uint8Array(randomBytes(4));
@@ -149,11 +158,14 @@ export function createFrameParser(): FrameParser {
   let buf = new Uint8Array(0);
   let fragOpcode: number | null = null;
   let fragChunks: Uint8Array[] = [];
+  /** 当前分片消息已累积的字节数（见 `MAX_FRAGMENT_TOTAL_BYTES`）。 */
+  let fragBytes = 0;
 
   const reset = (): void => {
     buf = new Uint8Array(0);
     fragOpcode = null;
     fragChunks = [];
+    fragBytes = 0;
   };
 
   const finishMessage = (opcode: number, payload: Uint8Array, out: WsFrame[]): void => {
@@ -270,6 +282,7 @@ export function createFrameParser(): FrameParser {
           } else {
             fragOpcode = opcode;
             fragChunks = [payloadCopy];
+            fragBytes = payloadCopy.length;
           }
           off += headerLen + payloadLen;
           continue;
@@ -282,11 +295,24 @@ export function createFrameParser(): FrameParser {
             break;
           }
           fragChunks.push(payloadCopy);
+          fragBytes += payloadCopy.length;
+          if (fragBytes > MAX_FRAGMENT_TOTAL_BYTES) {
+            const got = fragBytes;
+            reset();
+            out.push({
+              kind: 'error',
+              reason: `分片消息累积超过上限（${got} > ${MAX_FRAGMENT_TOTAL_BYTES} 字节），已丢弃`,
+            });
+            break;
+          }
           if (fin) {
             const merged = concat(fragChunks);
             const started = fragOpcode;
+            // ⚠️ 只清分片状态，**不能 reset()**：`reset()` 会把 buf 一起清空，
+            //    而 buf 里可能还排着这一帧之后的其它帧
             fragOpcode = null;
             fragChunks = [];
+            fragBytes = 0;
             finishMessage(started, merged, out);
           }
           off += headerLen + payloadLen;

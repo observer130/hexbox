@@ -26,6 +26,7 @@ import { pathToFileURL } from 'node:url';
 import {
   checkFreshness,
   checkRankingsFreshness,
+  readBuilds,
   readDataset,
   readRankings,
   writeTemplates,
@@ -34,7 +35,13 @@ import { createRankingProviders, createStaticProviders } from '@hexbox/provider-
 import { encodePack, type TemplatePack } from '@hexbox/vision';
 import type { Dataset } from '@hexbox/core';
 
-import { fetchTemplates, runDefaultSync, syncExitCode, type SyncProgress } from './sync.ts';
+import {
+  computeJoinCoverage,
+  fetchTemplates,
+  runDefaultSync,
+  syncExitCode,
+  type SyncProgress,
+} from './sync.ts';
 
 // 历史入口：单测与本包其它调用方一直从 `cli.ts` 取这两个纯函数。
 // 实现已搬到 `sync.ts`（CLI 与应用共用），这里保留 re-export 以免调用方/SDK 漂移。
@@ -189,7 +196,7 @@ async function cmdStatus(storeRoot: string): Promise<number> {
     // 旧缓存可能没有 hextechs 字段（v2 前落盘），兼容读取
     const cnCount = (ds as { hextechs?: Dataset['hextechs'] }).hextechs?.length ?? 0;
     console.log(`  来源      : ${ds.meta.source}${cnCount > 0 ? ' + tencent-static' : ''}`);
-    console.log(`  抓取时间  : ${f.fetchedAt}  (${f.ageHours?.toFixed(1)}h 前)`);
+    console.log(`  抓取时间  : ${f.fetchedAt}  (${f.ageHours === undefined ? '不可解析，按过期处理' : `${f.ageHours.toFixed(1)}h 前`})`);
     console.log(`  新鲜度    : ${f.stale ? '⚠ 已过期（建议重新同步）' : '✓ 新鲜'}`);
     console.log(`  海克斯    : ${ds.augments.length} (cd) + ${cnCount} (cn)`);
     for (const [m, n] of byMode) console.log(`      ${m.padEnd(10)}: ${n}`);
@@ -203,11 +210,25 @@ async function cmdStatus(storeRoot: string): Promise<number> {
   if (!rf.exists || !rk) {
     console.log('  ○ 尚无本地数据。请先运行: pnpm sync');
   } else {
-    console.log(`  抓取时间  : ${rf.fetchedAt}  (${rf.ageHours?.toFixed(1)}h 前)`);
+    console.log(`  抓取时间  : ${rf.fetchedAt}  (${rf.ageHours === undefined ? '不可解析，按过期处理' : `${rf.ageHours.toFixed(1)}h 前`})`);
     console.log(`  统计日期  : ${rk.meta.dataDate || '未知'}`);
     console.log(`  新鲜度    : ${rf.stale ? '⚠ 已过期（建议重新同步）' : '✓ 新鲜'}`);
     console.log(`  海克斯榜  : ${rk.augments.length}`);
     console.log(`  英雄榜    : ${rk.heroes.length}`);
+  }
+
+  // 关联完整性：文件非空 ≠ 数据可用（见 `computeJoinCoverage` 的注释）。
+  // 抓成"看着都有、一条也 join 不上"是本项目最容易悄悄发生的一种坏数据。
+  const builds = await readBuilds(storeRoot);
+  const coverage = ds ? computeJoinCoverage({ dataset: ds, rankings: rk, builds }) : [];
+  console.log('\n关联完整性');
+  if (coverage.length === 0) {
+    console.log('  ○ 数据不全，无法核对（先跑 pnpm sync）');
+  } else {
+    for (const c of coverage) {
+      const mark = c.total === 0 ? '○' : c.hit === c.total ? '✓' : '⚠';
+      console.log(`  ${mark} ${c.label}: ${c.hit}/${c.total}`);
+    }
   }
   return 0;
 }

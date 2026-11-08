@@ -126,7 +126,7 @@ function syntheticSession(): LoadedSession {
   if (!win) throw new Error('这份 2999 留档里没有任何截屏窗口，无法合成会话');
   const t0 = win.openAtMs + 500;
 
-  const frames = [];
+  const frames: Array<LoadedSession['frames'][number]> = [];
   let seq = 0;
   const cropOf = (file: string): Rect => {
     const f = manifest.frames.find((x) => x.file === file)!;

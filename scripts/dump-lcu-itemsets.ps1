@@ -16,7 +16,12 @@
 #   pwsh -File scripts\dump-lcu-itemsets.ps1
 
 $ErrorActionPreference = 'Continue'
-$out = Join-Path $PSScriptRoot 'lcu-itemsets-dump.txt'
+# ⚠️ 输出写到 debug/：里面有 summonerId / accountId / displayName（身份信息）。
+# 以前写在 $PSScriptRoot（scripts/）下，而 .gitignore 只挡 *.log —— 一次
+# `git add -A` 就会把玩家身份连配装方案一起提交上去。debug/ 已整体忽略。
+$outDir = Join-Path $PSScriptRoot '..\debug'
+New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+$out = Join-Path $outDir 'lcu-itemsets-dump.txt'
 '' | Set-Content $out -Encoding utf8
 function Log($m) { Write-Host $m; Add-Content $out $m -Encoding utf8 }
 

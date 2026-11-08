@@ -14,7 +14,7 @@ import { test } from 'node:test';
 import type { Display } from 'electron';
 
 import type { VisionOverlayMsg } from './vision-loop.ts';
-import { VisionLoop, type VisionLoopDriverDeps } from './vision-loop-driver.ts';
+import { VisionLoop, shouldLogLoopError, type VisionLoopDriverDeps } from './vision-loop-driver.ts';
 
 /** 驱动器只把 display 原样转交，测试里给个最小对象即可。 */
 const DISPLAY = { id: 1 } as unknown as Display;
@@ -156,4 +156,33 @@ test('驱动：仍在当前代次时，异常照常报"识别异常"（不许把
     sent.some((m) => m.diag === '识别异常'),
     '当前代次的异常必须让用户看见（这是唯一没被 catch 吞掉的去处）',
   );
+});
+
+/* ------------------------------------------------------------------ */
+/* 不许静默：异常要进日志，但要限频                                     */
+/* ------------------------------------------------------------------ */
+
+test('驱动：轮内异常必须写进日志（以前是 `catch {}`，标签不出现却没有任何线索）', async () => {
+  const warnings: string[] = [];
+  const { deps } = recorder(async () => {
+    throw new Error('desktopCapturer failed');
+  });
+  const loop = new VisionLoop({ ...deps, onError: (l) => warnings.push(l) }, 10_000);
+  loop.start();
+  await flush();
+  loop.stop();
+
+  assert.equal(warnings.length, 1, '第一次异常必须打出来');
+  assert.match(warnings[0]!, /识别循环异常/);
+  assert.match(warnings[0]!, /desktopCapturer failed/, '要带原始错误，否则等于没打');
+});
+
+test('驱动：连续异常限频打印（每 1.5s 一行会刷屏）', () => {
+  // 限频判据本身是纯函数 → 直接断言，不靠定时器抢跑
+  assert.equal(shouldLogLoopError(1), true, '第一次必须打');
+  for (let i = 2; i <= 19; i++) assert.equal(shouldLogLoopError(i), false, `第 ${i} 次不该打`);
+  assert.equal(shouldLogLoopError(20), true, '每 20 次打一次');
+  assert.equal(shouldLogLoopError(21), false);
+  assert.equal(shouldLogLoopError(40), true);
+  assert.equal(shouldLogLoopError(0), false, '还没发生过异常');
 });

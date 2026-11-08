@@ -261,3 +261,34 @@ test('写入的是可读文本 JSON（便于人直接排查）', async () => {
     assert.match(raw, /"source": "test"/);
   });
 });
+
+test('checkFreshness：fetchedAt 解析不出来时必须判**过期**（NaN > 24 恒为 false）', () => {
+  // 写坏的 fetchedAt 会让启动检查永远认为数据新鲜 → 再也不自动更新。
+  for (const bad of ['not-a-date', '', '2026-13-45T99:99:99Z']) {
+    const f = checkFreshness(makeDataset(bad));
+    assert.equal(f.exists, true);
+    assert.equal(f.stale, true, `${JSON.stringify(bad)} 应判过期`);
+    assert.equal(f.ageHours, undefined, '算不出年龄就别编一个数出来');
+  }
+  assert.equal(checkRankingsFreshness(makeRankings('garbage', '20261005')).stale, true);
+});
+
+test('原子写：临时文件名唯一，并发写同一份文件互不踩踏', async () => {
+  await withTempDir(async (dir) => {
+    // 托盘「更新数据」+ 命令行 `pnpm sync` 同时跑就是这种情形。
+    // 以前两边都用固定的 `${path}.tmp`：A 写完、B 覆盖，A 再 rename
+    // → 把 B 的半截文件搬成正式数据。
+    const a = writeDataset(dir, makeDataset('2026-10-05T00:00:00.000Z', 1));
+    const b = writeDataset(dir, makeDataset('2026-10-05T00:00:00.000Z', 2));
+    await Promise.all([a, b]);
+
+    // 正式文件必须是**完整可解析**的 JSON 之一
+    const raw = await readFile(resolveStorePaths(dir).dataset, 'utf8');
+    const parsed = JSON.parse(raw) as Dataset;
+    assert.ok(parsed.meta.source === 'test');
+
+    // 不许留下任何临时文件
+    const leftovers = (await readdir(dir)).filter((f) => f.endsWith('.tmp'));
+    assert.deepEqual(leftovers, [], `残留临时文件: ${leftovers.join(', ')}`);
+  });
+});

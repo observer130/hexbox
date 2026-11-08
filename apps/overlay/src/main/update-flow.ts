@@ -38,7 +38,7 @@ import { app, dialog, net, shell } from 'electron';
 import { createHash } from 'node:crypto';
 import { createWriteStream, mkdirSync, rmSync } from 'node:fs';
 import { once } from 'node:events';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 import {
   UPDATE_PHASE_IDLE,
@@ -204,8 +204,9 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlow {
       ? join(app.getPath('temp'), DOWNLOAD_SUBDIR, 'selftest')
       : join(app.getPath('temp'), DOWNLOAD_SUBDIR);
     mkdirSync(dir, { recursive: true });
-    const dest = join(dir, asset.name);
-    rmSync(dest, { force: true });
+    // ⚠️ 只取文件名：`asset.name` 来自 GitHub 发布的 JSON，理论上可以含
+    //    `..\..\` —— 直接 join 会把文件写到临时目录之外（覆盖任意文件）。
+    const dest = join(dir, basename(asset.name));    rmSync(dest, { force: true });
 
     console.log(
       `[hexbox] 检查更新：开始下载 ${asset.name}（${formatBytes(asset.size)}）\n` +

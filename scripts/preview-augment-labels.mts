@@ -86,6 +86,8 @@ import {
   augmentLabelRect,
   type AugmentBadgeSize,
   type AugmentTierLabel,
+  type AugmentTierRowResult,
+  type LabelRowLock,
   type Bitmap,
   type LabelBoxPlan,
   type Rect,
@@ -780,10 +782,10 @@ if (rowAlignedRows.length > 0 && first) {
   ];
   console.log('  刷新前 vs 刷新后（**线上路径** = augmentTierLabelsLocked() 的行基准锁）：');
   const lockPreset = AUGMENT_BADGE_PRESETS[AUGMENT_BADGE_DEFAULT];
-  let rowLock = null;
+  let rowLock: LabelRowLock | null = null;
   let refY: readonly number[] | null = null;
   for (const step of steps) {
-    const row = augmentTierLabelsLocked(
+    const row: AugmentTierRowResult = augmentTierLabelsLocked(
       rowLock,
       step.cards.map((c, i) => ({ rect: c, augmentId: 9001 + i })),
       lockTiers,

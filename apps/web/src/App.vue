@@ -4,11 +4,11 @@ import { countChampionSet } from '@hexbox/core';
 import {
   iconUrl,
   MODE_META,
-  RARITY_META,
   useDataset,
   type Augment,
   type HextechStatic,
 } from './useDataset';
+import { RARITY_META, rarityMeta } from './rarity';
 import RankView from './components/RankView.vue';
 
 const { dataset, rankings, loading, error, load } = useDataset();
@@ -58,7 +58,7 @@ const filtered = computed(() => {
 
   return [...list].sort((x: Tile, y: Tile) => {
     if (sortBy.value === 'name') return x.name.localeCompare(y.name, 'zh-CN');
-    const dr = RARITY_META[x.rarity].order - RARITY_META[y.rarity].order;
+    const dr = rarityMeta(x.rarity).order - rarityMeta(y.rarity).order;
     return dr !== 0 ? dr : x.name.localeCompare(y.name, 'zh-CN');
   });
 });
@@ -192,8 +192,8 @@ const championMap = computed(() => {
           <div class="meta">
             <div class="name">{{ a.name }}</div>
             <div class="row">
-              <span class="rarity" :style="{ color: RARITY_META[a.rarity].color }">
-                {{ RARITY_META[a.rarity].label }}
+              <span class="rarity" :style="{ color: rarityMeta(a.rarity).color }">
+                {{ rarityMeta(a.rarity).label }}
               </span>
               <span class="dim id">{{ a.augmentNameId }}</span>
             </div>

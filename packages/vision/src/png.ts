@@ -306,7 +306,11 @@ export function decodePng(buf: Uint8Array): PngImage {
     compressed.set(c, o);
     o += c.length;
   }
-  const raw = inflateSync(compressed);
+  // ⚠️ 必须给 maxOutputLength：IDAT 是 zlib 流，一个 10KB 的 PNG 可以解出几个 GB
+  //    （解压炸弹）。上限按"这张图本来应该有多大"算（非交错 PNG 解压后**恰好**是
+  //    (stride+1)×height），超出的输入一律拒绝。留 4KB 余量给编码器的块尾。
+  const expectedRaw = (width * channels + 1) * height;
+  const raw = inflateSync(compressed, { maxOutputLength: expectedRaw + 4096 });
 
   const stride = width * channels;
   const expected = (stride + 1) * height;

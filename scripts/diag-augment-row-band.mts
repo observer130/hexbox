@@ -37,6 +37,8 @@ import {
   labelBoxPlan,
   normalizedRectToScreen,
   type AugmentBadgePreset,
+  type AugmentTierLabel,
+  type AugmentTierRowResult,
   type LabelRowLock,
   type Rect,
 } from '../packages/vision/src/index.ts';
@@ -144,9 +146,9 @@ function runFrames(
   let first: readonly LabelRow[] | null = null;
   for (const frame of frames) {
     const input = frame.cards.map((c) => ({ rect: c.rect, augmentId: c.augmentId }));
-    let labels;
+    let labels: readonly AugmentTierLabel[];
     if (useLock) {
-      const row = augmentTierLabelsLocked(lock, input, tiers, { preset, pickRates: picks });
+      const row: AugmentTierRowResult = augmentTierLabelsLocked(lock, input, tiers, { preset, pickRates: picks });
       lock = row.rowLock;
       labels = row.labels;
     } else {

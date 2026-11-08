@@ -26,6 +26,16 @@ import type { VisionOverlayMsg, VisionStage } from './vision-loop.ts';
 /** 选人阶段的两个子阶段（缺省 unknown = 拿不到 LCU 会话）。 */
 export type VisionPickState = 'picking' | 'locked' | 'unknown';
 
+/**
+ * 第 `count` 次轮内异常要不要打日志（纯函数，便于单测）。
+ *
+ * 首次必打（否则用户永远不知道标签为什么不出现）；之后每 20 次打一次
+ * （正常一轮 1.5s，异常时否则会刷屏）。
+ */
+export function shouldLogLoopError(count: number): boolean {
+  return count > 0 && (count === 1 || count % 20 === 0);
+}
+
 /** 一轮识别的产物（`runVisionRound` 的返回形状）。 */
 export interface VisionRoundResult {
   readonly msg: VisionOverlayMsg | null;
@@ -46,6 +56,14 @@ export interface VisionLoopDriverDeps {
   /** 兜底显示器（异常/清空时用）。 */
   readonly primaryDisplay: () => Display;
   readonly onResult: (msg: VisionOverlayMsg, display: Display) => void;
+  /**
+   * 循环内部异常的去处（默认 `console.warn`）。
+   *
+   * ⚠️ 以前这里是 `catch {}` —— 这个循环是选人标签的**唯一来源**，异常被吞掉后
+   * 表现为"标签就是不出现"，日志里一个字都没有（而且这段代码 CI 测不到）。
+   * 限频打印（首次 + 每 20 次），避免每 1.5 秒刷一行。
+   */
+  readonly onError?: (line: string) => void;
 }
 
 /**
@@ -89,10 +107,14 @@ export class VisionLoop {
    * 识别成功 0 格` 却仍推送 3 个卡片标签）。所以换阶段要按**实际阶段**判。
    */
   private lastStage: VisionStage | null = null;
+  private readonly warn: (line: string) => void;
+  /** 累计的轮内异常数（仅用于限频日志）。 */
+  private errors = 0;
 
   constructor(deps: VisionLoopDriverDeps, intervalMs = 1500) {
     this.deps = deps;
     this.intervalMs = intervalMs;
+    this.warn = deps.onError ?? ((line: string): void => console.warn(line));
   }
 
   start(): void {
@@ -152,9 +174,16 @@ export class VisionLoop {
             : { active: false, labels: [], diag: `${msg?.diag ?? '未找到游戏窗口'}（${flow}）` },
           display,
         );
-      } catch {
+      } catch (e) {
         // 作废的轮次连"识别异常"都不推（它描述的是已经过去的那一屏）
         if (gen !== this.generation) return;
+        // ⚠️ 不许静默：这个循环是选人标签的唯一来源，吞掉异常 = "标签就是不出现"
+        //    且没有任何线索。限频（首次 + 每 20 次），否则每 1.5s 刷一行。
+        this.errors++;
+        if (shouldLogLoopError(this.errors)) {
+          const detail = e instanceof Error ? e.stack ?? e.message : String(e);
+          this.warn(`[hexbox:vision] 识别循环异常（第 ${this.errors} 次）：${detail}`);
+        }
         this.deps.onResult(
           { active: false, labels: [], diag: '识别异常' },
           this.deps.primaryDisplay(),

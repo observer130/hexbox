@@ -6,11 +6,11 @@
   "license": "MIT",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.6"
   },
   "packageManager": "pnpm@11.7.0",
   "scripts": {
-    "typecheck": "pnpm -r typecheck",
+    "typecheck": "pnpm -r typecheck && tsc --noEmit -p scripts/tsconfig.json",
     "test": "pnpm -r test",
     "build": "pnpm -r build",
     "sync": "node --experimental-strip-types packages/data-cli/src/cli.ts sync",

@@ -46,14 +46,14 @@ const cid = Number.parseInt(process.argv[2] ?? '154', 10);
 console.log('--- 顶层 _fieldValues 的 key 与长度 ---');
 const payload = (await get(`${HERO_DETAIL_URL}?championid=${cid}`)) as FieldValues;
 for (const [k, v] of Object.entries(payload.data?._fieldValues ?? {})) {
-  console.log(`  ${k}: len=${v.length}`);
+  console.log(`  ${k}: len=${(v ?? '').length}`);
 }
 
 const fv = extractFieldValue(payload);
-const detail = unwrapValue(fv) as Record<string, unknown>;
+const detail = unwrapValue(fv ?? '{}') as Record<string, unknown>;
 console.log('\n--- 详情顶层字段 ---');
 for (const [k, v] of Object.entries(detail)) {
-  const s = typeof v === 'string' ? v : JSON.stringify(v);
+  const s = typeof v === 'string' ? v : (JSON.stringify(v) ?? String(v));
   console.log(`  ${k}: len=${s.length}`);
 }
 
