@@ -20,6 +20,7 @@ import {
   type PhysicalRect,
   type WindowCandidate,
 } from './win-geometry.ts';
+import { normalizedRectToScreen } from './geometry.ts';
 
 /* ------------------------------------------------------------------ */
 /* pickGameWindow：从枚举候选里挑游戏本体（真机事故回归）                 */
@@ -496,4 +497,56 @@ test('makeScreenGeometry：窗口矩形与截屏同比时照常采用（不误�
   assert.equal(estimated, false);
   assert.equal(geo.windowWidth, 1706);
   assert.equal(geo.windowHeight, 960);
+});
+
+/* ------------------------------------------------------------------ */
+/* display 形态：必须是**屏幕**坐标（副屏回归）                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 副屏夹具（`bounds.x = 1920`）。
+ *
+ * ⚠️ 以前所有几何用例的 `bounds` 都是 0 原点，所以"display 形态实际返回
+ * 显示器局部坐标"这个缺陷一条都测不出来；副屏上标签会整体偏移 -1920。
+ */
+const SECOND_DISPLAY = {
+  bounds: { x: 1920, y: 0, width: 2560, height: 1440 },
+  scaleFactor: 1,
+  workArea: { x: 1920, y: 0, width: 2560, height: 1400 },
+};
+
+test('makeScreenGeometry：display 形态在副屏返回屏幕坐标（不是显示器局部坐标）', () => {
+  const win = { x: 2200, y: 100, width: 1600, height: 900 };
+  const { geo, kind } = makeScreenGeometry(
+    { width: 2560, height: 1440 },
+    win,
+    SECOND_DISPLAY,
+    'display',
+  );
+  assert.equal(kind, 'display');
+  assert.equal(geo.windowX, 1920, '几何基准必须是整块显示器的屏幕原点');
+  assert.equal(geo.windowY, 0);
+  assert.equal(geo.windowWidth, 2560, 'display 形态的基准宽 = 显示器逻辑宽');
+  assert.equal(geo.windowHeight, 1440);
+
+  // 截屏正中 → 屏幕 x = 1920 + 1280
+  const center = normalizedRectToScreen({ x: 0.5, y: 0.5, w: 0, h: 0 }, geo);
+  assert.equal(center.x, 1920 + 1280);
+
+  // 消费端（label-overlay 的 toWindowRelativeLabels）再减工作区原点 → 窗口内 1280。
+  // 旧实现这里会得到 1280 - 1920 = -640（画到副屏左侧外面）。
+  assert.equal(center.x - SECOND_DISPLAY.workArea.x, 1280);
+});
+
+test('makeScreenGeometry：无窗口矩形的兜底在副屏也返回屏幕坐标', () => {
+  const { geo, estimated } = makeScreenGeometry(
+    { width: 2560, height: 1440 },
+    null,
+    SECOND_DISPLAY,
+  );
+  assert.equal(estimated, true);
+  assert.equal(geo.windowX, SECOND_DISPLAY.workArea.x, '推断窗口贴在工作区左上角');
+  assert.equal(geo.windowY, SECOND_DISPLAY.workArea.y);
+  const left = normalizedRectToScreen({ x: 0, y: 0, w: 0, h: 0 }, geo);
+  assert.equal(left.x - SECOND_DISPLAY.workArea.x, 0, '工作区左上角映射到窗口内 0');
 });

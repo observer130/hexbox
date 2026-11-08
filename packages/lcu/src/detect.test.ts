@@ -15,6 +15,8 @@ import {
   parseExplicitCredentials,
   resolveExplicitCredentials,
   probePort,
+  isInInsecureTlsWindow,
+  withInsecureTls,
   LCU_CREDENTIALS_ENV,
   LCU_CREDENTIALS_FILE_ENV,
 } from './detect.ts';
@@ -212,6 +214,103 @@ test('findLcuPort：探测后必须还原 NODE_TLS_REJECT_UNAUTHORIZED', async (
     if (prev === undefined) delete process.env[KEY];
     else process.env[KEY] = prev;
   }
+});
+
+/* ------------------------------------------------------------------ */
+/* withInsecureTls：并发/嵌套不许把全局豁免泄漏出去                      */
+/* ------------------------------------------------------------------ */
+
+const TLS_KEY = 'NODE_TLS_REJECT_UNAUTHORIZED';
+
+/** 在测试前后可靠地保存/恢复该环境变量（它是**全局**状态）。 */
+function withCleanTlsEnv(fn: () => Promise<void>): Promise<void> {
+  const prev = process.env[TLS_KEY];
+  delete process.env[TLS_KEY];
+  return fn().finally(() => {
+    if (prev === undefined) delete process.env[TLS_KEY];
+    else process.env[TLS_KEY] = prev;
+  });
+}
+
+test('withInsecureTls：单个调用结束后不留全局豁免（原值为空）', async () => {
+  await withCleanTlsEnv(async () => {
+    await withInsecureTls(async () => {
+      assert.equal(process.env[TLS_KEY], '0', '回调期间应处于豁免');
+    });
+    assert.equal(process.env[TLS_KEY], undefined, '结束后必须还原（否则全进程 HTTPS 失去校验）');
+    assert.equal(isInInsecureTlsWindow(), false);
+  });
+});
+
+test('withInsecureTls：原值存在时还原为原值', async () => {
+  await withCleanTlsEnv(async () => {
+    process.env[TLS_KEY] = '1';
+    await withInsecureTls(async () => undefined);
+    assert.equal(process.env[TLS_KEY], '1');
+  });
+});
+
+test('withInsecureTls：并发重叠时**最后一方**才还原（旧实现会永久留下 "0"）', async () => {
+  await withCleanTlsEnv(async () => {
+    let releaseA!: () => void;
+    let releaseB!: () => void;
+    const gateA = new Promise<void>((r) => {
+      releaseA = r;
+    });
+    const gateB = new Promise<void>((r) => {
+      releaseB = r;
+    });
+
+    // 两个调用都以同步方式进入窗口（各 +1），随后各自等待
+    const a = withInsecureTls(async () => {
+      await gateA;
+      return 'a';
+    });
+    const b = withInsecureTls(async () => {
+      await gateB;
+      return 'b';
+    });
+    assert.equal(process.env[TLS_KEY], '0', '两者都在飞时应保持豁免');
+
+    // A 先结束：旧实现会在这一刻还原变量 → B 仍在飞的握手失去豁免
+    releaseA();
+    assert.equal(await a, 'a');
+    assert.equal(process.env[TLS_KEY], '0', 'A 结束后 B 仍在飞，豁免不能被撤');
+
+    releaseB();
+    assert.equal(await b, 'b');
+    assert.equal(process.env[TLS_KEY], undefined, '最后一方结束后必须还原');
+    assert.equal(isInInsecureTlsWindow(), false);
+  });
+});
+
+test('withInsecureTls：嵌套调用只在最外层结束时还原', async () => {
+  await withCleanTlsEnv(async () => {
+    await withInsecureTls(async () => {
+      await withInsecureTls(async () => {
+        assert.equal(process.env[TLS_KEY], '0');
+      });
+      assert.equal(process.env[TLS_KEY], '0', '内层结束不许撤掉外层的豁免');
+    });
+    assert.equal(process.env[TLS_KEY], undefined);
+  });
+});
+
+test('withInsecureTls：回调抛错也必须还原，且不破坏计数', async () => {
+  await withCleanTlsEnv(async () => {
+    await assert.rejects(
+      () =>
+        withInsecureTls(async () => {
+          throw new Error('boom');
+        }),
+      /boom/,
+    );
+    assert.equal(process.env[TLS_KEY], undefined);
+    assert.equal(isInInsecureTlsWindow(), false);
+    // 计数没坏：下一次仍能正常工作
+    await withInsecureTls(async () => undefined);
+    assert.equal(process.env[TLS_KEY], undefined);
+  });
 });
 
 /* ------------------------------------------------------------------ */

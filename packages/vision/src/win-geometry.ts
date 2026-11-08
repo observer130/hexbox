@@ -620,11 +620,16 @@ export function makeScreenGeometry(
       );
     }
     if (kind === 'display') {
-      // nx0 = win.x/dispW, nw = win.width/dispW（截屏与显示器同比）
-      const nx0 = win.x / dispW;
-      const ny0 = win.y / dispH;
-      const nw = win.width / dispW;
-      const nh = win.height / dispH;
+      // 截屏 = **整块显示器** → 几何基准就是显示器本身（屏幕逻辑坐标）。
+      //
+      // ⚠️ 这里以前写的是 "windowX = win.x - (nx0/nw)*win.width"，
+      //    代入 nx0 = win.x/dispW、nw = win.width/dispW 后**代数上恒等于 0**，
+      //    即返回的是"显示器局部坐标"；而 `normalizedRectToScreen` 的契约是
+      //    **屏幕逻辑坐标**，消费端（`label-overlay.ts` 的
+      //    `toWindowRelativeLabels(…, display.workArea)`）还要再减一次工作区原点。
+      //    结果：`bounds.x/y ≠ 0` 的显示器（副屏、左侧任务栏）上每个标签都
+      //    整体偏移 `(-bounds.x, -bounds.y)` —— 副屏上的标签直接画到画面外。
+      //    之所以一直没被发现：所有单测夹具的 `bounds` 都是 0 原点。
       return {
         kind,
         scale: capture.width / Math.max(1, dispW * display.scaleFactor),
@@ -632,15 +637,11 @@ export function makeScreenGeometry(
         geo: {
           captureWidth: capture.width,
           captureHeight: capture.height,
-          // normalizedRectToScreen: screen = windowX + n.x * windowWidth
-          // 目标: screen = win.x + ((n.x - nx0)/nw) * win.width
-          //   → windowX     = win.x - (nx0/nw) * win.width
-          //     windowWidth = win.width / nw = 显示器逻辑宽（把截屏内归一化
-          //     换算成窗口内归一化的系数）
-          windowX: win.x - (nx0 / nw) * win.width,
-          windowY: win.y - (ny0 / nh) * win.height,
-          windowWidth: win.width / nw,
-          windowHeight: win.height / nh,
+          windowX: display.bounds.x,
+          windowY: display.bounds.y,
+          // 显示器逻辑宽高（把"截屏内归一化"换算成"屏幕内归一化"的系数）
+          windowWidth: dispW,
+          windowHeight: dispH,
         },
       };
     }
@@ -671,9 +672,11 @@ export function makeScreenGeometry(
     geo: {
       captureWidth: capture.width,
       captureHeight: capture.height,
-      // CSS 原点 = 覆盖层窗口左上角 = 工作区左上角 → 偏移为 0
-      windowX: 0,
-      windowY: 0,
+      // 契约是**屏幕逻辑坐标**：推断出的窗口贴在工作区左上角，
+      // 所以原点是工作区原点（以前写死 0 —— 只在主屏且工作区原点为 0 时才是对的，
+      // 副屏/左侧任务栏上会整体偏移 -workArea.x）
+      windowX: display.workArea.x,
+      windowY: display.workArea.y,
       windowWidth: winW,
       windowHeight: winH,
     },

@@ -222,15 +222,33 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlow {
 
     const reader = body.getReader();
     const out = createWriteStream(dest);
+    /**
+     * 写流失败的**第一现场**。
+     *
+     * ⚠️ 以前只有循环结束后的 `out.on('error')`：下载途中磁盘满/被杀软锁住时，
+     * `'error'` 事件**没有监听者** → Node 抛未捕获异常 → 整个 Electron 主进程崩掉，
+     * 本该弹出的"失败 + 手动下载页"永远不出现。
+     * 现在从创建起就挂监听，循环里每一步都检查。
+     */
+    let writeFailure: Error | null = null;
+    out.on('error', (e: Error) => {
+      writeFailure ??= e;
+    });
     const hash = createHash('sha256');
     let received = 0;
     let lastPercent = -1;
+    /** 声明的字节数就是**硬上限**：多一个字节都不写（防止异常源把磁盘塞满）。 */
+    const byteLimit = asset.size > 0 ? asset.size : 0;
     try {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
         if (value === undefined) continue;
         received += value.byteLength;
+        if (byteLimit > 0 && received > byteLimit) {
+          throw new Error(`下载超出声明大小（${received} > ${byteLimit} 字节），已中止`);
+        }
+        if (writeFailure !== null) throw writeFailure;
         hash.update(value);
         if (!out.write(value)) await once(out, 'drain');
         const percent = asset.size > 0 ? Math.min(100, Math.floor((received / asset.size) * 100)) : null;
@@ -241,6 +259,8 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlow {
         }
       }
     } catch (e) {
+      // 断开响应体，别把连接挂在那儿
+      await reader.cancel().catch(() => undefined);
       // ⚠️ Windows 上文件被打开时删不掉：先 destroy() 再等 close 事件，最后才删
       out.destroy();
       await new Promise<void>((resolve) => out.once('close', () => resolve()));
@@ -251,6 +271,7 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlow {
       out.end(() => resolve());
       out.on('error', reject);
     });
+    if (writeFailure !== null) throw writeFailure;
 
     const sha256 = hash.digest('hex');
     if (asset.size > 0 && received !== asset.size) {

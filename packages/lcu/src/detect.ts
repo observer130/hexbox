@@ -210,6 +210,24 @@ export async function findLcuPort(
 }
 
 /**
+ * 正在"临时关闭 TLS 校验"的调用数（**引用计数**）。
+ *
+ * 为什么必须是计数而不是"存原值/还原原值"：并发或嵌套时，先结束的一方会把
+ * 变量还原成"进入时的值"，而那个值可能正是另一方的 `'0'`；等最后一方结束时
+ * 又把它写回去 —— 于是 `NODE_TLS_REJECT_UNAUTHORIZED=0` **永久留在进程里**，
+ * 之后所有 HTTPS（数据同步、更新检查）都失去证书校验；同时先结束的那一方
+ * 还会让仍在握手的一方差掉豁免（`SELF_SIGNED_CERT_IN_CHAIN`）。
+ *
+ * 计数式的语义：**第一个进来时设 '0'，最后一个出去时还原**，中间无论多少
+ * 并发/嵌套都保持豁免。
+ */
+let insecureTlsDepth = 0;
+/** 第一个调用进入前的原值（只在计数归零时用它还原）。 */
+let insecureTlsPrevious: string | undefined;
+
+const REJECT_UNAUTHORIZED = 'NODE_TLS_REJECT_UNAUTHORIZED';
+
+/**
  * 在回调执行期间临时关闭 TLS 校验，结束后**无论成败都还原**。
  *
  * 为什么不用 undici.Agent：`undici` 在本仓库不是可解析的依赖
@@ -224,14 +242,25 @@ export async function findLcuPort(
  * 与其在每个入口重复设置，不如让客户端自己保证。
  */
 export async function withInsecureTls<T>(fn: () => Promise<T>): Promise<T> {
-  const prev = process.env['NODE_TLS_REJECT_UNAUTHORIZED'];
-  process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
+  if (insecureTlsDepth === 0) insecureTlsPrevious = process.env[REJECT_UNAUTHORIZED];
+  insecureTlsDepth++;
+  process.env[REJECT_UNAUTHORIZED] = '0';
   try {
     return await fn();
   } finally {
-    if (prev === undefined) delete process.env['NODE_TLS_REJECT_UNAUTHORIZED'];
-    else process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = prev;
+    insecureTlsDepth--;
+    // 只有最后一个调用才有资格还原：并发中途还原会把别人的豁免一起撤掉
+    if (insecureTlsDepth === 0) {
+      if (insecureTlsPrevious === undefined) delete process.env[REJECT_UNAUTHORIZED];
+      else process.env[REJECT_UNAUTHORIZED] = insecureTlsPrevious;
+      insecureTlsPrevious = undefined;
+    }
   }
+}
+
+/** 当前是否处于"临时关闭 TLS 校验"窗口内（诊断/测试用）。 */
+export function isInInsecureTlsWindow(): boolean {
+  return insecureTlsDepth > 0;
 }
 
 /**

@@ -135,6 +135,36 @@ const TAIL_MS = Number(process.env['HEXBOX_AUGMENT_TAIL_MS'] ?? 20_000);
 const THUMB_SCALE = Math.max(0.25, Number(process.env['HEXBOX_AUGMENT_THUMB_SCALE'] ?? 0.25));
 
 /**
+ * 2999 轮询**这一轮还要不要继续**（纯函数）。
+ *
+ * ── 为什么必须有它（真机风险，2026-11 审查）──────────────────────────
+ *
+ * 轮询是靠 `if (this.isRunning) setTimeout(poll, …)` **自我续命**的，而闭包
+ * 捕获了它启动那一刻的 `trigger` 与 `live` 客户端。`stop()` 只置
+ * `isRunning = false`，**不持有也不清定时器**；如果 `getPlayerState()`（2.5s
+ * 超时）正跨过一次 `stop()`，而 2 秒内又起了新会话，旧循环会重新看到
+ * `isRunning === true` 并**永久续命**：两个循环同时打 2999，且旧循环用
+ * **过期的 trigger** 调 `applyApiDecision` —— 会把新会话的截屏关掉。
+ *
+ * 判据三件事都要成立：还在跑、**还是同一代会话**、**还是同一个 trigger 实例**。
+ * 只看 `isRunning` 不够（跨代重叠时它是 true）。
+ */
+export function apiPollShouldContinue(input: {
+  readonly running: boolean;
+  readonly sessionToken: number;
+  readonly expectedToken: number;
+  readonly trigger: unknown;
+  readonly currentTrigger: unknown;
+}): boolean {
+  return (
+    input.running &&
+    input.sessionToken === input.expectedToken &&
+    input.trigger !== null &&
+    input.trigger === input.currentTrigger
+  );
+}
+
+/**
  * **面板停留期间**的采样间隔（ms）——「单卡刷新（reroll）」检测靠它。
  *
  * 为什么必须另有一个更快的节奏（用户 2026-10-06 报的真实缺陷）：面板**不会**
@@ -741,6 +771,15 @@ export class AugmentController {
   private live: AugmentLiveData | null = null;
   /** 触发状态机（api 模式；每次 `start()` 重建 = 一块新的"未选集合"）。 */
   private apiTrigger: ReturnType<typeof createAugmentTrigger> | null = null;
+  /**
+   * 2999 轮询的定时器句柄。
+   *
+   * ⚠️ 必须**持有并清除**：轮询用 `if (isRunning) setTimeout(...)` 自我续命，
+   * 而 `isRunning` 会在 stop→start 之间重新变真 —— 不持有句柄的话，跨 stop 的
+   * 那一轮会永久续命，与新循环同时打 2999 并用过期 trigger 关掉新会话的截屏
+   * （判据见 `apiPollShouldContinue`）。
+   */
+  private apiPollTimer: ReturnType<typeof setTimeout> | null = null;
   /** 门控去抖状态机（纯函数，见 `vision/augment-panel.ts`）。 */
   private tracker = createPanelTracker();
   /**
@@ -1108,6 +1147,12 @@ export class AugmentController {
     }
     if (!this.isRunning && this.state !== 'starting') return false;
     this.isRunning = false;
+    // ⚠️ 必须清定时器：轮询靠 isRunning 续命，而它随时会被新一代重新置真
+    //    （不清就会跨会话永续，并用过期 trigger 关掉新会话的截屏）
+    if (this.apiPollTimer !== null) {
+      clearTimeout(this.apiPollTimer);
+      this.apiPollTimer = null;
+    }
     this.state = 'stopped';
     this.sessionToken = 0;
     this.streamToken = 0;
@@ -2239,14 +2284,35 @@ export class AugmentController {
   private startApiPolling(): void {
     const trigger = this.apiTrigger;
     if (!trigger) return;
+    // 本代令牌：轮询续命/下判定前都要比对（跨 stop→start 时 isRunning 会重新变真）
+    const mine = this.sessionToken;
     // 10 次（≈10 秒）已足够排除"刚开局的抖动"；进游戏前不计失败（见下）
     const API_MISS_LIMIT = 10;
     const client = this.liveClient();
     this.logLine(
       `[augment] ⏱ 触发方式=API（常态不截屏；死亡 + 等级达标 + 该次未选 → 开）轮询 ${API_POLL_MS}ms`,
     );
+    /** 续命判据：三代身份都对上（见 `apiPollShouldContinue`）。 */
+    const alive = (): boolean =>
+      apiPollShouldContinue({
+        running: this.isRunning,
+        sessionToken: this.sessionToken,
+        expectedToken: mine,
+        trigger,
+        currentTrigger: this.apiTrigger,
+      });
+    /** 排下一轮，并把句柄存下来（`stop()` 据此清除）。 */
+    const scheduleNext = (): void => {
+      if (!alive()) return;
+      const id = setTimeout(() => {
+        // ⚠️ 只清**自己**那一份：旧循环的迟到定时器不许把新循环的句柄抹掉
+        if (this.apiPollTimer === id) this.apiPollTimer = null;
+        void poll();
+      }, API_POLL_MS);
+      this.apiPollTimer = id;
+    };
     const poll = async (): Promise<void> => {
-      if (!this.isRunning) return;
+      if (!alive()) return;
       const state = await client.getPlayerState();
       if (state === null) {
         // ⚠️ **进游戏前 2999 一定不存在**（它只在局内存在）。链路通常在选人/加载阶段
@@ -2322,7 +2388,7 @@ export class AugmentController {
           reason: d.reason,
         });
       }
-      if (this.isRunning) setTimeout(() => void poll(), API_POLL_MS);
+      scheduleNext();
     };
     void poll();
   }

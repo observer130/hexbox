@@ -111,6 +111,58 @@ export interface CreateRecorderOptions {
 }
 
 /**
+ * 录制元数据里**绝不该出现明文**的环境变量键。
+ *
+ * `HEXBOX_LCU_CREDENTIALS`（及 `_FILE`）的值是 `<端口>:<token>` ——
+ * 录制产物是要发出来排查的（`debug/sessions/<ts>/`），
+ * 截图与回放都会被拷来拷去，令牌不能跟着走。
+ */
+const SENSITIVE_ENV_KEY = /(CREDENTIAL|TOKEN|PASSWORD|SECRET|APIKEY|_KEY$)/i;
+
+/** 敏感值替换成的占位符（保留"这个变量被设过"这一诊断信息）。 */
+export const REDACTED_ENV_VALUE = '[redacted]';
+
+/**
+ * 会话元数据里的环境变量快照（**纯函数**）。
+ *
+ * 只收 `HEXBOX_*`（与以前一致），但把可能带凭证的键**脱敏**。
+ * 以前这里是 `Object.entries(process.env).filter(k.startsWith('HEXBOX_'))`，
+ * 于是开了 `HEXBOX_AUGMENT_RECORD=1` 就会把 LCU 令牌**明文**写进
+ * `session.json`（AGENTS.md 明确要求不得提交本地 LCU token）。
+ */
+export function redactRecorderEnv(
+  source: Readonly<Record<string, string | undefined>>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (!key.startsWith('HEXBOX_')) continue;
+    if (typeof value !== 'string') continue;
+    out[key] = SENSITIVE_ENV_KEY.test(key) ? REDACTED_ENV_VALUE : value;
+  }
+  return out;
+}
+
+/**
+ * 追加一行文本；**任何失败都只返回错误、绝不抛出**（纯 I/O 助手，可单测）。
+ *
+ * 为什么必须吞掉：`frame()` 运行在 `ipcMain.on('augment:worker-record')` 回调里，
+ * `api()`/`edge()`/`phase()` 运行在 `void poll()` 的 promise 里 —— 那里抛出的
+ * 异常分别是**主进程未捕获异常**与**未处理的 rejection**，会直接杀掉悬浮窗
+ * （磁盘满、杀软锁文件、目录被删都很常见）。录制是诊断工具，绝不该能杀进程。
+ */
+export function appendLineSafely(
+  path: string,
+  line: string,
+): { readonly ok: true } | { readonly ok: false; readonly error: string } {
+  try {
+    appendFileSync(path, line);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
  * 建一个会话目录并开始录制。
  *
  * 目录名只含时间戳与（可选的）英雄名 —— 不写玩家名/ID，避免产物里出现身份信息。
@@ -122,9 +174,8 @@ export function createSessionRecorder(options: CreateRecorderOptions): SessionRe
   mkdirSync(join(dir, 'gating'), { recursive: true });
   mkdirSync(join(dir, 'native'), { recursive: true });
 
-  const env =
-    options.env ??
-    Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith('HEXBOX_'))) as Record<string, string>;
+  // ⚠️ 脱敏后再落盘（见 `redactRecorderEnv`）：录制产物会被发出来排查
+  const env = redactRecorderEnv(options.env ?? process.env);
 
   const idxPath = join(dir, 'frames.idx.jsonl');
   const apiPath = join(dir, 'api.jsonl');
@@ -147,6 +198,19 @@ export function createSessionRecorder(options: CreateRecorderOptions): SessionRe
 
   const log = options.log ?? ((line: string): void => console.log(line));
   log(`[record] 🎥 会话录制已开启 → ${dir}`);
+
+  /**
+   * 追加一行 JSONL，**失败只告警一次、绝不抛**。
+   *
+   * 每个文件只告警一次：帧率高，磁盘满/被杀软锁住时否则会瞬间刷满日志。
+   */
+  const warnedAppend = new Set<string>();
+  const append = (path: string, line: string): void => {
+    const r = appendLineSafely(path, line);
+    if (r.ok || warnedAppend.has(path)) return;
+    warnedAppend.add(path);
+    log(`[record] ⚠ 追加写盘失败（${path}）：${r.error}（后续同类错误不再重复打印）`);
+  };
 
   /** 当前已落盘的元数据（`setMeta` 在其上打补丁）。 */
   let meta: SessionRecorderMeta = options.meta;
@@ -216,7 +280,7 @@ export function createSessionRecorder(options: CreateRecorderOptions): SessionRe
       }
       if (payload.kind === 'gating') gating++;
       else native++;
-      appendFileSync(
+      append(
         idxPath,
         JSON.stringify({
           seq: seq - 1,
@@ -231,13 +295,13 @@ export function createSessionRecorder(options: CreateRecorderOptions): SessionRe
       );
     },
     api(sample): void {
-      appendFileSync(apiPath, JSON.stringify({ ...sample, atMs: rel(sample.atMs) }) + '\n');
+      append(apiPath, JSON.stringify({ ...sample, atMs: rel(sample.atMs) }) + '\n');
     },
     edge(e): void {
-      appendFileSync(edgePath, JSON.stringify({ atMs: rel(e.atMs), kind: e.kind }) + '\n');
+      append(edgePath, JSON.stringify({ atMs: rel(e.atMs), kind: e.kind }) + '\n');
     },
     phase(p): void {
-      appendFileSync(phasePath, JSON.stringify({ ...p, atMs: rel(p.atMs) }) + '\n');
+      append(phasePath, JSON.stringify({ ...p, atMs: rel(p.atMs) }) + '\n');
     },
     close(report): void {
       try {

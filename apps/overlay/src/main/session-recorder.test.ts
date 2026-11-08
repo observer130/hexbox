@@ -18,7 +18,8 @@ import { test } from 'node:test';
 
 import { decodePng, type Rect } from '@hexbox/vision';
 
-import { createSessionRecorder, recordEnabled } from './session-recorder.ts';
+import { createSessionRecorder, recordEnabled, redactRecorderEnv } from './session-recorder.ts';
+import { appendLineSafely } from './session-recorder.ts';
 import { loadSession } from '../replay/session-replay.ts';
 
 const REGION: Rect = { x: 0.12, y: 0.1, w: 0.76, h: 0.66 };
@@ -180,5 +181,81 @@ test('录制：缺 session.json 的老目录也能加载（回放按缺失能力
     assert.equal(session.frames.length, 0);
     assert.equal(session.api.length, 0);
     assert.ok(session.notes.some((n) => n.includes('session.json')));
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* 隐私：环境变量快照必须脱敏                                           */
+/* ------------------------------------------------------------------ */
+
+test('redactRecorderEnv：凭证类键被脱敏，普通开关原样保留，非 HEXBOX_ 丢弃', () => {
+  const env = redactRecorderEnv({
+    HEXBOX_LCU_CREDENTIALS: '1954:super-secret-token',
+    HEXBOX_LCU_CREDENTIALS_FILE: 'C:/Users/me/.hexbox/lcu-credentials',
+    HEXBOX_AUGMENT_TRIGGER: 'api',
+    HEXBOX_AUGMENT_THUMB_SCALE: '0.25',
+    PATH: 'C:/Windows',
+    SomeOther: 'x',
+  });
+
+  assert.equal(env['HEXBOX_LCU_CREDENTIALS'], '[redacted]', '令牌绝不许落盘');
+  assert.equal(env['HEXBOX_LCU_CREDENTIALS_FILE'], '[redacted]');
+  assert.equal(env['HEXBOX_AUGMENT_TRIGGER'], 'api', '诊断用的开关必须保留');
+  assert.equal(env['HEXBOX_AUGMENT_THUMB_SCALE'], '0.25');
+  assert.equal(env['PATH'], undefined, '只收 HEXBOX_ 前缀');
+  assert.equal(env['SomeOther'], undefined);
+  // 原始值不许以任何形式出现
+  assert.equal(JSON.stringify(env).includes('super-secret-token'), false);
+});
+
+test('redactRecorderEnv：未设置的键与空值不产生噪声', () => {
+  const env = redactRecorderEnv({
+    HEXBOX_UNSET: undefined,
+    HEXBOX_EMPTY: '',
+    HEXBOX_TOKEN: 'abc',
+  });
+  assert.equal(env['HEXBOX_UNSET'], undefined);
+  assert.equal(env['HEXBOX_EMPTY'], '');
+  assert.equal(env['HEXBOX_TOKEN'], '[redacted]');
+});
+
+test('录制：session.json 里不出现明文 LCU 令牌（真实写入路径）', () => {
+  withTempDir((root) => {
+    const rec = createSessionRecorder({
+      rootDir: root,
+      meta: {
+        trigger: 'api',
+        gating: { intervalMs: 1000 },
+        region: REGION,
+      } as never,
+      // 模拟"提权会话设了 HEXBOX_LCU_CREDENTIALS"
+      env: { HEXBOX_LCU_CREDENTIALS: '1954:tok-abc', HEXBOX_AUGMENT_TRIGGER: 'api' },
+    });
+    const text = readFileSync(join(rec.dir, 'session.json'), 'utf8');
+    assert.equal(text.includes('tok-abc'), false, '产物是要发出去排查的，令牌不能跟着走');
+    const parsed = JSON.parse(text) as { env: Record<string, string> };
+    assert.equal(parsed.env['HEXBOX_LCU_CREDENTIALS'], '[redacted]');
+    assert.equal(parsed.env['HEXBOX_AUGMENT_TRIGGER'], 'api');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* 录制写盘失败不许杀进程                                               */
+/* ------------------------------------------------------------------ */
+
+test('appendLineSafely：目录不存在时返回错误而不抛（IPC 回调里抛=主进程崩）', () => {
+  const missing = join(tmpdir(), 'hexbox-no-such-dir-xyz', 'x.jsonl');
+  const r = appendLineSafely(missing, 'line\n');
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  assert.ok(r.error.length > 0, '要带上原因，便于日志定位');
+});
+
+test('appendLineSafely：正常路径追加成功', () => {
+  withTempDir((root) => {
+    const path = join(root, 'ok.jsonl');
+    assert.equal(appendLineSafely(path, 'a\n').ok, true);
+    assert.equal(appendLineSafely(path, 'b\n').ok, true);
+    assert.equal(readFileSync(path, 'utf8'), 'a\nb\n');
   });
 });
