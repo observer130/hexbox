@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { formatStatDate, modeLabel, pct } from './format.ts';
+import { formatStatDate, modeLabel, pct, sortByRate } from './format.ts';
 
 test('formatStatDate：上游 YYYYMMDD 转成可读的 YYYY-MM-DD', () => {
   assert.equal(formatStatDate('20261101'), '2026-11-01');
@@ -47,4 +47,32 @@ test('modeLabel：三个已知模式给中文名（CHERRY 是斗魂竞技场，�
 test('modeLabel：上游新增未知模式时原样返回代号（不 undefined、不空白）', () => {
   assert.equal(modeLabel('ARAM'), 'ARAM');
   assert.equal(modeLabel('toString'), 'toString', '不认原型链上的键');
+});
+
+test('sortByRate：按指定比率降序，且不改动入参', () => {
+  const rows = [
+    { id: 1, winRate: 0.4, pickRate: 0.9 },
+    { id: 2, winRate: 0.6, pickRate: 0.2 },
+    { id: 3, winRate: 0.5, pickRate: 0.5 },
+  ];
+  assert.deepEqual(
+    sortByRate(rows, 'winRate').map((r) => r.id),
+    [2, 3, 1],
+  );
+  assert.deepEqual(
+    sortByRate(rows, 'pickRate').map((r) => r.id),
+    [1, 3, 2],
+  );
+  assert.deepEqual(rows.map((r) => r.id), [1, 2, 3], '不修改入参数组');
+});
+
+test('sortByRate：相等值保持上游原顺序（稳定排序 = 官方排名优先）', () => {
+  const rows = [
+    { id: 'first', winRate: 0.5, pickRate: 0.1 },
+    { id: 'second', winRate: 0.5, pickRate: 0.1 },
+  ];
+  assert.deepEqual(
+    sortByRate(rows, 'winRate').map((r) => r.id),
+    ['first', 'second'],
+  );
 });

@@ -21,6 +21,7 @@ import {
   pct,
   rankChangeClass,
   rankChangeText,
+  sortByRate,
 } from '../format';
 import type { RankingSnapshot } from '../useDataset';
 import { rarityMeta } from '../rarity';
@@ -49,19 +50,14 @@ const augmentRows = computed(() => {
   if (!props.rankings) return [];
   const rows = props.rankings.augments.map((e) => {
     const def = hextechById.value.get(e.id);
-    return { ...e, def, sortWin: e.winRate, sortPick: e.pickRate };
+    return { ...e, def };
   });
-  const key = sortBy.value;
-  return [...rows].sort((a, b) =>
-    key === 'winRate' ? b.sortWin - a.sortWin : b.sortPick - a.sortPick,
-  );
+  return sortByRate(rows, sortBy.value);
 });
 
 const heroRows = computed(() => {
   if (!props.rankings) return [];
-  return [...props.rankings.heroes].sort((a, b) =>
-    sortBy.value === 'winRate' ? b.winRate - a.winRate : b.pickRate - a.pickRate,
-  );
+  return sortByRate(props.rankings.heroes, sortBy.value);
 });
 
 const hasData = computed(

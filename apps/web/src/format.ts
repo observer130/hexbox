@@ -69,6 +69,24 @@ export function rankChangeClass(n: number): string {
   return n > 0 ? 'up' : n < 0 ? 'down' : 'flat';
 }
 
+/** 排行榜排序键（与 `RankView` 的下拉选项一致）。 */
+export type RankSortKey = 'winRate' | 'pickRate';
+
+/**
+ * 排行榜按指定比率**降序**排序（纯函数，供海克斯榜/英雄榜共用）。
+ *
+ * 返回新数组（不改入参）；相同值保持上游原顺序（`Array.prototype.sort` 自 ES2019
+ * 起稳定，等于"官方排名优先"）。旧实现两处 computed 各写一份 sort 表达式，
+ * 审计 P3 收敛到这里以便单测。
+ */
+export function sortByRate<T extends { readonly winRate: number; readonly pickRate: number }>(
+  rows: readonly T[],
+  key: RankSortKey,
+): T[] {
+  const field: 'winRate' | 'pickRate' = key === 'winRate' ? 'winRate' : 'pickRate';
+  return [...rows].sort((a, b) => b[field] - a[field]);
+}
+
 /** 排名变化文字（↑上升 / ↓下降 / —不变）。 */
 export function rankChangeText(n: number): string {
   if (n > 0) return `↑${n}`;
