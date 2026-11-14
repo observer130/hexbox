@@ -15,7 +15,7 @@
  * shallowRef，避免 900KB 数据无谓复制）。
  */
 
-import type { Dataset, RankingSnapshot } from '@hexbox/core';
+import { DATA_SCHEMA_VERSION, type Dataset, type RankingSnapshot } from '@hexbox/core';
 
 /**
  * 数据不兼容时的统一文案前缀（直接展示给用户）。
@@ -49,7 +49,11 @@ function requireString(record: Record<string, unknown>, key: string, field: stri
  * 元素级检查是给模板兜底的：数组存在但塞了 `null`（写了一半的文件）同样会让
  * `a.name.toLowerCase()` / `h.augmentNameId.replace(...)` 抛 TypeError。
  */
-function requireObjectArray(record: Record<string, unknown>, key: string, field: string): void {
+function requireObjectArray(
+  record: Record<string, unknown>,
+  key: string,
+  field: string,
+): Record<string, unknown>[] {
   const value = record[key];
   if (!Array.isArray(value)) throw incompatible(field);
   for (let i = 0; i < value.length; i++) {
@@ -58,6 +62,44 @@ function requireObjectArray(record: Record<string, unknown>, key: string, field:
       throw incompatible(`${field}[${i}]`);
     }
   }
+  return value as Record<string, unknown>[];
+}
+
+/** 断言字段是数字（页面会直接做数值比较/排序）。 */
+function requireNumber(record: Record<string, unknown>, key: string, field: string): void {
+  if (typeof record[key] !== 'number' || !Number.isFinite(record[key] as number)) {
+    throw incompatible(field);
+  }
+}
+
+/** 断言字段是数组（`modes` 这类只遍历、不参与数值运算的字段）。 */
+function requireArray(record: Record<string, unknown>, key: string, field: string): void {
+  if (!Array.isArray(record[key])) throw incompatible(field);
+}
+
+/**
+ * 数据文件版本：来自**更新版本** hexbox 的文件明确拒绝（提示升级），
+ * 不让页面在未知格式上"尽力渲染"。缺省（旧文件）按 1 处理，字段校验兜底。
+ */
+function requireSupportedSchema(meta: Record<string, unknown>): void {
+  const version = meta['schemaVersion'];
+  if (typeof version === 'number' && version > DATA_SCHEMA_VERSION) {
+    throw new Error(
+      `数据文件由更新版本的 hexbox 生成（schema ${version}，当前支持 ${DATA_SCHEMA_VERSION}）：` +
+        '请升级 hexbox 后重试，或重新 pnpm sync 生成本版本数据',
+    );
+  }
+}
+
+/** 数组元素级必填字段校验（页面实际读取的字段）。 */
+function eachEntry(
+  entries: readonly Record<string, unknown>[],
+  base: string,
+  check: (entry: Record<string, unknown>, field: string) => void,
+): void {
+  entries.forEach((entry, i) => {
+    check(entry, `${base}[${i}]`);
+  });
 }
 
 /**
@@ -73,10 +115,34 @@ export function parseDataset(value: unknown): Dataset {
   const root = requireRecord(value, '根对象');
   const meta = requireRecord(root.meta, 'meta');
   requireString(meta, 'fetchedAt', 'meta.fetchedAt');
-  requireObjectArray(root, 'augments', 'augments');
-  requireObjectArray(root, 'champions', 'champions');
-  requireObjectArray(root, 'items', 'items');
-  requireObjectArray(root, 'hextechs', 'hextechs');
+  requireSupportedSchema(meta);
+  const augments = requireObjectArray(root, 'augments', 'augments');
+  const champions = requireObjectArray(root, 'champions', 'champions');
+  const items = requireObjectArray(root, 'items', 'items');
+  const hextechs = requireObjectArray(root, 'hextechs', 'hextechs');
+
+  // 条目级必填字段（页面会直接读这些字段，缺了同样会 TypeError 白屏）
+  eachEntry(augments, 'augments', (a, field) => {
+    requireNumber(a, 'id', `${field}.id`);
+    requireString(a, 'augmentNameId', `${field}.augmentNameId`);
+    requireString(a, 'name', `${field}.name`);
+    requireArray(a, 'modes', `${field}.modes`);
+  });
+  eachEntry(champions, 'champions', (c, field) => {
+    requireNumber(c, 'id', `${field}.id`);
+    requireString(c, 'name', `${field}.name`);
+    requireString(c, 'alias', `${field}.alias`);
+  });
+  eachEntry(items, 'items', (i, field) => {
+    requireNumber(i, 'id', `${field}.id`);
+    requireString(i, 'name', `${field}.name`);
+  });
+  eachEntry(hextechs, 'hextechs', (h, field) => {
+    requireNumber(h, 'id', `${field}.id`);
+    requireString(h, 'augmentNameId', `${field}.augmentNameId`);
+    requireString(h, 'name', `${field}.name`);
+  });
+
   // 只做形状校验；通过后原样返回（不做深拷贝/重排）。
   return value as Dataset;
 }
@@ -94,7 +160,20 @@ export function parseRankings(value: unknown): RankingSnapshot {
   const root = requireRecord(value, '根对象');
   const meta = requireRecord(root.meta, 'meta');
   requireString(meta, 'dataDate', 'meta.dataDate');
-  requireObjectArray(root, 'augments', 'augments');
-  requireObjectArray(root, 'heroes', 'heroes');
+  requireSupportedSchema(meta);
+  const augmentRows = requireObjectArray(root, 'augments', 'augments');
+  const heroRows = requireObjectArray(root, 'heroes', 'heroes');
+
+  eachEntry(augmentRows, 'augments', (a, field) => {
+    requireNumber(a, 'id', `${field}.id`);
+    requireNumber(a, 'winRate', `${field}.winRate`);
+    requireNumber(a, 'pickRate', `${field}.pickRate`);
+  });
+  eachEntry(heroRows, 'heroes', (h, field) => {
+    requireNumber(h, 'championId', `${field}.championId`);
+    requireNumber(h, 'winRate', `${field}.winRate`);
+    requireNumber(h, 'pickRate', `${field}.pickRate`);
+  });
+
   return value as RankingSnapshot;
 }

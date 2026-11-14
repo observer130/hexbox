@@ -15,14 +15,14 @@ import type { Dataset, RankingSnapshot } from '@hexbox/core';
 
 import { INCOMPATIBLE_DATA_MESSAGE, parseDataset, parseRankings } from './validate.ts';
 
-/** 最小可用 dataset（数组留空即可，字段名与真实产物一致）。 */
+/** 最小可用 dataset（每条数组放 1 个形状合法的条目）。 */
 function validDataset(): Record<string, unknown> {
   return {
     meta: { source: 'communitydragon', patch: null, fetchedAt: '2026-11-02T14:48:37.531Z' },
-    augments: [],
-    champions: [],
-    items: [],
-    hextechs: [],
+    augments: [{ id: 1205, augmentNameId: 'ARAM_X', name: 'X', modes: ['KIWI'] }],
+    champions: [{ id: 1, name: 'A', alias: 'a' }],
+    items: [{ id: 1001, name: 'I' }],
+    hextechs: [{ id: 1001, augmentNameId: 'ARAM_X', name: 'X' }],
   };
 }
 
@@ -34,8 +34,8 @@ function validRankings(): Record<string, unknown> {
       dataDate: '20261101',
       fetchedAt: '2026-11-02T14:48:37.994Z',
     },
-    augments: [],
-    heroes: [],
+    augments: [{ id: 1001, winRate: 0.5, pickRate: 0.2 }],
+    heroes: [{ championId: 1, winRate: 0.51, pickRate: 0.11 }],
   };
 }
 
@@ -54,7 +54,6 @@ function assertIncompatible(fn: () => unknown, field: string): void {
 
 test('parseDataset：合法数据通过，且原样返回（不深拷贝/不重排）', () => {
   const raw = validDataset();
-  raw.augments = [{ id: 1205 }];
   const parsed: Dataset = parseDataset(raw);
   assert.equal(parsed, raw, '应返回同一对象引用，避免复制近 1MB 数据');
   assert.equal(parsed.augments.length, 1);
@@ -120,4 +119,48 @@ test('parseRankings：augments/heroes 必须是数组（排行榜两份子表）
   assertIncompatible(() => parseRankings({ ...validRankings(), augments: null }), 'augments');
   assertIncompatible(() => parseRankings({ ...validRankings(), heroes: {} }), 'heroes');
   assertIncompatible(() => parseRankings(null), '根对象');
+});
+
+/* ------------------------------------------------------------------ */
+/* 条目级必填字段（审查 P2：数组元素缺字段同样会 TypeError 白屏）          */
+/* ------------------------------------------------------------------ */
+
+test('parseDataset：海克斯条目缺 name/augmentNameId/modes → 带下标拒绝', () => {
+  const raw = validDataset();
+  raw.augments = [{ id: 1205, augmentNameId: 'ARAM_X', modes: [] }];
+  assertIncompatible(() => parseDataset(raw), 'augments[0].name');
+
+  const raw2 = validDataset();
+  raw2.augments = [{ id: 1205, augmentNameId: 'ARAM_X', name: 'X', modes: 'KIWI' }];
+  assertIncompatible(() => parseDataset(raw2), 'augments[0].modes');
+});
+
+test('parseDataset：英雄/装备条目缺必填字段 → 拒绝', () => {
+  const raw = validDataset();
+  raw.champions = [{ id: 1, name: 'A' }];
+  assertIncompatible(() => parseDataset(raw), 'champions[0].alias');
+
+  const raw2 = validDataset();
+  raw2.items = [{ id: '1001', name: 'I' }];
+  assertIncompatible(() => parseDataset(raw2), 'items[0].id');
+});
+
+test('parseRankings：榜单条目缺数值字段 → 拒绝（排序会对 undefined 做减法）', () => {
+  const raw = validRankings();
+  raw.heroes = [{ championId: 1, pickRate: 0.1 }];
+  assertIncompatible(() => parseRankings(raw), 'heroes[0].winRate');
+
+  const raw2 = validRankings();
+  raw2.augments = [{ id: 1001, winRate: '0.5', pickRate: 0.2 }];
+  assertIncompatible(() => parseRankings(raw2), 'augments[0].winRate');
+});
+
+test('parseDataset/parseRankings：未来 schema 版本明确拒绝并提示升级', () => {
+  const ds = validDataset();
+  ds.meta = { ...(ds.meta as object), schemaVersion: 999 };
+  assert.throws(() => parseDataset(ds), /更新版本的 hexbox/);
+
+  const rk = validRankings();
+  rk.meta = { ...(rk.meta as object), schemaVersion: 999 };
+  assert.throws(() => parseRankings(rk), /更新版本的 hexbox/);
 });
