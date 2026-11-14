@@ -14,10 +14,16 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { detectAugmentPanelInRegions, type PanelCard } from './augment-panel.ts';
-import { augmentNameStripRect, readAugmentNameStrip, type AugmentNameFingerprint } from './augment-ocr.ts';
+import {
+  augmentNameStripRect,
+  readAugmentNameStrip,
+  type AugmentNameFingerprint,
+  type AugmentNameMatch,
+} from './augment-ocr.ts';
 import {
   bitmapPixels,
   describeRectShift,
+  planOpenRecognition,
   recognizeOpen,
   recognizeReroll,
   REROLL_RECT_SHIFT_TOLERANCE,
@@ -389,4 +395,99 @@ test('recognizeOpen：原生帧的卡片矩形与门控检测器逐位一致（�
     out.report.cards.map((c) => c.interiorLuma),
     direct.cards.map((c) => Math.round(c.interiorLuma)),
   );
+});
+
+/* ------------------------------------------------------------------ */
+/* 神经网络 OCR 的注入缝（nameMatches / full）                            */
+/* ------------------------------------------------------------------ */
+
+test('planOpenRecognition：与 recognizeOpen 用同一份几何决策，供 worker 预裁名字带', () => {
+  const native = makeFrameWithNames(PATTERNS);
+  const plan = planOpenRecognition(native, [{ x: 0.12, y: 0.1, w: 0.76, h: 0.66 }], gatingCards());
+  assert.equal(plan.ok, true);
+  if (!plan.ok) return;
+  assert.equal(plan.cards.length, 3);
+  const out = recognizeOpen({
+    pixels: bitmapPixels(native),
+    regions: [{ x: 0.12, y: 0.1, w: 0.76, h: 0.66 }],
+    library: [],
+    gatingCards: gatingCards(),
+    fingerprintBasis: { bitmap: native, rects: CARDS },
+    frozenRects: null,
+    watchRects: null,
+    fingerprints: [],
+    tookMs: 1,
+  });
+  assert.deepEqual(plan.cards.map((c) => c.rect), out.report.cards.map((c) => c.rect));
+  assert.equal(plan.note, null);
+});
+
+test('recognizeOpen：nameMatches 直接生效，且传入 full 时不再重新抓帧', () => {
+  const native = makeFrameWithNames(PATTERNS);
+  let readFullCount = 0;
+  const pixels = {
+    width: W,
+    height: H,
+    readFull: (): Bitmap => {
+      readFullCount++;
+      return native;
+    },
+    readRect: (): Bitmap | null => {
+      throw new Error('整批识别不应调用 readRect');
+    },
+  };
+  const matches = new Map<number, AugmentNameMatch | null>([
+    [0, { augmentId: 9001, name: '神经甲', score: 0.9, margin: 0.5 }],
+    [1, null],
+    [2, { augmentId: 9003, name: '神经丙', score: 0.8, margin: 0.2 }],
+  ]);
+  const out = recognizeOpen({
+    pixels,
+    full: native,
+    regions: [{ x: 0.12, y: 0.1, w: 0.76, h: 0.66 }],
+    library: libraryFrom(native, PATTERNS),
+    gatingCards: gatingCards(),
+    fingerprintBasis: { bitmap: native, rects: CARDS },
+    frozenRects: null,
+    watchRects: null,
+    fingerprints: [],
+    tookMs: 40,
+    nameMatches: matches,
+  });
+  assert.equal(readFullCount, 0, '传了 full 就不许再抓第二帧（名字/几何会错位）');
+  assert.equal(out.report.ok, true);
+  assert.deepEqual(
+    out.report.cards.map((c) => c.augmentId),
+    [9001, 101, 9003],
+  );
+  assert.equal(out.report.cards[0]!.name, '神经甲');
+  // null 的卡回落到模板匹配（这张卡图案与库同源 → 认成 101）
+  assert.equal(out.report.cards[1]!.name, '测试海克斯2');
+});
+
+test('recognizeReroll：nameMatches 命中时不再读取卡片像素（主进程算过就直接用）', () => {
+  const native = makeFrameWithNames(PATTERNS);
+  let readRectCount = 0;
+  const pixels = {
+    width: W,
+    height: H,
+    readFull: (): Bitmap => native,
+    readRect: (): Bitmap | null => {
+      readRectCount++;
+      return null;
+    },
+  };
+  const out = recognizeReroll({
+    pixels,
+    only: [1],
+    latestCards: gatingCards(),
+    frozenRects: CARDS,
+    library: [],
+    fingerprints: [],
+    tookMs: 9,
+    nameMatches: new Map([[1, { augmentId: 7002, name: '神经乙', score: 0.95, margin: 0.6 }]]),
+  });
+  assert.equal(readRectCount, 0);
+  assert.equal(out.report.cards[0]!.augmentId, 7002);
+  assert.equal(out.report.cards[0]!.score, 0.95);
 });

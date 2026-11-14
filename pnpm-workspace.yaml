@@ -2,9 +2,10 @@ packages:
   - 'packages/*'
   - 'apps/*'
 
-# 允许执行安装脚本的依赖。这两项都需要下载平台二进制，缺了无法运行：
+# 允许执行安装脚本的依赖。这几项都需要下载平台二进制，缺了无法运行：
 #   esbuild  - Vite 与 overlay 构建脚本的依赖
 #   electron - 悬浮窗运行时本体（约 100MB 二进制）
+#   onnxruntime-node - 神经网络 OCR 的原生 ONNX Runtime（Windows x64 解包约 65MB）
 # 原则：只批准确实必需的；新增项前请说明必要性。
 allowBuilds:
   electron: true
@@ -14,3 +15,4 @@ allowBuilds:
   # （ERR_PNPM_IGNORED_BUILDS），所以显式写 false（= 明确不跑它的安装脚本）。
   electron-winstaller: false
   esbuild: true
+  onnxruntime-node: true

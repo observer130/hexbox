@@ -13,6 +13,7 @@ export * from './visibility.ts';
 export * from './augment-panel.ts';
 export * from './augment-cadence.ts';
 export * from './augment-ocr.ts';
+export * from './augment-ocr-neural.ts';
 export * from './augment-trigger.ts';
 // 开边沿整批识别的两个纯决策（原生重检失败 → 门控矩形兜底；失败后**有界**重试）
 export * from './augment-open-recognize.ts';

@@ -15,7 +15,8 @@
  */
 
 import { build } from 'esbuild';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { cp, mkdir, readFile, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -136,5 +137,75 @@ for (const rel of HTML_FILES) {
     }
   }
 }
+
+// 4) 神经网络 OCR：模型 + 原生 ONNX Runtime
+//
+// 为什么不用 electron-builder 自动收 node_modules：本包原本"不需要任何 node_modules"
+// （全部内联进 dist），自动收依赖会把 pnpm 的整棵 workspace 带进安装包。这里只复制
+// **当前平台**的 ORT 运行时 + 模型到 dist/native/，主进程按绝对路径 require；
+// electron-builder 用 asarUnpack 把 dist/native 解包（.node/.dll 不能从 asar 加载）。
+const ocrSrc = join(here, 'resources', 'ocr');
+const ocrOut = join(out, 'native', 'ocr');
+const modelFile = join(ocrSrc, 'ppocrv5-ch-mobile-rec.onnx');
+const dictFile = join(ocrSrc, 'ppocrv5-ch-mobile-dict.txt');
+for (const f of [modelFile, dictFile]) {
+  if (!existsSync(f)) {
+    console.error(
+      '✗ 缺少神经网络 OCR 模型资产：' + f + '\n' +
+        '  这些文件应随仓库提供（apps/overlay/resources/ocr/），删除后构建不能继续。',
+    );
+    process.exit(1);
+  }
+}
+await mkdir(ocrOut, { recursive: true });
+for (const f of ['ppocrv5-ch-mobile-rec.onnx', 'ppocrv5-ch-mobile-dict.txt', 'NOTICE.md']) {
+  const src = join(ocrSrc, f);
+  if (existsSync(src)) await cp(src, join(ocrOut, f));
+}
+
+const req = createRequire(import.meta.url);
+let ortPkg;
+try {
+  ortPkg = req.resolve('onnxruntime-node/package.json');
+} catch {
+  console.error(
+    '✗ 找不到 onnxruntime-node：先 pnpm install（首次安装会下载原生运行时，约 100MB）。',
+  );
+  process.exit(1);
+}
+const ortRoot = dirname(ortPkg);
+const ortOut = join(out, 'native', 'onnxruntime-node');
+await mkdir(ortOut, { recursive: true });
+await cp(join(ortRoot, 'package.json'), join(ortOut, 'package.json'));
+for (const d of ['dist', 'lib']) {
+  if (existsSync(join(ortRoot, d))) await cp(join(ortRoot, d), join(ortOut, d), { recursive: true });
+}
+const binRel = join('bin', 'napi-v6', process.platform, process.arch);
+if (!existsSync(join(ortRoot, binRel))) {
+  console.error(
+    '✗ onnxruntime-node 缺少当前平台的原生二进制：' + join(ortRoot, binRel) + '\n' +
+      '  需要允许它的 postinstall（见 pnpm-workspace.yaml 的 allowBuilds）。',
+  );
+  process.exit(1);
+}
+await mkdir(join(ortOut, 'bin', 'napi-v6', process.platform), { recursive: true });
+await cp(join(ortRoot, binRel), join(ortOut, binRel), { recursive: true });
+// 运行时依赖只有 onnxruntime-common：复制到 native/node_modules 供 require 解析
+const commonRoot = join(ortRoot, '..', 'onnxruntime-common');
+if (!existsSync(commonRoot)) {
+  console.error(
+    '✗ 找不到 onnxruntime-common（onnxruntime-node 的运行时依赖）。\n' +
+      '  期望目录：' + commonRoot,
+  );
+  process.exit(1);
+}
+await cp(realpathSync(commonRoot), join(out, 'native', 'node_modules', 'onnxruntime-common'), {
+  recursive: true,
+  dereference: true,
+});
+console.log(
+  '✓ 神经网络 OCR 资产 → dist/native（模型 15.9MB + ORT ' +
+    process.platform + '/' + process.arch + '）',
+);
 
 console.log('✓ overlay 构建完成 →', out);

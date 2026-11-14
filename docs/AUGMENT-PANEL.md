@@ -434,6 +434,10 @@ pnpm --filter @hexbox/overlay debug:augment
 
 ## 八、识别：卡面名字 OCR（S5.3）
 
+> **2026-11-15 起生产路径是神经网络 OCR**（PP-OCRv5 mobile + 闭集 CTC），
+> 模板匹配保留为回退：见 [docs/NEURAL-OCR.md](NEURAL-OCR.md)。本节保留的是
+> 模板匹配的原理与标定记录 —— 神经网络路径里它仍是模型缺失/低置信度时的兜底。
+
 代码：[vision/augment-ocr.ts](../packages/vision/src/augment-ocr.ts)（纯函数，10 项单测）。
 复用选人阶段英雄名的同一套机制（二值化 → 裁文字包围盒 → 拉伸到固定网格 → 与渲染
 指纹库做 Jaccard），但**名字带位置完全不同**：

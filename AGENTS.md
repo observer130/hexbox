@@ -46,7 +46,7 @@ apps/      web       data query site
                      replay/ (frame-store driven closed-loop replay)
 data/      generated + gitignored   scripts/  diagnostics + one-offs
 docs/      ROADMAP, OVERLAY-STAGES, build-slots, SCREENSHOT-DEV, AUGMENT-PANEL,
-           SESSION-REPLAY, RELEASE-WINDOWS, SESSION-NOTES, VERIFY-P1（真机验收清单）
+           SESSION-REPLAY, RELEASE-WINDOWS, SESSION-NOTES, NEURAL-OCR, VERIFY-P1（真机验收清单）
 ```
 
 ## Setup / environment
@@ -67,8 +67,8 @@ pnpm dev:web                                  # http://localhost:5273
 
 `pnpm check:docs` → `pnpm typecheck` → `pnpm test` → `pnpm build` (CI runs the same on
 `windows-latest`). Node's built-in runner; `pnpm --filter @hexbox/core test` is faster.
-**Keep them green and add tests for new behavior.** Current: **1143** — core 53 /
-vision 695 / lcu 142 / overlay 73 / provider-communitydragon 16 / provider-tencent 49 /
+**Keep them green and add tests for new behavior.** Current: **1155** — core 53 /
+vision 707 / lcu 142 / overlay 73 / provider-communitydragon 16 / provider-tencent 49 /
 data-store 25 / data-cli 58 / web 32 (`pnpm test` is the source of truth; the overlay's
 Electron runtime is not testable — its tests cover replay-safe parts and the self-test
 scenario logic only). `pnpm typecheck` also checks `scripts/*.mts`
@@ -121,7 +121,7 @@ Read the doc named per area first; every rule below cost a real bug.
 - **Ctrl+C never reaches Electron** → launch via `apps/overlay/run-electron.mjs`, which
   writes the `debug/augment/.stop` sentinel.
 
-**In-game augment chain** — `docs/AUGMENT-PANEL.md`, `docs/SESSION-REPLAY.md`
+**In-game augment chain** — `docs/AUGMENT-PANEL.md`, `docs/SESSION-REPLAY.md`, `docs/NEURAL-OCR.md`
 
 - Both entries run the **same** `AugmentController`, which must not import Electron
   (clock/capture/geometry/2999/identity injected) so replay can drive it; **replay
@@ -186,6 +186,7 @@ in `debug-augment.ts`.
 | `HEXBOX_AUGMENT_REROLL_POLL_MS` / `_OPEN_SAMPLE_MS` / `_IDLE_MS` / `_ACTIVE_MS` / `_PROBE_MS` / `_TAIL_MS` | open-panel sampling (400 / 4000) and cadence (1000/250/6000/20000) |
 | `HEXBOX_AUGMENT_FORENSICS` / `_CLOSED_SAMPLES` / `_API_TRACE` / `_CLOSE_HEAL_PROBE` / `_PENDING_PROBE_MS` | opt-in diagnostics; both probes are **off** (strict zero frames) |
 | `HEXBOX_AUGMENT_RECORD` / `_RECORD_DIR` / `_OUT` / `_SECONDS` / `_MAX_MINUTES` / `_DRAW` / `_BADGE` | session recording (**off**), labels (on), badge size `small` / `medium` / `large` |
+| `HEXBOX_OCR` / `HEXBOX_OCR_EP` | 神经网络 OCR：默认开，`template`/`0`/`off` 关闭回退模板匹配 / `cpu`（默认）或 `dml`（Windows DirectML，失败回退 CPU） |
 | `HEXBOX_OVERLAY_AUGMENT` / `HEXBOX_CHAMP_SELECT_CARDS` / `HEXBOX_DATA_DIR` / `HEXBOX_DATA_CHECK` / `HEXBOX_LOG_FILE` / `HEXBOX_SMOKE` / `HEXBOX_TRAY_*` / `HEXBOX_NOTICE_TEST` / `HEXBOX_LCU_CREDENTIALS(_FILE)` / `HEXBOX_LABEL_OVERLAY_TEST(_MS)` / `HEXBOX_DEBUG_FORCE` / `HEXBOX_AUGMENT_SELFTEST_CADENCE` | chain toggle / card source `geometry` / `legacy` / `off` / data dir（默认 `文档\hexbox\data`） / `0` = 关闭启动数据检查 / log tee / smoke / tray self-test + icon / balloon test / LCU credentials / self-tests |
 | `HEXBOX_GITHUB_TOKEN` / `HEXBOX_UPDATE_API_BASE` / `HEXBOX_UPDATE_CHECK_TEST` | 更新检查的可选 token（**只发给 `api.github.com`**，不跟去 CDN；录制元数据里会被脱敏）/ 自测用地址 / 自测模式（正常用户不会设）|
 
@@ -196,7 +197,7 @@ $env:HEXBOX_LABEL_OVERLAY_TEST='1'; pnpm dev:overlay   # overlay window only (ne
 node --experimental-strip-types scripts/preview-augment-labels.mts         # → debug/label-preview.png
 node --experimental-strip-types scripts/diag-champ-select-cards.mts --ocr  # real frames, online code
 node --experimental-strip-types scripts/diag-lcu-events.mts --all          # live LCU event subscription
-node --experimental-strip-types scripts/replay-session.mts [debug/sessions/<dir>]
+node --experimental-strip-types scripts/replay-session.mts [debug/sessions/<dir>] [--neural]
 ```
 > The label-overlay self-test also runs three scenarios by itself (hover tooltip via the
 > forwarded `mousemove`, no residue after a clear, canvas follows a window resize) and

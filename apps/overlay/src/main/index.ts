@@ -525,6 +525,8 @@ import {
   type DataUpdateStamp,
   type LabelProducer,
   type NameFingerprint,
+  type AugmentNameMatch,
+  type GrayNameBand,
   type PreparedTemplate,
   type VisibleState,
 } from '@hexbox/vision';
@@ -535,6 +537,7 @@ import {
   type RankingSnapshot,
 } from '@hexbox/core';
 import { createVisionLoop, type VisionLoop, type VisionOverlayMsg } from './vision-loop.ts';
+import { createNeuralAugmentOcr } from '../ocr/neural-ocr.ts';
 import {
   attachLabelOverlayDiagnostics,
   clearLabelOverlay,
@@ -633,6 +636,46 @@ let portraits: PreparedTemplate[] = [];
  * 标签几何与行基准锁、单卡刷新编排都在那边，这里只做阶段启停与画布注入。
  */
 let augment: AugmentController | null = null;
+
+/**
+ * 神经网络 OCR（懒加载；第一次面板出现才读 16MB 模型）。
+ *
+ * 模型/原生运行时不走 esbuild bundle：build.mjs 把它们复制到 dist/native/，
+ * 打包版由 electron-builder 的 asarUnpack 解包到 app.asar.unpacked；这里按
+ * 两种路径解析。HEXBOX_OCR=template|0|off 可整局关闭（回退模板匹配）。
+ */
+let neuralOcr: ReturnType<typeof createNeuralAugmentOcr> | null = null;
+
+/** dist/native 的绝对路径（开发 = dist 旁；打包 = asar.unpacked 里）。 */
+function nativeRuntimeDir(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, 'app.asar.unpacked', 'dist', 'native')
+    : join(__dirname, '..', 'native');
+}
+
+/** worker 请求的"名字带 → 名字"（IPC 另一头是 AugmentStream 的 handler）。 */
+async function recognizeAugmentNames(
+  bands: readonly GrayNameBand[],
+): Promise<readonly (AugmentNameMatch | null)[]> {
+  const mode = (process.env['HEXBOX_OCR'] ?? '').toLowerCase();
+  if (mode === '0' || mode === 'off' || mode === 'false' || mode === 'template') {
+    throw new Error('神经网络 OCR 已由 HEXBOX_OCR 关闭');
+  }
+  const names = (dataset?.hextechs ?? []).map((h) => ({ augmentId: h.id, name: h.name }));
+  if (names.length === 0) throw new Error('数据未就绪（dataset.hextechs 为空）');
+  if (neuralOcr === null) {
+    const nativeDir = nativeRuntimeDir();
+    neuralOcr = createNeuralAugmentOcr({
+      modelPath: join(nativeDir, 'ocr', 'ppocrv5-ch-mobile-rec.onnx'),
+      dictionaryPath: join(nativeDir, 'ocr', 'ppocrv5-ch-mobile-dict.txt'),
+      nativeModuleDir: nativeDir,
+      names,
+      executionProviders: process.env['HEXBOX_OCR_EP'] === 'dml' ? ['dml', 'cpu'] : ['cpu'],
+      log: (line) => console.log(line),
+    });
+  }
+  return neuralOcr.recognize(bands);
+}
 /**
  * 局内链路的启动状态（纯函数 `augmentChainTransition()` 的输入与输出）。
  *
@@ -1490,6 +1533,8 @@ function ensureAugmentController(): AugmentController {
     // **会话录制**（`HEXBOX_AUGMENT_RECORD=1`，默认关）：把这一局录成可回放的会话。
     // 观察者在控制器构造时就给（它一直在），录制器本体等几何就绪后再建。
     record: sessionRecordEnabled(),
+    // 神经网络 OCR：worker 裁名字带 → 主进程原生推理（不可用则 worker 自动回退模板匹配）
+    recognizeNames: recognizeAugmentNames,
     observer: {
       onApiSample: (sample) => augmentRecorder?.api(sample),
       onPanelEdge: (edge) => augmentRecorder?.edge(edge),

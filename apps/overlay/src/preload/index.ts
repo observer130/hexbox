@@ -66,6 +66,15 @@ const augmentWorkerApi = {
     ipcRenderer.send('augment:worker-recognized', r);
   },
   /**
+   * 神经网络 OCR：把裁好的名字带（小灰度图）交给主进程推理。
+   *
+   * 为什么走主进程：原生 onnxruntime-node 不能加载在隔离的渲染端；这里只传
+   * 3 个名字带（每个几十 KB），不传整帧。失败/未启用时返回 `{ok:false}`，
+   * worker 会回退到本地模板匹配。
+   */
+  recognizeNames: (bands: unknown): Promise<unknown> =>
+    ipcRenderer.invoke('augment:ocr-names', bands),
+  /**
    * **会话录制**：把这一帧的灰度像素交给主进程落盘（`HEXBOX_AUGMENT_RECORD=1` 时才有）。
    *
    * 像素只在渲染端拿得到（屏幕流在那儿），而写文件在主进程 —— 所以这一条是**唯一**

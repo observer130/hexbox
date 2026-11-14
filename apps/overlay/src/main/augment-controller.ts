@@ -67,6 +67,8 @@ import {
   augmentClearReasonForEmptyLabels,
   augmentClearReasonForRefreshedCard,
   augmentPickRateTable,
+  type AugmentNameMatch,
+  type GrayNameBand,
   augmentStopClearsLabels,
   augmentTierLabelsLocked,
   augmentTierTable,
@@ -593,6 +595,13 @@ export interface AugmentControllerDeps {
    */
   readonly record?: boolean;
   /**
+   * 神经网络 OCR（可选）：worker 把名字带裁好交上来 → 主进程原生推理 → 名字。
+   * 不传 = 只用模板匹配（旧行为）；worker 会按 IPC 可用性自动回退。
+   */
+  readonly recognizeNames?: (
+    bands: readonly GrayNameBand[],
+  ) => Promise<readonly (AugmentNameMatch | null)[]>;
+  /**
    * 录制观察者（`session-recorder.ts` 实现；不给 = 不录）。
    *
    * 三个回调都是**录制专属的旁路**：控制器照旧跑它自己的状态机，只是把已经算出来的
@@ -656,6 +665,10 @@ export interface AugmentCaptureFactoryInput {
     readonly record: boolean;
     /** 会话录制：一帧的灰度像素（record 打开时由渲染端递上来）。 */
     readonly onRecordFrame: (payload: AugmentSessionFramePayload) => void;
+    /** 神经网络 OCR（可选，见 AugmentControllerDeps.recognizeNames）。 */
+    readonly recognizeNames?: (
+      bands: readonly GrayNameBand[],
+    ) => Promise<readonly (AugmentNameMatch | null)[]>;
     readonly loadLibrary: () => readonly {
       augmentId: number;
       name: string;
@@ -1387,6 +1400,7 @@ export class AugmentController {
         },
         // 录制：像素只在渲染端拿得到，这里只把它转交给观察者（控制器不碰 fs）
         onRecordFrame: (payload) => this.deps.observer?.onFramePixels?.(payload),
+        recognizeNames: this.deps.recognizeNames,
         log: (line) => this.logLine(line),
       },
     });

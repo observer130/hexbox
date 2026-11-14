@@ -140,6 +140,8 @@ node --experimental-strip-types scripts/replay-api-trigger.mts debug/sessions/<�
 node --experimental-strip-types scripts/replay-session.mts                    # 合成会话（入库的真机帧 + 真机 2999 采样）
 node --experimental-strip-types scripts/replay-session.mts debug/sessions/<会话目录>
 node --experimental-strip-types scripts/replay-session.mts debug/sessions/<会话目录> --json
+# 神经网络 OCR 回放（默认模板匹配；--neural 用 PP-OCRv5，见 docs/NEURAL-OCR.md）
+node --experimental-strip-types scripts/replay-session.mts debug/sessions/<会话目录> --neural
 
 # ③ 帧 fixture 重建（源帧在 debug/ 里，脚本把真机帧缩到门控分辨率、裁到搜索区、转灰度后入库）
 node --experimental-strip-types scripts/make-frame-fixtures.mts
@@ -200,6 +202,7 @@ node --experimental-strip-types scripts/make-frame-fixtures.mts
 | 重连判定回放（相位序列 → 线上纯判定；`armed` 状态位不许丢） | ✅ `apps/overlay/src/replay/session-reconnect.test.ts` |
 | 录制 ⇄ 回放目录往返（格式不漂移） | ✅ `apps/overlay/src/main/session-recorder.test.ts` |
 | 一次真实会话的端到端闭环回放 | ⛔ 需要 `debug/sessions/` 的录制（**不入库**：含对局画面）→ 本机跑 `scripts/replay-session.mts` |
+| 神经网络 OCR 在回放里与模板匹配同一时序 | ✅ `--neural` 在 `start()` 预计算并缓存（识别时同步查表）；`recognizeCalls` 与模板路径应在 ±1 内，标签内容一致 |
 | 窗口置顶/合成、`getDisplayMedia` 帧率、`desktopCapturer` 的 DWM 卡顿、多显示器 DPI、LCU 凭证、单实例、打包路径 | ⛔ **回放测不了**，仍需一局真机（但可以按里程碑打，而不是每改一行打） |
 
 ## 八、保真度与已知限制（结论必须连着它们读）

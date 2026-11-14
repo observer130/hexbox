@@ -212,7 +212,7 @@ pnpm dev:overlay    # 需要管理员权限 + 真实桌面会话；CI 里跑不�
 
 ```bash
 pnpm typecheck
-pnpm test        # 当前 1143 项；以 pnpm test 的实际输出为准
+pnpm test        # 当前 1155 项；以 pnpm test 的实际输出为准
 pnpm build
 ```
 
@@ -244,6 +244,7 @@ docs/                               设计文档
 | [docs/SCREENSHOT-DEV.md](docs/SCREENSHOT-DEV.md) | 截屏覆盖层技术事实与真机踩坑 |
 | [docs/AUGMENT-PANEL.md](docs/AUGMENT-PANEL.md) | 局内海克斯面板：门控/识别/标定/标签外观 |
 | [docs/SESSION-REPLAY.md](docs/SESSION-REPLAY.md) | 会话录制与回放（虚拟时钟驱动线上控制器） |
+| [docs/NEURAL-OCR.md](docs/NEURAL-OCR.md) | 局内海克斯名字神经网络 OCR（PP-OCRv5 + CTC 闭集） |
 | [docs/OVERLAY-STAGES.md](docs/OVERLAY-STAGES.md) | 覆盖层分阶段决策与调研 |
 | [docs/RELEASE-WINDOWS.md](docs/RELEASE-WINDOWS.md) | Windows 打包发布全部事实 |
 | [docs/RELEASE-NOTES-v0.3.0.md](docs/RELEASE-NOTES-v0.3.0.md) | 当前版本发布说明（升级/校验） |

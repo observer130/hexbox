@@ -19,6 +19,7 @@ export * from './augment-panel.ts';
 // 这个独立信号（`detectPanelPresence`），随本帧一起回传。它纯计算、零 Node 依赖。
 export * from './augment-presence.ts';
 export * from './augment-ocr.ts';
+export * from './augment-ocr-neural.ts';
 export * from './augment-trigger.ts';
 // 开边沿整批识别的**矩形来源**决策（渲染端 worker 用：原生重检失败 → 门控矩形兜底）
 export * from './augment-open-recognize.ts';

@@ -22,6 +22,14 @@ pnpm --filter @hexbox/overlay package:dir     # 只出免安装目录（验证�
 | `release/…/resources/app.asar` | **0.30 MB** | 只有 `dist/**` + `package.json` |
 | `release/…/resources/data/` | 6.26 MB（2026-11 起**不再打入**） | 旧版数据快照；现在数据在 `文档\hexbox\data`（见 §三） |
 
+> ⚠️ **0.3.x 起体积/内容有变化（神经网络 OCR，2026-11-15）**：`dist/native/` 会带
+> 模型（15.9MB）+ 当前平台 ONNX Runtime（Windows x64 约 64MB，含 DirectML DLL），
+> 通过 `asarUnpack` 解包到 `resources/app.asar.unpacked/dist/native`；安装包预计增加
+> 约 30~45MB（压缩后）。`package:dir` 校验时必须确认这个目录存在，否则
+> `HEXBOX_OCR=template` 才会正常画标签 —— 模型缺失时 worker 会自动回退模板匹配，
+> 但新功能等于没生效。构建机需要允许 `onnxruntime-node` 的 postinstall
+> （见 `pnpm-workspace.yaml` 的 `allowBuilds`）。
+>
 > ⚠️ 上表是 **0.1.0** 的本机实测；当前版本（`v0.3.0`）的产物名会变成
 > `hexbox-setup-0.3.0-x64.exe` 等，大小随依赖/代码变化 —— 以 `release/` 实际产物为准。
 
@@ -32,7 +40,9 @@ pnpm --filter @hexbox/overlay package:dir     # 只出免安装目录（验证�
 ## 二、为什么打包能这么小：主进程/渲染端都是 esbuild 单文件
 
 `apps/overlay/build.mjs` 已经把**四个 workspace 包**（`@hexbox/core` /
-`data-store` / `lcu` / `vision`）连同 `node_modules` 的一切内联进
+`data-store` / `lcu` / `vision`）连同 `node_modules` 的一切内联进（**唯一例外**：神经网络 OCR 的
+原生 ONNX Runtime 是 `.node/.dll`，不能内联，由 `build.mjs` 复制到 `dist/native/`
+并 `asarUnpack`；主进程按绝对路径 require，所以 `node_modules` 仍然不进包）
 `dist/*.cjs` 与 `dist/renderer/*.js`，所以打包**不需要 node_modules**：
 
 ```yaml

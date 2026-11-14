@@ -36,5 +36,6 @@ export function augmentStreamCapture(input: AugmentCaptureFactoryInput): Augment
     onStatus: input.deps.onStatus,
     onRecognized: input.deps.onRecognized,
     onRecordFrame: input.deps.onRecordFrame,
+    recognizeNames: input.deps.recognizeNames,
   });
 }

@@ -33,6 +33,7 @@ import {
 import {
   readAugmentName,
   type AugmentNameFingerprint,
+  type AugmentNameMatch,
 } from './augment-ocr.ts';
 import { resolveOpenRecognizeCards } from './augment-open-recognize.ts';
 import {
@@ -139,6 +140,20 @@ export interface RecognizeOpenInput {
   /** 最近一次算出的每卡指纹（失败路径原样回传）。 */
   readonly fingerprints: readonly (AugmentCardFingerprint | null)[];
   readonly tookMs: number;
+  /**
+   * 已经抓好的整幅原生帧（可选）。
+   *
+   * 给神经网络 OCR 用：worker 必须**先抓帧、再对裁出的名字带做 IPC 推理、
+   * 最后才调 recognizeOpen**；若这里再抓一次，第二次抓到的可能是另一帧
+   *（名字与几何错位），录制也会多存一张。不传时保持原行为（内部 readFull）。
+   */
+  readonly full?: Bitmap;
+  /**
+   * 外部（神经网络 OCR）算好的名字，按**卡片序号**索引；null = 模型认不准。
+   *
+   * 有值时优先用；null/缺键时回退到本地模板匹配（library 非空时）。
+   */
+  readonly nameMatches?: ReadonlyMap<number, AugmentNameMatch | null>;
 }
 
 export interface RecognizeOpenOutput {
@@ -151,8 +166,50 @@ export interface RecognizeOpenOutput {
 }
 
 /**
- * 开边沿整批识别：原生帧重检 → 矩形来源决策（原生 / 门控兜底）→ 逐卡 OCR → 冻结几何。
+ * 开边沿识别前的**几何计划**：原生帧重检 → 矩形来源决策。
+ *
+ * 抽出来是为了让 worker 能在"调用 recognizeOpen"之前拿到卡片矩形，
+ * 从而先把名字带裁出来做神经网络 OCR，再把结果通过 `nameMatches` 传回去。
+ * 判据与 `recognizeOpen` 完全同一份（后者也调这个函数），不存在两套实现。
  */
+export type OpenRecognitionPlan =
+  | {
+      readonly ok: true;
+      readonly cards: readonly PanelCard[];
+      readonly reason: string;
+      readonly regionIndex?: number;
+      readonly note: string | null;
+    }
+  | { readonly ok: false; readonly reason: string; readonly regionIndex?: number };
+
+export function planOpenRecognition(
+  full: Bitmap,
+  regions: readonly Rect[],
+  gatingCards: readonly PanelCard[],
+): OpenRecognitionPlan {
+  const search = regions.length > 0 ? regions : [{ x: 0, y: 0, w: 1, h: 1 }];
+  const hit = detectAugmentPanelInRegions(full, search);
+  const plan = resolveOpenRecognizeCards({
+    native: hit.detection,
+    gating: gatingCards,
+    minCards: PANEL_THRESHOLDS.minCards,
+  });
+  if (plan.source === 'none') {
+    return {
+      ok: false,
+      reason: plan.reason,
+      ...(hit.regionIndex !== undefined ? { regionIndex: hit.regionIndex } : {}),
+    };
+  }
+  return {
+    ok: true,
+    cards: plan.cards,
+    reason: hit.detection.reason,
+    ...(hit.regionIndex !== undefined ? { regionIndex: hit.regionIndex } : {}),
+    note: plan.source === 'gating' ? `⚠ ${plan.reason}` : null,
+  };
+}
+
 export function recognizeOpen(input: RecognizeOpenInput): RecognizeOpenOutput {
   const origin: RecognizeOrigin = 'open';
   const echo = {
@@ -176,29 +233,23 @@ export function recognizeOpen(input: RecognizeOpenInput): RecognizeOpenOutput {
 
   const pixels = input.pixels;
   if (!pixels || pixels.width === 0 || pixels.height === 0) return fail('流未就绪');
-  const full = pixels.readFull();
+  const full = input.full ?? pixels.readFull();
   if (!full) return fail('原生帧取像素失败');
 
-  const regions = input.regions.length > 0 ? input.regions : [{ x: 0, y: 0, w: 1, h: 1 }];
-  const hit = detectAugmentPanelInRegions(full, regions);
-
-  // 卡片矩形的**来源决策**：原生重检成功用原生（更精确），失败退回门控验过的矩形。
-  // 纯函数在 `augment-open-recognize.ts`（有单测），这里只调它。
-  const plan = resolveOpenRecognizeCards({
-    native: hit.detection,
-    gating: input.gatingCards,
-    minCards: PANEL_THRESHOLDS.minCards,
-  });
-  if (plan.source === 'none') {
+  const plan = planOpenRecognition(full, input.regions, input.gatingCards);
+  if (!plan.ok) {
     return {
-      ...fail(plan.reason, hit.regionIndex),
+      ...fail(plan.reason, plan.regionIndex),
       note: null,
     };
   }
-  const note = plan.source === 'gating' ? `⚠ ${plan.reason}` : null;
+  const note = plan.note;
 
-  const cards: RecognizedCard[] = plan.cards.map((c) => {
-    const m = input.library.length > 0 ? readAugmentName(full, c.rect, input.library) : null;
+  const cards: RecognizedCard[] = plan.cards.map((c, index) => {
+    const provided = input.nameMatches?.get(index) ?? null;
+    const m =
+      provided ??
+      (input.library.length > 0 ? readAugmentName(full, c.rect, input.library) : null);
     return {
       rect: c.rect,
       interiorLuma: Math.round(c.interiorLuma),
@@ -218,9 +269,9 @@ export function recognizeOpen(input: RecognizeOpenInput): RecognizeOpenOutput {
   return {
     report: {
       ok: true,
-      reason: hit.detection.reason,
+      reason: plan.reason,
       cards,
-      ...(hit.regionIndex !== undefined ? { regionIndex: hit.regionIndex } : {}),
+      ...(plan.regionIndex !== undefined ? { regionIndex: plan.regionIndex } : {}),
       tookMs: input.tookMs,
       width: pixels.width,
       height: pixels.height,
@@ -275,6 +326,8 @@ export interface RecognizeRerollInput {
   /** 沿用已冻结取样矩形在最近一帧门控画布上的结果（重随不重新冻结几何）。 */
   readonly fingerprints: readonly (AugmentCardFingerprint | null)[];
   readonly tookMs: number;
+  /** 外部（神经网络 OCR）算好的名字，按卡片序号索引；null = 认不准（回退模板）。 */
+  readonly nameMatches?: ReadonlyMap<number, AugmentNameMatch | null>;
 }
 
 export interface RecognizeRerollOutput {
@@ -327,6 +380,19 @@ export function recognizeReroll(input: RecognizeRerollInput): RecognizeRerollOut
     }
     const shift = describeRectShift(index, rect, panelCard?.rect ?? null);
     if (shift !== null) notes.push(shift);
+    const provided = input.nameMatches?.get(index) ?? null;
+    if (provided) {
+      cards.push({
+        rect,
+        interiorLuma: panelCard ? Math.round(panelCard.interiorLuma) : 0,
+        edgeLuma: panelCard ? Math.round(panelCard.edgeLuma) : 0,
+        augmentId: provided.augmentId,
+        name: provided.name,
+        score: Number(provided.score.toFixed(3)),
+        margin: Number(provided.margin.toFixed(3)),
+      });
+      continue;
+    }
     // 只把这一张卡的区域按原生分辨率取出来（比整帧小一个量级）
     const region = pixels.readRect(rect);
     const m =

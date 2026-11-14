@@ -60,6 +60,8 @@ import {
   RECONNECT_PHASE,
   type AugmentCardFingerprint,
   type AugmentNameFingerprint,
+  type AugmentNameMatch,
+  type GrayNameBand,
   type AugmentSessionApiSample,
   type AugmentSessionFrameRef,
   type AugmentSessionMeta,
@@ -82,7 +84,15 @@ import {
   type AugmentLiveData,
   type AugmentReadingEvent,
 } from '../main/augment-controller.ts';
-import { bitmapPixels, recognizeOpen, recognizeReroll } from '@hexbox/vision';
+import {
+  augmentNameBandRect,
+  bitmapPixels,
+  bitmapToGray,
+  cropBitmap,
+  planOpenRecognition,
+  recognizeOpen,
+  recognizeReroll,
+} from '@hexbox/vision';
 import type { AugmentFrame } from '../main/augment-stream.ts';
 import type { LabelOverlayMsg } from '../main/label-overlay.ts';
 
@@ -368,6 +378,15 @@ export interface ReplayCaptureOptions {
   /** 帧库覆盖不到的采样点（"帧库没覆盖到这里"）——诊断用。 */
   readonly onGap?: (atMs: number) => void;
   readonly onRecognizeNote?: (line: string) => void;
+  /**
+   * 神经网络 OCR（可选）：名字带 → 名字。不传 = 只用模板匹配（旧回放）。
+   *
+   * 回放的 `recognize()` 是同步接口，所以模型结果在 `start()` 里**预先算好**并缓存；
+   * 识别时只查表，不改变线上由同步回调驱动的时序（否则控制器会丢识别/多识别）。
+   */
+  readonly readNeuralMatches?: (
+    bands: readonly GrayNameBand[],
+  ) => Promise<readonly (AugmentNameMatch | null)[]>;
 }
 
 /**
@@ -492,6 +511,63 @@ export function createReplayCapture(
     } satisfies AugmentFrame);
   };
 
+  /**
+   * 神经网络 OCR 的**预计算缓存**（按原生帧文件索引）。
+   *
+   * 为什么预计算而不是在 recognize() 里 await：回放源是同步接口，且控制器依赖
+   * onRecognized 回调的时序；异步晚到会让虚拟时钟越过"等识别"的窗口，实测识别
+   * 调用从 13 次掉到 7 次、标签全错位。start() 里一次性算完（12 帧 × 3 卡 ≈ 200ms），
+   * 之后 recognize() 只查表，时序与模板匹配完全一致。
+   */
+  const neuralByFrame = new Map<string, readonly (AugmentNameMatch | null)[]>();
+  const precomputeNeural = async (): Promise<void> => {
+    const read = opts.readNeuralMatches;
+    if (!read) return;
+    let fallbackCards: readonly PanelCard[] = [];
+    const nativeRefs = session.frames
+      .filter((f) => f.kind === 'native')
+      .slice()
+      .sort((a, b) => a.atMs - b.atMs);
+    for (const f of nativeRefs) {
+      const bmp = store.bitmap(f);
+      if (!bmp) continue;
+      const hit = detectAugmentPanelInRegions(bmp, regions);
+      const cards = hit.detection.cards.length > 0 ? hit.detection.cards : fallbackCards;
+      if (hit.detection.cards.length > 0) fallbackCards = hit.detection.cards;
+      if (cards.length === 0) continue;
+      const bands: GrayNameBand[] = [];
+      for (const card of cards) {
+        const crop = cropBitmap(bmp, augmentNameBandRect(card.rect));
+        if (!crop) continue;
+        bands.push({ width: crop.width, height: crop.height, gray: bitmapToGray(crop) });
+      }
+      if (bands.length !== cards.length) continue;
+      try {
+        neuralByFrame.set(f.file, await read(bands));
+      } catch (err) {
+        opts.onRecognizeNote?.(
+          `神经网络 OCR 预计算失败（${err instanceof Error ? err.message : String(err)}）→ 本帧回退模板匹配`,
+        );
+      }
+    }
+  };
+
+  /** 查预计算缓存；帧不存在/没算出来 → undefined（回退模板匹配）。 */
+  const neuralMatchesFor = (
+    ref: AugmentSessionFrameRef,
+    only: readonly number[] | null,
+  ): ReadonlyMap<number, AugmentNameMatch | null> | undefined => {
+    const list = neuralByFrame.get(ref.file);
+    if (!list) return undefined;
+    const matches = new Map<number, AugmentNameMatch | null>();
+    if (only) {
+      for (const index of only) matches.set(index, list[index] ?? null);
+    } else {
+      for (let i = 0; i < list.length; i++) matches.set(i, list[i] ?? null);
+    }
+    return matches;
+  };
+
   const recognize = (o: { readonly only?: readonly number[] } = {}): void => {
     const only = o.only && o.only.length > 0 ? o.only : null;
     recognizeCount++;
@@ -556,44 +632,53 @@ export function createReplayCapture(
       return;
     }
     const pixels = bitmapPixels(native);
-    if (only) {
-      const out = recognizeReroll({
+    const nameMatches = neuralMatchesFor(ref, only);
+    const runRecognition = (): void => {
+      if (only) {
+        const out = recognizeReroll({
+          pixels,
+          only,
+          latestCards,
+          frozenRects,
+          library: opts.library,
+          nameMatches,
+          fingerprints: latestFingerprints,
+          tookMs: 0,
+        });
+        for (const n of out.notes) opts.onRecognizeNote?.(n);
+        deps.deps.onRecognized(out.report);
+        return;
+      }
+      const out = recognizeOpen({
         pixels,
-        only,
-        latestCards,
-        frozenRects,
+        full: native,
+        regions,
         library: opts.library,
+        // 卡片矩形是**画布坐标**（原生帧与搜索区都在画布坐标下）
+        gatingCards: lastHitCards,
+        nameMatches,
+        // 指纹基底则跟**帧库位图**走（裁剪存档时是裁剪坐标）—— 两者必须各自配对，
+        // 拿画布矩形去采裁剪位图会静默取错像素（审查发现）。
+        fingerprintBasis: { bitmap: latestGatingBmp, rects: latestFingerprintRects },
+        frozenRects,
+        watchRects,
         fingerprints: latestFingerprints,
         tookMs: 0,
       });
-      for (const n of out.notes) opts.onRecognizeNote?.(n);
+      if (out.note !== null) opts.onRecognizeNote?.(out.note);
+      frozenRects = out.frozenRects;
+      watchRects = out.watchRects;
+      latestFingerprints = out.fingerprints;
       deps.deps.onRecognized(out.report);
-      return;
-    }
-    const out = recognizeOpen({
-      pixels,
-      regions,
-      library: opts.library,
-      // 卡片矩形是**画布坐标**（原生帧与搜索区都在画布坐标下）
-      gatingCards: lastHitCards,
-      // 指纹基底则跟**帧库位图**走（裁剪存档时是裁剪坐标）—— 两者必须各自配对，
-      // 拿画布矩形去采裁剪位图会静默取错像素（审查发现）。
-      fingerprintBasis: { bitmap: latestGatingBmp, rects: latestFingerprintRects },
-      frozenRects,
-      watchRects,
-      fingerprints: latestFingerprints,
-      tookMs: 0,
-    });
-    if (out.note !== null) opts.onRecognizeNote?.(out.note);
-    frozenRects = out.frozenRects;
-    watchRects = out.watchRects;
-    latestFingerprints = out.fingerprints;
-    deps.deps.onRecognized(out.report);
+    };
+
+    runRecognition();
   };
 
   return {
     start: async (): Promise<boolean> => {
       stopped = false;
+      await precomputeNeural();
       // 渲染端在"不取帧"时也会报"门控已就绪"（api 模式等它，不能用"有没有帧"判断）
       deps.deps.onStatus(
         intervalMs <= 0
@@ -777,6 +862,10 @@ export interface RunReplayOptions {
   /** 预加载的图鉴/英雄详情（回放测试可注入合成数据，不依赖 `data/`）。 */
   readonly loadData?: AugmentControllerDeps['loadData'];
   readonly log?: (line: string) => void;
+  /** 神经网络 OCR（可选）。不传 = 回放只用模板匹配。 */
+  readonly readNeuralMatches?: (
+    bands: readonly GrayNameBand[],
+  ) => Promise<readonly (AugmentNameMatch | null)[]>;
 }
 
 /**
@@ -851,6 +940,7 @@ export async function runReplaySession(options: RunReplayOptions): Promise<Repla
               gaps++;
             },
             onRecognizeNote: (line) => options.log?.(`[replay] ${line}`),
+            readNeuralMatches: options.readNeuralMatches,
           },
           input,
         ),
@@ -944,6 +1034,7 @@ export async function runReplaySession(options: RunReplayOptions): Promise<Repla
     if (clock.nextDueAt() !== null && (clock.nextDueAt() ?? 0) > endMs) truncated = truncated;
     clock.advanceTo(endMs);
     await new Promise((r) => realSetImmediate(r));
+
     if (started) await startPromise.catch(() => undefined);
     const snap = controller.snapshot();
     controller.stop('回放结束', { clearLabels: false });

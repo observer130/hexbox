@@ -36,10 +36,12 @@ import {
   parseGoldenReport,
   type GoldenReport,
 } from '../apps/overlay/src/replay/session-golden.ts';
+import { createNeuralAugmentOcr } from '../apps/overlay/src/ocr/neural-ocr.ts';
 import { RECONNECT_PHASE } from '../packages/vision/src/index.ts';
 
 const argv = process.argv.slice(2);
 const asJson = argv.includes('--json');
+const useNeural = argv.includes('--neural');
 const target = argv.find((a) => !a.startsWith('--'));
 const goldenArg = argv.find((a) => a.startsWith('--golden='));
 const limit = Number(argv.find((a) => a.startsWith('--limit='))?.split('=')[1] ?? 25) || 25;
@@ -232,6 +234,41 @@ async function main(): Promise<void> {
     });
   })();
 
+  let neural: ReturnType<typeof createNeuralAugmentOcr> | null = null;
+  if (useNeural) {
+    const nativeDir = join(ROOT, 'apps', 'overlay', 'node_modules');
+    const modelPath = join(ROOT, 'apps', 'overlay', 'resources', 'ocr', 'ppocrv5-ch-mobile-rec.onnx');
+    const dictPath = join(ROOT, 'apps', 'overlay', 'resources', 'ocr', 'ppocrv5-ch-mobile-dict.txt');
+    const datasetPath = join(DATA_DIR, 'dataset.json');
+    for (const [label, path] of [
+      ['模型', modelPath],
+      ['字典', dictPath],
+      ['dataset', datasetPath],
+    ] as const) {
+      if (!existsSync(path)) {
+        console.error(`✗ --neural 需要 ${label}：${path}`);
+        process.exit(2);
+      }
+    }
+    const ds = JSON.parse(readFileSync(datasetPath, 'utf8')) as {
+      hextechs: Array<{ id: number; name: string }>;
+    };
+    const logLinesForOcr: string[] = [];
+    neural = createNeuralAugmentOcr({
+      modelPath,
+      dictionaryPath: dictPath,
+      nativeModuleDir: nativeDir,
+      names: ds.hextechs.map((h) => ({ augmentId: h.id, name: h.name })),
+      log: (line) => logLinesForOcr.push(line),
+    });
+    const ok = await neural.warmUp();
+    if (!ok) {
+      console.error('✗ 神经网络 OCR 初始化失败，无法用 --neural 回放');
+      process.exit(2);
+    }
+    for (const line of logLinesForOcr) console.error(line);
+  }
+
   const logLines: string[] = [];
   const report = await runReplaySession({
     session,
@@ -240,7 +277,9 @@ async function main(): Promise<void> {
     ...(startMs === undefined ? {} : { startMs }),
     // 日志收进数组：默认不刷屏（--json 时更不该刷）；人读模式最后一起打
     log: (line) => logLines.push(line),
+    ...(neural === null ? {} : { readNeuralMatches: (bands) => neural!.recognize(bands) }),
   });
+  await neural?.close();
 
   const snap = report.snapshot;
   const golden = goldenArg

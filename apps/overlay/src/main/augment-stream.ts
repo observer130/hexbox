@@ -25,7 +25,9 @@ import { join } from 'node:path';
 import type {
   AugmentCardFingerprint,
   AugmentNameFingerprint,
+  AugmentNameMatch,
   AugmentSessionFramePayload,
+  GrayNameBand,
   PanelCard,
   PanelPresence,
   Rect,
@@ -139,6 +141,15 @@ export interface AugmentStreamDeps {
    * 各自写一份匿名类型就等于“改字段名不会红”（审查发现）。
    */
   readonly onRecordFrame?: (payload: AugmentSessionFramePayload) => void;
+  /**
+   * 神经网络 OCR：worker 裁好的名字带 → 名字（null = 认不准）。
+   *
+   * 不传 / 抛错 = 不可用，worker 会回退模板匹配。实现在 main/neural-ocr 适配器里，
+   * 主进程这里只做 IPC 边界校验，不把模型加载写进这个类。
+   */
+  readonly recognizeNames?: (
+    bands: readonly GrayNameBand[],
+  ) => Promise<readonly (AugmentNameMatch | null)[]>;
 }
 
 const PRELOAD_PATH = resolvePreloadPath();
@@ -158,6 +169,7 @@ export class AugmentStream {
   private readonly onStatusMsg: (e: Electron.IpcMainEvent, s: { message: string; error?: boolean }) => void;
   private readonly onRecognizedMsg: (e: Electron.IpcMainEvent, r: unknown) => void;
   private readonly onRecordMsg: (e: Electron.IpcMainEvent, payload: AugmentSessionFramePayload) => void;
+  private readonly onOcrInvoke: (e: Electron.IpcMainInvokeEvent, bands: unknown) => Promise<unknown>;
 
   constructor(deps: AugmentStreamDeps) {
     this.deps = deps;
@@ -183,10 +195,22 @@ export class AugmentStream {
       if (!this.fromWorker(e)) return;
       this.deps.onRecordFrame?.(payload);
     };
+    this.onOcrInvoke = async (e, raw) => {
+      if (!this.fromWorker(e)) return { ok: false, reason: '非采集窗口的 OCR 请求（已拒绝）' };
+      if (this.deps.recognizeNames === undefined) return { ok: false, reason: '神经网络 OCR 未启用' };
+      const bands = parseNameBands(raw);
+      if (bands === null) return { ok: false, reason: 'OCR 请求参数非法' };
+      try {
+        const matches = await this.deps.recognizeNames(bands);
+        return { ok: true, matches };
+      } catch (err) {
+        return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+      }
+    };
   }
 
   /** 这条 IPC 是否来自本对象的采集窗口（`win` 在 `loadURL` 之前就赋值了）。 */
-  private fromWorker(e: Electron.IpcMainEvent): boolean {
+  private fromWorker(e: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent): boolean {
     const wc = this.win?.webContents;
     if (wc && e.sender === wc) return true;
     if (!this.warnedForeignSender) {
@@ -203,6 +227,7 @@ export class AugmentStream {
     ipcMain.on('augment:worker-status', this.onStatusMsg);
     ipcMain.on('augment:worker-recognized', this.onRecognizedMsg);
     ipcMain.on('augment:worker-record', this.onRecordMsg);
+    ipcMain.handle('augment:ocr-names', this.onOcrInvoke);
 
     // 屏幕源交给渲染端：只枚举显示器（1 个源），不枚举窗口（真机 14 个，
     // 每次多花约 200ms —— 见 bench.json）
@@ -311,6 +336,7 @@ export class AugmentStream {
     ipcMain.removeListener('augment:worker-status', this.onStatusMsg);
     ipcMain.removeListener('augment:worker-recognized', this.onRecognizedMsg);
     ipcMain.removeListener('augment:worker-record', this.onRecordMsg);
+    ipcMain.removeHandler('augment:ocr-names');
   }
 
   /**
@@ -348,4 +374,19 @@ export class AugmentStream {
   get stats(): { readonly ready: boolean; readonly started: boolean; readonly frames: number } {
     return { ready: this.ready, started: this.started, frames: this.frameCount };
   }
+}
+
+/** 名字带 IPC 参数的最小校验（不信任渲染端字段类型）。 */
+function parseNameBands(raw: unknown): GrayNameBand[] | null {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 16) return null;
+  const out: GrayNameBand[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) return null;
+    const o = item as { width?: unknown; height?: unknown; gray?: unknown };
+    if (typeof o.width !== 'number' || typeof o.height !== 'number') return null;
+    if (!(o.gray instanceof Uint8Array)) return null;
+    if (o.width <= 0 || o.height <= 0 || o.gray.length < o.width * o.height) return null;
+    out.push({ width: o.width, height: o.height, gray: o.gray });
+  }
+  return out;
 }

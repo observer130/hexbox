@@ -27,16 +27,21 @@
  */
 
 import {
+  augmentNameBandRect,
   augmentWatchFingerprints,
+  cropBitmap,
   detectAugmentPanelInRegions,
   detectPanelPresenceInRegions,
   gateCanvasWidth,
+  planOpenRecognition,
   recognizeOpen,
   recognizeReroll,
   type AugmentCardFingerprint,
   type AugmentSessionFramePayload,
   type AugmentNameFingerprint,
+  type AugmentNameMatch,
   type Bitmap,
+  type GrayNameBand,
   type PanelCard,
   type PanelPresence,
   type RecognizePixels,
@@ -150,6 +155,12 @@ interface WorkerApi {
    * 这条缝要过 preload → 主进程 → 录制器四跳，各自写一份匿名类型就等于“改字段名不会红”。
    */
   readonly recordFrame?: (f: AugmentSessionFramePayload) => void;
+  /**
+   * 神经网络 OCR（主进程原生推理）：传裁好的名字带，返回名字/分数。
+   *
+   * 不可用/失败时 worker 会回退本地模板匹配；旧 preload 没有这个方法。
+   */
+  readonly recognizeNames?: (bands: readonly GrayNameBand[]) => Promise<unknown>;
 }
 
 /**
@@ -451,6 +462,118 @@ function tick(): void {
  *     （面板存续期间卡片不动，本帧检测出来的那个是翻牌动画中间帧），指纹也沿用
  *     同一组冻结取样矩形 —— 这正是 `augment-reroll.ts` 阈值标定的前提。
  */
+/**
+ * 神经网络 OCR 的**回退开关**：第一次 IPC 失败就整局不再尝试（避免每次识别都等一次超时）。
+ * 模板匹配仍然保留，所以模型/打包出问题时只是"回到旧行为"，不会一张标签都没有。
+ */
+let neuralDisabled = false;
+
+/** RGBA 位图 → 灰度（渲染端没有 Node 的 png.ts，不能 import bitmapToGray）。 */
+function rgbaToGray(bmp: Bitmap): Uint8Array {
+  const out = new Uint8Array(bmp.width * bmp.height);
+  for (let p = 0, i = 0; p < out.length; p++, i += 4) {
+    out[p] = Math.round(0.299 * bmp.data[i]! + 0.587 * bmp.data[i + 1]! + 0.114 * bmp.data[i + 2]!);
+  }
+  return out;
+}
+
+/**
+ * OCR 失败是否只是**暂时**（数据还没加载完）—— 这种不要整局禁用，
+ * 下一次面板出现时再试；缺模型/原生运行时才是永久降级。
+ */
+function isTransientNeuralFailure(reason: string): boolean {
+  return /数据未就绪|尚未就绪|dataset/.test(reason);
+}
+
+/** 从整帧裁每张卡的名字带，交给主进程的神经网络 OCR；失败返回空 Map（→ 模板匹配兜底）。 */
+async function readNeuralNames(
+  full: Bitmap,
+  cards: readonly PanelCard[],
+): Promise<Map<number, AugmentNameMatch | null>> {
+  const matches = new Map<number, AugmentNameMatch | null>();
+  const fn = api?.recognizeNames;
+  if (neuralDisabled || typeof fn !== 'function') return matches;
+  const bands: GrayNameBand[] = [];
+  const indexes: number[] = [];
+  for (const [index, card] of cards.entries()) {
+    const crop = cropBitmap(full, augmentNameBandRect(card.rect));
+    if (!crop) continue;
+    bands.push({ width: crop.width, height: crop.height, gray: rgbaToGray(crop) });
+    indexes.push(index);
+  }
+  if (bands.length === 0) return matches;
+  try {
+    const res = (await fn(bands)) as {
+      readonly ok?: boolean;
+      readonly matches?: readonly (AugmentNameMatch | null)[];
+      readonly reason?: string;
+    } | null;
+    if (!res?.ok || !Array.isArray(res.matches)) {
+      const reason = res?.reason ?? '返回格式异常';
+      if (isTransientNeuralFailure(reason)) {
+        log(`🧠 神经网络 OCR 暂不可用（${reason}）→ 本次回退模板匹配`);
+      } else {
+        neuralDisabled = true;
+        log(`🧠 神经网络 OCR 不可用（${reason}）→ 本局回退模板匹配`);
+      }
+      return matches;
+    }
+    for (const [i, index] of indexes.entries()) matches.set(index, res.matches[i] ?? null);
+    return matches;
+  } catch (err) {
+    neuralDisabled = true;
+    log(`🧠 神经网络 OCR 调用失败（${err instanceof Error ? err.message : String(err)}）→ 本局回退模板匹配`);
+    return matches;
+  }
+}
+
+/** 单卡重随：只把被刷新的那几张卡裁名字带送主进程。 */
+async function readNeuralRerollNames(
+  pixels: RecognizePixels,
+  only: readonly number[],
+  frozenRects: readonly Rect[] | null,
+): Promise<Map<number, AugmentNameMatch | null>> {
+  const matches = new Map<number, AugmentNameMatch | null>();
+  const fn = api?.recognizeNames;
+  if (neuralDisabled || typeof fn !== 'function') return matches;
+  const bands: GrayNameBand[] = [];
+  const indexes: number[] = [];
+  for (const index of only) {
+    const rect = frozenRects?.[index];
+    if (!rect) continue;
+    const region = pixels.readRect(rect);
+    if (!region) continue;
+    const crop = cropBitmap(region, augmentNameBandRect({ x: 0, y: 0, w: 1, h: 1 }));
+    if (!crop) continue;
+    bands.push({ width: crop.width, height: crop.height, gray: rgbaToGray(crop) });
+    indexes.push(index);
+  }
+  if (bands.length === 0) return matches;
+  try {
+    const res = (await fn(bands)) as {
+      readonly ok?: boolean;
+      readonly matches?: readonly (AugmentNameMatch | null)[];
+      readonly reason?: string;
+    } | null;
+    if (!res?.ok || !Array.isArray(res.matches)) {
+      const reason = res?.reason ?? '返回格式异常';
+      if (isTransientNeuralFailure(reason)) {
+        log(`🧠 神经网络 OCR 暂不可用（${reason}）→ 本次回退模板匹配`);
+      } else {
+        neuralDisabled = true;
+        log(`🧠 神经网络 OCR 不可用（${reason}）→ 本局回退模板匹配`);
+      }
+      return matches;
+    }
+    for (const [i, index] of indexes.entries()) matches.set(index, res.matches[i] ?? null);
+    return matches;
+  } catch (err) {
+    neuralDisabled = true;
+    log(`🧠 神经网络 OCR 调用失败（${err instanceof Error ? err.message : String(err)}）→ 本局回退模板匹配`);
+    return matches;
+  }
+}
+
 async function recognize(opts: { readonly only?: readonly number[] } = {}): Promise<void> {
   const only = opts.only && opts.only.length > 0 ? opts.only : null;
   // ⚠️ 触发原因由**调用方式**决定（带 `only` = 单卡重随）：失败路径也必须带上它，
@@ -529,12 +652,14 @@ async function recognize(opts: { readonly only?: readonly number[] } = {}): Prom
     // "缺原生帧"，那次单卡刷新就永远验不了。
     if (config.record) pixels.readFull();
     // ── 路径 B：只重认"被刷新"的那几张卡（**不重新冻结任何几何**）────────────
+    const nameMatches = await readNeuralRerollNames(pixels, only, frozenRects);
     const out = recognizeReroll({
       pixels,
       only,
       latestCards,
       frozenRects,
       library: config.library ?? [],
+      nameMatches,
       fingerprints: latestFingerprints,
       tookMs: performance.now() - t0,
     });
@@ -544,13 +669,25 @@ async function recognize(opts: { readonly only?: readonly number[] } = {}): Prom
   }
 
   // ── 路径 A：整批识别（面板开边沿）──────────────────────────────────
+  //
+  // 神经网络 OCR 需要"先拿到卡片矩形 → 裁名字带 → 主进程推理 → 再回填名字"，
+  // 所以这里先抓**一次**整幅原生帧、做几何计划；随后 recognizeOpen 用同一个
+  // bitmap（`full`）与 `nameMatches`，不会再抓第二帧（否则名字/几何错位，录制也多一张）。
   const regions: Rect[] = [config.region];
   if (config.altRegion) regions.push(config.altRegion);
+  const full = pixels.readFull();
+  let nameMatches: Map<number, AugmentNameMatch | null> | undefined;
+  if (full) {
+    const plan = planOpenRecognition(full, regions, lastHitCards);
+    if (plan.ok) nameMatches = await readNeuralNames(full, plan.cards);
+  }
   const out = recognizeOpen({
     pixels,
+    full: full ?? undefined,
     regions,
     library: config.library ?? [],
     gatingCards: lastHitCards,
+    nameMatches,
     // 指纹基底 = **门控画布 + 画布坐标的卡片矩形**（线上两者天然同基底）
     fingerprintBasis: {
       bitmap: latestGatingBmp,

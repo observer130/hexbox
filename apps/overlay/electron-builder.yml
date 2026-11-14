@@ -49,6 +49,11 @@ directories:
   output: ../../release
   buildResources: build
 
+# 神经网络 OCR 的原生运行时/模型：.node 与 .dll 不能从 asar 加载，必须解包。
+# 主进程按 app.asar.unpacked/dist/native 绝对路径 require（见 main/index.ts）。
+asarUnpack:
+  - dist/native/**/*
+
 files:
   - dist/**/*
   - package.json
