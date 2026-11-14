@@ -19,7 +19,6 @@
 
 import {
   fetchJsonWithRetry,
-  httpTimeoutSignal,
   type AugmentMode,
   type AugmentRarity,
   type AugmentRankEntry,
@@ -873,6 +872,8 @@ export interface HeroDetailOptions {
   signal?: AbortSignal;
   /** 单次请求超时（ms，默认 15000；审查 P1：原实现无超时，半开连接会挂住整批）。 */
   timeoutMs?: number;
+  /** 条件请求缓存（可选；data-cli 传文件缓存时，未变的英雄详情只付 304）。 */
+  httpCache?: HttpCache;
 }
 
 /**
@@ -891,13 +892,19 @@ export async function fetchHeroDetail(
   const url = options.detailUrl ?? HERO_DETAIL_URL;
   const doFetch = options.fetchImpl ?? fetch;
   try {
-    const res = await doFetch(`${url}?championid=${championId}`, {
-      // 超时只约束本次请求；外部取消信号仍会立即生效
-      signal: httpTimeoutSignal(options.signal, options.timeoutMs ?? HERO_DETAIL_TIMEOUT_MS),
+    // 与图鉴/榜单共用 core 的 fetchJsonWithRetry（超时 ∪ 取消 + 可选 ETag 缓存）。
+    // 逐条抓取**不重试**（173 条 × 重试只会拖慢同步；个别失败由覆盖率门禁兜底）。
+    const payload = await fetchJsonWithRetry<unknown>({
+      url: `${url}?championid=${championId}`,
+      label: `英雄详情#${championId}`,
+      fetchImpl: doFetch,
       headers: { 'user-agent': DEFAULT_UA },
+      timeoutMs: options.timeoutMs ?? HERO_DETAIL_TIMEOUT_MS,
+      retryAttempts: 1,
+      ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      ...(options.httpCache !== undefined ? { cache: options.httpCache } : {}),
     });
-    if (!res.ok) return null;
-    const fieldValue = extractFieldValue(await res.json());
+    const fieldValue = extractFieldValue(payload);
     if (!fieldValue) return null;
     const value = unwrapValue(fieldValue);
     if (typeof value !== 'object' || value === null) return null;

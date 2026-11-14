@@ -364,6 +364,29 @@ test('fetchHeroDetail：请求带超时，上游不响应时返回 null（不挂
   assert.equal(result, null);
 });
 
+test('fetchHeroDetail：条件缓存命中 304 时复用上次详情正文（发 If-None-Match）', async () => {
+  const detailUrl = 'https://t.test/detail';
+  const url = `${detailUrl}?championid=1`;
+  const rawDetail = { dtstatdate: '20260925', augment_json_irank: '255:1|157|1077|255|0.2452|S' };
+  const payload = { code: 0, data: { _fieldValues: { R1: JSON.stringify(rawDetail) } } };
+  const cache = new MemoryHttpCache();
+  cache.set(url, { body: JSON.stringify(payload), etag: '"d1"' });
+
+  let ifNoneMatch: string | undefined;
+  const result = await fetchHeroDetail(1, {
+    detailUrl,
+    httpCache: cache,
+    fetchImpl: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      ifNoneMatch = (init?.headers as Record<string, string> | undefined)?.['if-none-match'];
+      return { ok: false, status: 304, text: async () => '', headers: { get: () => null } } as unknown as Response;
+    }) as typeof fetch,
+  });
+
+  assert.equal(ifNoneMatch, '"d1"');
+  assert.equal(result?.championId, 1);
+  assert.equal(result?.augments.length, 1, '304 时应复用缓存正文并解析出详情');
+});
+
 test('腾讯图鉴：条件缓存命中 304 时复用正文（发 If-None-Match）', async () => {
   const url = 'https://t.test/kiwi.json';
   const cache = new MemoryHttpCache();

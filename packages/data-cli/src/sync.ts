@@ -33,6 +33,7 @@ import {
   type ChampionDetail,
   type ChampionDetailSet,
   type Dataset,
+  type HttpCache,
   type RankingProvider,
   type RankingSnapshot,
   type StaticProvider,
@@ -466,6 +467,8 @@ export interface DetailFetchOptions {
   readonly concurrency?: number;
   readonly signal?: AbortSignal;
   readonly onProgress?: (done: number, total: number) => void;
+  /** 条件请求缓存（生产装配传入；未变英雄只付 304）。 */
+  readonly httpCache?: HttpCache;
 }
 
 export interface TemplateBuildOptions {
@@ -484,6 +487,8 @@ export interface SyncOptions {
   readonly signal?: AbortSignal;
   readonly onProgress?: (progress: SyncProgress) => void;
   readonly now?: () => Date;
+  /** 条件请求缓存（Provider 与英雄详情共用；未注入时不缓存）。 */
+  readonly httpCache?: HttpCache;
   /** 英雄详情批量拉取（默认 = `@hexbox/provider-tencent` 的 `fetchHeroDetails`）。 */
   readonly fetchDetails?: (
     championIds: readonly number[],
@@ -879,6 +884,7 @@ export async function runDataSync(options: SyncOptions): Promise<SyncReport> {
       const details = await fetchDetails(championIds, {
         concurrency: 6,
         signal,
+        ...(options.httpCache !== undefined ? { httpCache: options.httpCache } : {}),
         onProgress: (done, all) =>
           emit({ stage: 'details', label: '单英雄详情', done, total: all }),
       }).catch((err: unknown) => {
@@ -1048,6 +1054,7 @@ export async function runDefaultSync(options: DefaultSyncOptions): Promise<SyncR
       store: options.store ?? fileSyncStore,
       staticProviders: createStaticProviders(httpCache !== null ? { httpCache } : {}),
       rankingProviders: createRankingProviders(httpCache !== null ? { httpCache } : {}),
+      ...(httpCache !== null ? { httpCache } : {}),
       signal: options.signal,
       onProgress: options.onProgress,
       forceTemplates: options.forceTemplates,
