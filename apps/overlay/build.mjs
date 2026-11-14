@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// @ts-check
 /**
  * 构建脚本
  *
@@ -112,9 +113,16 @@ await cp(join(here, 'src', 'capture', 'worker.html'), join(out, 'renderer', 'cap
 for (const rel of HTML_FILES) {
   const file = join(out, rel);
   const html = await readFile(file, 'utf8');
-  const refs = [...html.matchAll(/(?:src|href)\s*=\s*(["'])([^"']+)\1/g)]
-    .map((m) => m[2].split(/[?#]/)[0])
-    .filter((r) => r && !/^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(r));
+  /** @type {string[]} */
+  const refs = [];
+  for (const m of html.matchAll(/(?:src|href)\s*=\s*(["'])([^"']+)\1/g)) {
+    const raw = m[2];
+    if (raw === undefined) continue;
+    const local = raw.split(/[?#]/)[0];
+    if (!local) continue;
+    if (/^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(local)) continue;
+    refs.push(local);
+  }
   if (refs.length === 0) {
     console.error(`✗ ${rel} 里没有任何本地 script/link 引用 —— HTML 被改坏了？`);
     process.exit(1);

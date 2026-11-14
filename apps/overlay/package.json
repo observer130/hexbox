@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "node build.mjs && node run-electron.mjs .",
     "build": "node build.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc -p tsconfig.build-scripts.json",
     "test": "node --experimental-strip-types --test \"src/**/*.test.ts\" --test-timeout=30000",
     "debug:capture": "node build.mjs && node run-electron.mjs dist/debug-capture.cjs",
     "debug:augment": "node build.mjs && node run-electron.mjs dist/debug-augment.cjs",

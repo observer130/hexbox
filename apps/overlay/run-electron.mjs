@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// @ts-check
 /**
  * Electron 启动器
  *
@@ -80,6 +81,7 @@ const child = spawn(exe, [entry, ...process.argv.slice(3)], {
  */
 const sentinel = join(augmentOut, '.stop');
 let stopping = false;
+/** @param {string} signal */
 const requestStop = (signal) => {
   if (stopping) return;
   stopping = true;
@@ -88,7 +90,8 @@ const requestStop = (signal) => {
     mkdirSync(dirname(sentinel), { recursive: true });
     writeFileSync(sentinel, String(Date.now()));
   } catch (e) {
-    console.error(`[launcher] ⚠ 无法写哨兵文件 ${sentinel}: ${e?.message ?? e}`);
+    const message = e instanceof Error ? e.message : String(e);
+    console.error(`[launcher] ⚠ 无法写哨兵文件 ${sentinel}: ${message}`);
     child.kill();
     return;
   }
