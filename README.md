@@ -45,7 +45,7 @@
 
 > 企业环境（AppLocker / 只允许已签名程序的组策略）**可能直接拦截**，这不是文档能绕过的。
 > 安装包哈希（SHA256）在 [发布说明](docs/RELEASE-NOTES-v0.3.0.md) 与 Release 页给出，
-> 可用 `Get-FileHash .\hexbox-setup-0.1.0-x64.exe -Algorithm SHA256` 自行校验。
+> 可用 `Get-FileHash .\hexbox-setup-<版本>-x64.exe -Algorithm SHA256` 自行校验。
 
 ### 数据：放在你的文档目录（不随安装包）
 
@@ -131,6 +131,9 @@
 > - **便携版不能自助更新**：更新流程认的只有 `hexbox-setup-*.exe`（会把你装成正式安装版）。
 >   想继续用便携版，请手动下载新的 `hexbox-portable-*.exe` 换包。
 > - **国内访问 GitHub 可能很慢甚至不通**，超时后会明确告诉你并给出下载页。
+> - **更新包没有 Authenticode 签名**（与安装包一致，用户已接受）：下载只校验
+>   GitHub Release 声明的 SHA256（与下载同源），且只认官方 Release 资产；
+>   介意的话请从 Release 页手动下载并自行核对哈希。
 
 ## 数据来源
 
@@ -171,7 +174,7 @@
 ## 开发者
 
 仓库是 **pnpm workspace**（10 个项目：8 个包 + 2 个应用），TypeScript **直接跑源码**
-（`node --experimental-strip-types`）。环境要求 Node ≥ 20、pnpm 11.7.0。
+（`node --experimental-strip-types`）。环境要求 Node ≥ 24、pnpm 11.7.0。
 
 ```bash
 pnpm install
@@ -180,17 +183,36 @@ pnpm templates   # → data/templates.json（头像模板 + 名字指纹）
 pnpm dev:web     # 数据站 → http://localhost:5273
 ```
 
+### 数据站部署（纯静态）
+
+数据站是**纯静态站点**：构建时会把 `data/dataset.json`、`data/rankings.json`
+拷进 `apps/web/dist/data/`，页面用相对路径加载（Vite `base: './'`），
+因此可以部署到**任意静态托管或子路径**（Nginx / OSS / 内网 / GitHub Pages 项目页）。
+
+```bash
+pnpm sync                                  # 先生成数据（data/ 不进仓库）
+pnpm --filter @hexbox/web build            # → apps/web/dist（自带 data/）
+```
+
+把整个 `apps/web/dist/` 目录发布出去即可。数据更新后重新 `pnpm sync` + build，
+不需要改服务端配置。CI 不跑 `pnpm sync`（不联网），所以 CI 的 web 构建会打印
+「缺少 data」的警告——**发布构建必须在有数据的机器上跑**。
+
 覆盖层的开发运行：
 
 ```powershell
 pnpm dev:overlay    # 需要管理员权限 + 真实桌面会话；CI 里跑不了
 ```
 
+> 已装过打包版的开发者注意：overlay 会优先读 `文档\hexbox\data`（存在时），
+> 想用仓库里刚 `pnpm sync` 的 `./data` 调试，请显式指定
+> `$env:HEXBOX_DATA_DIR = "$PWD\data"`。
+
 三闸门（提交前保持全绿）：
 
 ```bash
 pnpm typecheck
-pnpm test        # 当前 1104 项；以 pnpm test 的实际输出为准
+pnpm test        # 当前 1111 项；以 pnpm test 的实际输出为准
 pnpm build
 ```
 

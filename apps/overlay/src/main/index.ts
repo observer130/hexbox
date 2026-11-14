@@ -2148,7 +2148,7 @@ app.whenReady().then(() => {
     quit: (reason) => quitApp(reason),
   });
 
-  // ── 「更新数据」流程（应用内同步；确认后才联网）────────────
+  // ── 「更新数据」流程（应用内同步；手动点托盘时确认后才联网）────────────
   // 先建流程再建托盘：菜单项文案要读实时阶段（`正在更新数据…（单英雄详情 42/173）`）。
   dataUpdateFlow = createDataUpdateFlow({
     // 懒求值：resolveDataDir() 在"找不到"时会打警告，启动阶段只该打一次
@@ -2244,7 +2244,7 @@ app.whenReady().then(() => {
     if (overlayWin) attachCloseToTrayHide(overlayWin, '全屏标签画布');
   }
 
-  // 数据读完再检查「上游有没有新数据」（每 24h 一次、只探一个日期、不自动下载）
+  // 数据读完再检查「上游有没有新数据」（每 24h 一次、只探一个日期；有新日期就后台自动下载）
   void loadDataset().then(() => dataUpdateFlow?.checkOnStartup());
   void loadNameLibrary();
   visionLoop = createVisionLoop({

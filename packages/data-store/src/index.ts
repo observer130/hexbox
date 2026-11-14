@@ -2,7 +2,7 @@
  * 本地数据存储
  *
  * 设计取舍：
- *   - 用**文件系统**而非数据库：数据量小（554 海克斯 + 245 英雄 + 装备 + 排行榜），
+ *   - 用**文件系统**而非数据库：数据量小（594 海克斯 + 254 英雄行 + 装备 + 排行榜），
  *     且需要人能直接打开查看/排查。JSON 足够，且零依赖。
  *   - 保持**按来源分文件**：dataset.json（静态图鉴，多源合并）与
  *     rankings.json（官方统计榜）独立落盘、独立失效。
@@ -134,7 +134,8 @@ export async function readRankings(root: string): Promise<RankingSnapshot | null
 /**
  * 写入单英雄详情集合（原子写，与 dataset/rankings 独立）。
  *
- * 独立落盘的理由：它是**最大**的一份数据（245 英雄 × 各含 100+ 海克斯条目），
+ * 独立落盘的理由：它是**最大**的一份数据（173 个真实英雄 × 各含 100+ 海克斯条目；
+ * 图鉴里另有 81 条变体行，没有独立统计），
  * 且与图鉴/榜单的更新节奏不同；分开才能独立失效、独立排查。
  */
 export async function writeBuilds(root: string, set: ChampionDetailSet): Promise<string> {

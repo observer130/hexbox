@@ -7,14 +7,16 @@
  *     —— 与 `pnpm sync` **同一条流水线**，不另写一套；
  *   · 阶段文案与判据在 `@hexbox/vision` 的 `data-update-phase.ts`（纯函数、有单测）。
  *
- * 为什么写用户目录而不是安装目录：
- *   打包版的数据快照在 `…\resources\data`，属于安装包的一部分（升级/卸载会整个删掉）。
- *   更新必须写到 `%LOCALAPPDATA%\hexbox\data` —— `resolveDataDir()` 的优先级里
- *   它本来就高于安装目录快照，所以写完之后重启/重读即可生效，不需要管理员写安装目录。
+ * 写哪个目录（2026-11 起与安装目录解耦，唯一判据在 `vision/data-location.ts`）：
+ *   - 写入目标**永远是用户文档目录** `文档\hexbox\data`（或 `HEXBOX_DATA_DIR` /
+ *     `--data-dir` 显式指定）；开发版也一样，不写仓库；
+ *   - `%LOCALAPPDATA%\hexbox\data` 与旧安装包的 `resources\data` 只是**只读回退**，
+ *     读到旧位置时由 `reload()` 重新解析、后续更新仍写新位置。
  *
- * 启动检查（每天最多一次）：
- *   只问上游"现在最新统计日期是哪天"，**不下载数据**；有新日期才弹托盘气泡。
- *   这是用户明确要的折中：不会在后台偷偷拉几百个请求，但也不会永远不知道数据旧了。
+ * 启动行为（用户 2026-11 决策：启动后自动更新，不弹确认框）：
+ *   · **首次运行**（本地没有任何数据）→ 直接后台静默下载；
+ *   · 日常启动 → 每天最多探测一次官方统计日期，比本地新才**后台自动下载**；
+ *   · 手动点托盘「更新数据」才走确认框；运行中再点 = 取消（AbortSignal）。
  */
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -54,11 +56,11 @@ export interface DataUpdateDialogText {
 }
 
 export interface DataUpdateFlowDeps {
-  /** 数据写入目录：打包版 = `%LOCALAPPDATA%\hexbox\data`，开发版 = 仓库 `data/`。 */
+  /** 数据写入目录：永远是 `文档\hexbox\data`（或显式指定），见 `vision/data-location.ts`。 */
   readonly dataDir: string;
   /** 检查节流状态的持久化文件（放用户目录，不污染安装目录）。 */
   readonly checkStatePath: string;
-  /** 本地是否已经有可用的数据（没有 = 首次运行，要询问是否下载）。 */
+  /** 本地是否已经有可用的数据（没有 = 首次运行 → 后台静默下载，不询问）。 */
   readonly hasLocalData: () => boolean;
   /** 本地当前官方统计日期（`YYYYMMDD`；没有则 null）。 */
   readonly localDate: () => string | null;

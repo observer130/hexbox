@@ -66,9 +66,9 @@ pnpm dev:web                                  # http://localhost:5273
 
 `pnpm check:docs` → `pnpm typecheck` → `pnpm test` → `pnpm build` (CI runs the same on
 `windows-latest`). Node's built-in runner; `pnpm --filter @hexbox/core test` is faster.
-**Keep them green and add tests for new behavior.** Current: **1104** — core 55 /
+**Keep them green and add tests for new behavior.** Current: **1111** — core 55 /
 vision 710 / lcu 144 / overlay 61 / provider-communitydragon 12 / provider-tencent 46 /
-data-store 19 / data-cli 53 / web 4 (`pnpm test` is the source of truth; the overlay's
+data-store 19 / data-cli 54 / web 10 (`pnpm test` is the source of truth; the overlay's
 Electron runtime is not testable — its tests cover replay-safe parts and the self-test
 scenario logic only). `pnpm typecheck` also checks `scripts/*.mts`
 (`scripts/tsconfig.json`) and `apps/web` (via `vue-tsc`). `pnpm check:docs` fails on a
@@ -88,6 +88,11 @@ Read the doc named per area first; every rule below cost a real bug.
   Closing hides (`attachCloseToTrayHide`); the only exit is the tray's 退出 → `quitApp()`.
   `requestSingleInstanceLock()` is mandatory (two processes = overlapping labels +
   different strength tables); the credentials balloon fires once per session.
+- **All windows load local `file://` content only** (decision 2026-11-14: no remote pages
+  or remote content will be introduced). The Electron hardening posture
+  (`contextIsolation`, no `nodeIntegration`, no CSP/navigation guard, `sandbox: false`)
+  is accepted only under that constraint — introducing any remote content requires
+  re-reviewing CSP / window-open / navigation / per-window preload first.
 - **The label canvas sizes itself from the window** — `innerWidth × dpr` on load, on
   resize and **before every draw**; tied to any message it stays 300×150 and every label
   lands off-canvas ("drawn" in the log, nothing on screen). It is re-raised and re-pushed
@@ -147,7 +152,7 @@ Read the doc named per area first; every rule below cost a real bug.
 - TS runs as source (`node --experimental-strip-types`): `.ts` extensions in imports;
   `erasableSyntaxOnly` forbids `enum`/parameter properties/`namespace`; `import type` and
   `export type` are required by `verbatimModuleSyntax`/`isolatedModules`.
-- `strict` + `noUncheckedIndexedAccess` + `noImplicitOverride`; single quotes, no
+- `strict` + `noUncheckedIndexedAccess` + `noImplicitOverride`; single quotes and
   semicolons, functional where reasonable, Chinese comments are fine.
 
 ## Environment knobs
@@ -161,7 +166,7 @@ in `debug-augment.ts`.
 | `HEXBOX_AUGMENT_REROLL_POLL_MS` / `_OPEN_SAMPLE_MS` / `_IDLE_MS` / `_ACTIVE_MS` / `_PROBE_MS` / `_TAIL_MS` | open-panel sampling (400 / 4000) and cadence (1000/250/6000/20000) |
 | `HEXBOX_AUGMENT_FORENSICS` / `_CLOSED_SAMPLES` / `_API_TRACE` / `_CLOSE_HEAL_PROBE` / `_PENDING_PROBE_MS` | opt-in diagnostics; both probes are **off** (strict zero frames) |
 | `HEXBOX_AUGMENT_RECORD` / `_RECORD_DIR` / `_OUT` / `_SECONDS` / `_MAX_MINUTES` / `_DRAW` / `_BADGE` | session recording (**off**), labels (on), badge size `small` / `medium` / `large` |
-| `HEXBOX_OVERLAY_AUGMENT` / `HEXBOX_CHAMP_SELECT_CARDS` / `HEXBOX_DATA_DIR` / `HEXBOX_DATA_CHECK` / `HEXBOX_LOG_FILE` / `HEXBOX_SMOKE` / `HEXBOX_TRAY_*` / `HEXBOX_NOTICE_TEST` / `HEXBOX_LCU_CREDENTIALS(_FILE)` / `HEXBOX_LABEL_OVERLAY_TEST(_MS)` / `HEXBOX_DEBUG_FORCE` / `_SELFTEST_CADENCE` | chain toggle / card source `geometry` / `legacy` / `off` / data dir（默认 `文档\hexbox\data`） / `0` = 关闭启动数据检查 / log tee / smoke / tray self-test + icon / balloon test / LCU credentials / self-tests |
+| `HEXBOX_OVERLAY_AUGMENT` / `HEXBOX_CHAMP_SELECT_CARDS` / `HEXBOX_DATA_DIR` / `HEXBOX_DATA_CHECK` / `HEXBOX_LOG_FILE` / `HEXBOX_SMOKE` / `HEXBOX_TRAY_*` / `HEXBOX_NOTICE_TEST` / `HEXBOX_LCU_CREDENTIALS(_FILE)` / `HEXBOX_LABEL_OVERLAY_TEST(_MS)` / `HEXBOX_DEBUG_FORCE` / `HEXBOX_AUGMENT_SELFTEST_CADENCE` | chain toggle / card source `geometry` / `legacy` / `off` / data dir（默认 `文档\hexbox\data`） / `0` = 关闭启动数据检查 / log tee / smoke / tray self-test + icon / balloon test / LCU credentials / self-tests |
 | `HEXBOX_GITHUB_TOKEN` / `HEXBOX_UPDATE_API_BASE` / `HEXBOX_UPDATE_CHECK_TEST` | 更新检查的可选 token（**只发给 `api.github.com`**，不跟去 CDN；录制元数据里会被脱敏）/ 自测用地址 / 自测模式（正常用户不会设）|
 
 ## Game-free checks (no game required)
