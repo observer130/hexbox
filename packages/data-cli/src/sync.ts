@@ -27,14 +27,15 @@ import {
   type TemplateEntry,
   type TemplatePack,
 } from '@hexbox/vision';
-import type {
-  Champion,
-  ChampionDetail,
-  ChampionDetailSet,
-  Dataset,
-  RankingProvider,
-  RankingSnapshot,
-  StaticProvider,
+import {
+  isChampionVariant,
+  type Champion,
+  type ChampionDetail,
+  type ChampionDetailSet,
+  type Dataset,
+  type RankingProvider,
+  type RankingSnapshot,
+  type StaticProvider,
 } from '@hexbox/core';
 import { fetchHeroDetails } from '@hexbox/provider-tencent';
 import {
@@ -850,7 +851,11 @@ export async function runDataSync(options: SyncOptions): Promise<SyncReport> {
 
   /* ---- 3. 单英雄详情 ---- */
   const effectiveDataset = dataset ?? previousDataset;
-  const championIds = effectiveDataset?.champions.map((c) => c.id) ?? [];
+  // ⚠️ 变体条目（60000+，如 `Jade_*`）在官方强度表里**没有独立统计**，不能计入分母：
+  // 图鉴实测 254 行 = 173 真实英雄 + 81 变体，详情最多只能拿到 173 条；
+  // 若按 254 行算 90% 下限（229），正常结果（173）会被当成"大面积失败"永久拒写。
+  const championIds =
+    effectiveDataset?.champions.filter((c) => !isChampionVariant(c.id)).map((c) => c.id) ?? [];
   if (!aborted()) {
     if (championIds.length === 0) {
       skipped.push({ stage: 'details', reason: '没有英雄列表（先同步图鉴）' });

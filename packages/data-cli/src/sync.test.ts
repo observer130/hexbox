@@ -716,6 +716,39 @@ test('runDataSync：详情 10/10 → 照常写入（下限不误杀正常情况�
   assert.ok(writes.includes('builds'));
 });
 
+test('runDataSync：60000+ 变体条目不计入详情分母（真实 254 行图鉴只能抓到 173 条）', async () => {
+  const { store, writes } = memoryStore();
+  const requested: number[][] = [];
+  // 线上图鉴形态：真实英雄 + 同一英雄的变体条目（60000+，没有独立统计）
+  const champions = [
+    ...Array.from({ length: 10 }, (_, i) => champion(i + 1)),
+    champion(60001),
+    champion(60002),
+  ];
+  const report = await runDataSync({
+    storeRoot: 'memory',
+    store,
+    staticProviders: [staticProvider('cdragon', async () => ds('cdragon', { champions }))],
+    rankingProviders: [],
+    fetchDetails: async (ids) => {
+      requested.push([...ids]);
+      return ids.map((id) => detail(id));
+    },
+    buildTemplates: async () => packOf([1]),
+  });
+
+  assert.deepEqual(
+    requested[0],
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    '只抓真实英雄，不白打 60000+ 变体',
+  );
+  assert.ok(
+    writes.includes('builds'),
+    '10/10 真实英雄必须允许覆盖（旧代码拿 12 行做分母会拒写）',
+  );
+  assert.equal(report.failures.some((f) => f.stage === 'details'), false);
+});
+
 test('runDataSync：英雄榜为空但海克斯榜有数据 → 旧英雄榜被保留，不被删掉', async () => {
   const previous = snapshot('20261001', {
     augments: [{} as never],
