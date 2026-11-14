@@ -234,6 +234,24 @@ scripts/                            离线诊断脚本 + 不用开游戏的标�
 docs/                               设计文档
 ```
 
+设计文档索引（按"动代码前先读哪份"排序）：
+
+| 文档 | 内容 |
+|---|---|
+| [AGENTS.md](AGENTS.md) | 开发约定、硬规则、环境变量（**改代码前必读**） |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | 阶段划分与当前完成度 |
+| [docs/build-slots.md](docs/build-slots.md) | 出装槽位口径（LCU item sets 的 20/5/1 规则） |
+| [docs/SCREENSHOT-DEV.md](docs/SCREENSHOT-DEV.md) | 截屏覆盖层技术事实与真机踩坑 |
+| [docs/AUGMENT-PANEL.md](docs/AUGMENT-PANEL.md) | 局内海克斯面板：门控/识别/标定/标签外观 |
+| [docs/SESSION-REPLAY.md](docs/SESSION-REPLAY.md) | 会话录制与回放（虚拟时钟驱动线上控制器） |
+| [docs/OVERLAY-STAGES.md](docs/OVERLAY-STAGES.md) | 覆盖层分阶段决策与调研 |
+| [docs/RELEASE-WINDOWS.md](docs/RELEASE-WINDOWS.md) | Windows 打包发布全部事实 |
+| [docs/RELEASE-NOTES-v0.3.0.md](docs/RELEASE-NOTES-v0.3.0.md) | 当前版本发布说明（升级/校验） |
+| [docs/SESSION-NOTES.md](docs/SESSION-NOTES.md) | 真机事故与修复记录 |
+| [docs/VERIFY-P1.md](docs/VERIFY-P1.md) | 真机验收清单 |
+| [apps/web/README.md](apps/web/README.md) | 数据站：开发/构建/部署/排查 |
+| [apps/overlay/README.md](apps/overlay/README.md) | 覆盖层：开发运行/自测 |
+
 **不用开游戏的自测**（可选）：
 
 ```powershell
