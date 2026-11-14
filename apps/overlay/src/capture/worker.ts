@@ -47,6 +47,11 @@ import {
   type Rect,
 } from '@hexbox/vision/browser';
 
+import {
+  STREAM_REBUILD_MAX_ATTEMPTS,
+  streamRebuildDelayMs,
+} from './stream-retry.ts';
+
 /** 主进程下发的配置。 */
 interface WorkerConfig {
   /** 卡片行搜索区（**截屏归一化**；主进程用 panelRowRectInCapture 算好）。 */
@@ -172,6 +177,15 @@ let timer: number | null = null;
 let frames = 0;
 let lastFrameAt = 0;
 /**
+ * 屏幕流重建状态。
+ *
+ * 系统会在"游戏切换分辨率 / 窗口↔全屏 / 显示器休眠"时结束 track；旧实现只打
+ * 一行"将重建"却**没有任何重建代码**，本局标签就静默失效到结束（审查 P1）。
+ * 现在：`track.ended` → 有上限的指数退避重建；用尽后明确报错，不再假装会恢复。
+ */
+let streamRebuildTimer: number | null = null;
+let streamRebuildAttempt = 0;
+/**
  * **冻结的取样矩形**（面板停留期间固定不变；§十五 的真机标定要求）。
  *
  * 由上一次**整批识别**（面板开边沿）或**单卡重随重识别**定下：那两次都以
@@ -248,11 +262,64 @@ async function ensureStream(): Promise<boolean> {
   }
   const track = stream.getVideoTracks()[0];
   track?.addEventListener('ended', () => {
-    log('屏幕流被结束（游戏切换分辨率/全屏状态时可能发生），将重建', true);
+    // 只标记并排重建：真正的 `getDisplayMedia` 在 `scheduleStreamRebuild` 里重新要流。
     stream = null;
+    if (video) video.srcObject = null;
+    scheduleStreamRebuild(track.label || 'track ended');
   });
   log(`屏幕流已建立：${track?.label ?? '?'} ${video.videoWidth}x${video.videoHeight}`);
   return true;
+}
+
+/** 取消待执行的重建并重置退避计数（手动 start / 重新要流时调用）。 */
+function cancelStreamRebuild(): void {
+  if (streamRebuildTimer !== null) {
+    window.clearTimeout(streamRebuildTimer);
+    streamRebuildTimer = null;
+  }
+  streamRebuildAttempt = 0;
+}
+
+/** 若配置允许且流已就绪，确保取帧定时器在跑（重建成功后用）。 */
+function ensureTimer(): void {
+  if (timer !== null) return;
+  if (!config || config.intervalMs <= 0) return;
+  if (!video) return;
+  timer = window.setInterval(tick, Math.max(50, config.intervalMs));
+  log(`取帧已恢复：每 ${config.intervalMs}ms 一帧`);
+}
+
+/** 有上限的指数退避重建（次数/退避判据在 `stream-retry.ts`，纯函数有单测）。 */
+function scheduleStreamRebuild(reason: string): void {
+  if (streamRebuildTimer !== null) return; // 已有计划中的重建，不重复排
+  const attempt = streamRebuildAttempt + 1;
+  const delay = streamRebuildDelayMs(attempt);
+  if (delay === null) {
+    log(
+      `屏幕流已结束且重建失败（${reason}）：已尝试 ${STREAM_REBUILD_MAX_ATTEMPTS} 次，` +
+        '本局标签将不可用；请重启覆盖层（或等下一局重新建立）',
+      true,
+    );
+    return;
+  }
+  streamRebuildAttempt = attempt;
+  log(
+    `屏幕流被结束（${reason}）→ ${delay}ms 后尝试重建（第 ${attempt}/${STREAM_REBUILD_MAX_ATTEMPTS} 次）`,
+    true,
+  );
+  streamRebuildTimer = window.setTimeout(() => {
+    streamRebuildTimer = null;
+    void (async () => {
+      const ok = await ensureStream();
+      if (ok) {
+        streamRebuildAttempt = 0;
+        log('屏幕流已重建，继续取帧');
+        ensureTimer();
+      } else {
+        scheduleStreamRebuild('重建失败');
+      }
+    })();
+  }, delay);
 }
 
 /** 采一帧 → 画到小画布 → 取像素 → 跑检测 → 回传。 */
@@ -543,13 +610,15 @@ function lumaBytes(bmp: Bitmap): Uint8Array {
 
 function start(cfg: WorkerConfig): void {
   config = cfg;
+  cancelStreamRebuild();
   if (timer !== null) {
     window.clearInterval(timer);
     timer = null;
   }
   void ensureStream().then((ok) => {
     if (!ok) {
-      log('无法开始：屏幕流不可用', true);
+      // 首次取流失败也走重建退避：游戏切分辨率/全屏瞬间要流经常失败一次
+      scheduleStreamRebuild('启动时取流失败');
       return;
     }
     // intervalMs <= 0 = 只把流建好、不取帧（常态不截屏，等 API 触发后再起表）
@@ -585,7 +654,17 @@ function setCadence(ms: number): void {
   // ⚠️ 必须**重开定时器**：`setInterval` 的周期在创建时就固定了，改配置变量不生效
   //（"改了配置却不生效"的常见坑）。
   // 若此前处于"停止"状态（timer === null 但流已就绪），这里也要重新起表。
-  if (video) timer = window.setInterval(tick, next);
+  if (stream) {
+    timer = window.setInterval(tick, next);
+  } else {
+    // 流可能在"停止取帧"期间被系统结束：先要流，成功后再起表（失败走退避重建）
+    log('没有可用的屏幕流，先重建再开始取帧', true);
+    cancelStreamRebuild();
+    void ensureStream().then((ok) => {
+      if (ok) ensureTimer();
+      else scheduleStreamRebuild('恢复取帧时取流失败');
+    });
+  }
   log(`门控间隔改为 ${next}ms`);
 }
 
