@@ -192,7 +192,10 @@ export interface BuildSlotRow {
 }
 
 export interface ChampionBuildView {
-  /** 出门装（单件或组合）。 */
+  /**
+   * 出门装**单件**（`itemone_json`；itemset 在单件为空时才回退 `startCombo`，
+   * 本视图不合并两路数据 —— 旧注释"单件或组合"与实现不符，审计 P3）。
+   */
   readonly start: BuildSlotRow[];
   readonly shoes: BuildSlotRow[];
   /** 核心三件套。 */

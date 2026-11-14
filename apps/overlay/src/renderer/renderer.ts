@@ -4,11 +4,18 @@
  * 不 import 任何 Node 依赖 —— LCU 轮询、数据读取、join 都在主进程，
  * 这里只接收 `overlay:state` 推送并渲染。
  *
+ * ⚠️ 该侧边面板**已停用**（`visibility.ts` 的 `showPanel` 恒 false；托盘是唯一入口，
+ * 标签画布走 `overlay-canvas.ts`）。保留代码只为历史/诊断，配色等判据**不得**
+ * 在这里另起一份：强度档位颜色必须走 `@hexbox/vision/browser` 的
+ * `augmentTierColor()`（审计 P3：这里曾有一套与 vision 不一致的 TIER_COLOR）。
+ *
  * 分阶段渲染（见 docs/OVERLAY-STAGES.md）：
  *   - 选人阶段：只显示**所选英雄的胜率**（此时玩家在选英雄，
  *     海克斯还没出现，显示海克斯数据是错误的）。
  *   - 局内：显示该英雄口径的**海克斯强度**与**出装建议**。
  */
+
+import { augmentTierColor } from '@hexbox/vision/browser';
 
 interface AugmentRow {
   name: string;
@@ -74,21 +81,12 @@ const PHASE_LABEL: Record<string, string> = {
   EndOfGame: '对局结束',
 };
 
-/** 稀有度配色（与数据站口径一致）。 */
+/** 稀有度配色（仅空档位时的兜底；与数据站口径一致）。 */
 const RARITY_COLOR: Record<string, string> = {
   kPrismatic: '#c084fc',
   kGold: '#e0b64a',
   kSilver: '#9fb0c9',
   kEventChoice: '#6fb3d2',
-};
-
-/** 强度评级配色：S 最强 → C 最弱。 */
-const TIER_COLOR: Record<string, string> = {
-  S: '#e0b64a',
-  A: '#c084fc',
-  B: '#6fb3d2',
-  C: '#9fb0c9',
-  D: '#8b96ad',
 };
 
 function pct(rate: number, digits = 1): string {
@@ -143,7 +141,8 @@ function augRowHtml(a: AugmentRow): string {
   const icon = a.icon
     ? `<img class="ico" src="${esc(a.icon)}" alt="" loading="lazy" />`
     : `<div class="ico ph"></div>`;
-  const color = TIER_COLOR[a.tier] ?? RARITY_COLOR[a.rarity] ?? '#9fb0c9';
+  // 档位颜色唯一来源 = vision（未知档位给中性灰，不按稀有度猜）
+  const color = a.tier !== '' ? augmentTierColor(a.tier) : (RARITY_COLOR[a.rarity] ?? '#9fb0c9');
   return `
     <div class="aug">
       ${icon}

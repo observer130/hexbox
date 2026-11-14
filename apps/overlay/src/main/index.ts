@@ -1345,7 +1345,11 @@ async function pollOnce(): Promise<void> {
   // **自相矛盾**（实际是门的第二轮结论，只是没打）。现在：门给出的
   // `stage` 或"是否在局内"一变就打一行（同一句不重复）。
   const gated = stageGate.push(stageSample);
-  const wasInGame = AUGMENT_CHAIN_PHASES.includes(phase);
+  // ⚠️ 必须用**上一轮已采纳**的阶段（`lastStageGateStage`）：本函数的局部 `phase`
+  //    在下面几行才被赋成 `gated.stage`，在这里读它永远得到初始值 `'None'`，
+  //    于是 "wasInGame !== nowInGame" 恒等于 "false !== 是否在局内" —— 审计 P3
+  //    的纯日志缺陷（阶段进出那一行除了首次进局，永远不会触发）。
+  const wasInGame = AUGMENT_CHAIN_PHASES.includes(lastStageGateStage);
   const nowInGame = AUGMENT_CHAIN_PHASES.includes(gated.stage);
   if (
     gated.reason !== lastStageGateReason &&
