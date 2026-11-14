@@ -36,7 +36,7 @@ pnpm monorepo (10 projects: 8 packages + 2 apps). One concern per file: the per-
 lives in each file's header.
 
 ```
-packages/  core      models + Provider iface + overlay-view + itemset
+packages/  core      models + Provider iface + overlay-view + itemset + http helpers
            vision    screenshot recognition — all pure functions (geometry … fixtures)
            provider-communitydragon, provider-tencent, provider-registry
            data-store, data-cli, lcu (probe/REST/itemset CLI/live-data 2999/identity)
@@ -66,9 +66,9 @@ pnpm dev:web                                  # http://localhost:5273
 
 `pnpm check:docs` → `pnpm typecheck` → `pnpm test` → `pnpm build` (CI runs the same on
 `windows-latest`). Node's built-in runner; `pnpm --filter @hexbox/core test` is faster.
-**Keep them green and add tests for new behavior.** Current: **1111** — core 55 /
-vision 710 / lcu 144 / overlay 61 / provider-communitydragon 12 / provider-tencent 46 /
-data-store 19 / data-cli 54 / web 10 (`pnpm test` is the source of truth; the overlay's
+**Keep them green and add tests for new behavior.** Current: **1133** — core 60 /
+vision 710 / lcu 146 / overlay 69 / provider-communitydragon 15 / provider-tencent 48 /
+data-store 19 / data-cli 56 / web 10 (`pnpm test` is the source of truth; the overlay's
 Electron runtime is not testable — its tests cover replay-safe parts and the self-test
 scenario logic only). `pnpm typecheck` also checks `scripts/*.mts`
 (`scripts/tsconfig.json`) and `apps/web` (via `vue-tsc`). `pnpm check:docs` fails on a
@@ -108,6 +108,9 @@ Read the doc named per area first; every rule below cost a real bug.
   (`legacy`/`off` keep the old path) — `docs/SCREENSHOT-DEV.md` §9.7.
 - **Never take full-resolution frames with `desktopCapturer` mid-match** (a DWM stall
   froze the system cursor ~1 s); use the already-running screen stream in the renderer.
+- **The screen stream can die mid-match** (resolution/fullscreen/display sleep): the
+  worker must rebuild it with bounded backoff (`capture/stream-retry.ts`) and, if it
+  gives up, say so explicitly — never log "will rebuild" without a rebuild path.
 - **Ctrl+C never reaches Electron** → launch via `apps/overlay/run-electron.mjs`, which
   writes the `debug/augment/.stop` sentinel.
 
@@ -129,10 +132,11 @@ Read the doc named per area first; every rule below cost a real bug.
 
 **Data / LCU** — `docs/build-slots.md`
 
-- **Always use `LcuClient`** (`withInsecureTls()`): a bare `fetch` fails with
-  `SELF_SIGNED_CERT_IN_CHAIN` (hit three times), so never set
-  `NODE_TLS_REJECT_UNAUTHORIZED` per entry point; `getOrNull()` for normal 404s,
-  `LcuHttpError.isAuthFailure` before dropping credentials.
+- **Always use `LcuClient`** (per-request `rejectUnauthorized: false` via
+  `requestInsecure`): a bare `fetch` fails with `SELF_SIGNED_CERT_IN_CHAIN` (hit three
+  times), so never set `NODE_TLS_REJECT_UNAUTHORIZED` — it is process-wide and disables
+  certificate checks for every concurrent HTTPS request (data sync, update check);
+  `getOrNull()` for normal 404s, `LcuHttpError.isAuthFailure` before dropping credentials.
 - Writing player data: only ever replace `hexbox…`-titled item sets (Brawl's map ID is
   **12**), and `itemone_json` lists **20** entries = 其余成装 with the top **5** = 出门装
   (we write only the top 1) — that overlap is official, not a bug.
