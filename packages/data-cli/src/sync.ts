@@ -353,6 +353,18 @@ export function mayOverwriteDetails(fetched: number, expected: number): boolean 
   return fetched >= detailsRequiredCount(expected);
 }
 
+/**
+ * 这批头像模板够不够格覆盖旧包（与详情同一套下限；0 个一律拒绝）。
+ *
+ * 审查 P1：`pnpm templates` 以前只在"一个都没成功"时抛错，上游抖动拿到
+ * 5/254 个模板也会直接覆盖完好的旧包 → 截屏识别全废。现在 CLI 与同步流水线
+ * 共用这个判据。
+ */
+export function mayOverwriteTemplates(fetched: number, expected: number): boolean {
+  if (!Number.isFinite(fetched) || fetched <= 0) return false;
+  return fetched >= templatesRequiredCount(expected);
+}
+
 /** 详情未落盘时的**人话原因**（报告与 skipped 共用，纯函数便于单测）。 */
 export function detailSkipReason(input: {
   readonly fetched: number;
@@ -941,7 +953,7 @@ export async function runDataSync(options: SyncOptions): Promise<SyncReport> {
         const required = templatesRequiredCount(champions.length);
         if (aborted()) {
           skipped.push({ stage: 'templates', reason: '已取消（不写残缺模板包）' });
-        } else if (pack.count <= 0 || pack.count < required) {
+        } else if (!mayOverwriteTemplates(pack.count, champions.length)) {
           const reason =
             `只拿到 ${pack.count}/${champions.length} 个模板（低于 ${required} 个的下限，` +
             '保留现有模板包）';

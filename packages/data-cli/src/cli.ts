@@ -38,8 +38,10 @@ import type { Dataset } from '@hexbox/core';
 import {
   computeJoinCoverage,
   fetchTemplates,
+  mayOverwriteTemplates,
   runDefaultSync,
   syncExitCode,
+  templatesRequiredCount,
   type SyncProgress,
 } from './sync.ts';
 
@@ -142,6 +144,19 @@ async function cmdTemplates(storeRoot: string): Promise<number> {
   } catch (err) {
     console.log('✗');
     console.error(`      ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
+
+  // ⚠️ 覆盖率门禁（审查 P1）：`fetchTemplates` 只在"一个都没成功"时抛错，
+  //    上游抖动拿到 5/254 个模板也会覆盖完好的旧包（截屏识别全废）。
+  //    与同步流水线共用同一个判据 `mayOverwriteTemplates`。
+  if (!mayOverwriteTemplates(pack.count, ds.champions.length)) {
+    console.log('✗');
+    console.error(
+      `      只拿到 ${pack.count}/${ds.champions.length} 个模板` +
+        `（低于 ${templatesRequiredCount(ds.champions.length)} 个的下限）` +
+        ' → 不覆盖现有模板包，请稍后重试',
+    );
     return 1;
   }
 

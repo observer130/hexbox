@@ -30,6 +30,7 @@ import {
   detailSkipReason,
   detailsRequiredCount,
   mayOverwriteDetails,
+  mayOverwriteTemplates,
   mergeRankingSnapshot,
   mergeStaticDatasets,
   collectionShrank,
@@ -661,6 +662,15 @@ test('templatesRequiredCount：与详情同一套下限口径', () => {
   assert.equal(templatesRequiredCount(0), 0);
 });
 
+test('mayOverwriteTemplates：5/254 缩水必须拒绝，正常/边界允许（审查 P1 回归）', () => {
+  // 上游抖动只拿到 5 个模板：旧实现会直接覆盖完好的模板包 → 截屏识别全废
+  assert.equal(mayOverwriteTemplates(5, 254), false);
+  assert.equal(mayOverwriteTemplates(0, 254), false);
+  assert.equal(mayOverwriteTemplates(229, 254), true); // 90% 边界
+  assert.equal(mayOverwriteTemplates(253, 254), true); // 真实快照形态（1 个头像 404）
+  assert.equal(mayOverwriteTemplates(Number.NaN, 254), false);
+});
+
 /* ------------------------------------------------------------------ */
 /* S5：退出码                                                          */
 /* ------------------------------------------------------------------ */
@@ -747,6 +757,29 @@ test('runDataSync：60000+ 变体条目不计入详情分母（真实 254 行图
     '10/10 真实英雄必须允许覆盖（旧代码拿 12 行做分母会拒写）',
   );
   assert.equal(report.failures.some((f) => f.stage === 'details'), false);
+});
+
+test('runDataSync：模板只成功 3/10 → 不写 templates，并记一条覆盖率失败（审查 P1）', async () => {
+  const { store, writes } = memoryStore();
+  const report = await runDataSync({
+    storeRoot: 'memory',
+    store,
+    staticProviders: [
+      staticProvider('cdragon', async () =>
+        ds('cdragon', { champions: Array.from({ length: 10 }, (_, i) => champion(i + 1)) }),
+      ),
+    ],
+    rankingProviders: [],
+    fetchDetails: async (ids) => ids.map((id) => detail(id)),
+    buildTemplates: async () => packOf([1, 2, 3]),
+  });
+
+  assert.equal(writes.includes('templates'), false, '缩水模板不许覆盖旧包');
+  assert.ok(
+    report.failures.some((f) => f.stage === 'templates' && /3\/10/.test(f.message)),
+    '覆盖率不足要进报告',
+  );
+  assert.ok(report.skipped.some((s) => s.stage === 'templates'));
 });
 
 test('runDataSync：英雄榜为空但海克斯榜有数据 → 旧英雄榜被保留，不被删掉', async () => {
