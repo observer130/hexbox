@@ -12,6 +12,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { MemoryHttpCache } from '@hexbox/core';
+
 import {
   buildModeIndex,
   createCommunityDragonProvider,
@@ -329,4 +331,34 @@ test('provider：请求带超时信号，上游不响应时超时失败（不无
   });
   await assert.rejects(() => provider.load());
   assert.equal(calls, 6, '3 个端点 × 2 次尝试（超时后重试一次）');
+});
+
+test('provider：条件缓存命中 304 时复用正文，不再下载（ETag 发送正确）', async () => {
+  const base = 'https://cdragon.test';
+  const cache = new MemoryHttpCache();
+  const files = ['cherry-augments.json', 'augment-lists.json', 'champion-summary.json'] as const;
+  for (const file of files) {
+    const body =
+      file === 'cherry-augments.json'
+        ? JSON.stringify([{ id: 1, augmentNameId: 'ARAM_X', nameTRA: 'X' }])
+        : '[]';
+    cache.set(`${base}/zh_cn/v1/${file}`, { body, etag: `"e-${file}"` });
+  }
+  const sent: Array<string | null | undefined> = [];
+  const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    sent.push((init?.headers as Record<string, string> | undefined)?.['if-none-match']);
+    // Response 构造器不允许 304（null body status），测试桩直接给最小形状
+    return { ok: false, status: 304, text: async () => '', headers: { get: () => null } } as unknown as Response;
+  }) as typeof fetch;
+
+  const provider = createCommunityDragonProvider({
+    baseUrl: base,
+    fetchImpl,
+    includeItems: false,
+    httpCache: cache,
+  });
+  const ds = await provider.load();
+  assert.equal(ds.augments.length, 1, '304 时应复用缓存里的正文');
+  assert.equal(sent.length, 3);
+  for (const value of sent) assert.match(String(value), /^"e-/);
 });

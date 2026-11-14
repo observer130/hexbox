@@ -18,8 +18,8 @@
  */
 
 import {
+  fetchJsonWithRetry,
   httpTimeoutSignal,
-  sleep,
   type AugmentMode,
   type AugmentRarity,
   type AugmentRankEntry,
@@ -31,6 +31,7 @@ import {
   type HeroPartner,
   type HeroRankEntry,
   type HextechStatic,
+  type HttpCache,
   type RankingProvider,
   type RankingSnapshot,
   type SkillOrder,
@@ -665,74 +666,47 @@ export interface TencentOptions {
   retryAttempts?: number;
   /** 重试等待（ms，默认 250；测试可调小）。 */
   retryDelayMs?: number;
+  /** 条件请求缓存（可选；data-cli 传文件缓存时同 URL 不变则走 304）。 */
+  httpCache?: HttpCache;
 }
 
 const DEFAULT_UA = 'hexbox/0.2 (+https://github.com/)';
 
-/** 单次请求超时。 */
-const FETCH_TIMEOUT_MS = 15_000;
-/** 总尝试次数（首次 + 1 次重试）。 */
-const FETCH_ATTEMPTS = 2;
-/** 重试等待。 */
-const RETRY_DELAY_MS = 250;
-
-interface RetryPolicy {
-  readonly timeoutMs: number;
-  readonly attempts: number;
-  readonly retryDelayMs: number;
-}
-
-/** 请求策略：从 options 读（测试可注入极短超时/重试间隔）。 */
-function retryPolicyOf(options: TencentOptions & { signal?: AbortSignal }): RetryPolicy {
-  return {
-    timeoutMs: options.timeoutMs ?? FETCH_TIMEOUT_MS,
-    attempts: Math.max(1, Math.floor(options.retryAttempts ?? FETCH_ATTEMPTS)),
-    retryDelayMs: options.retryDelayMs ?? RETRY_DELAY_MS,
-  };
-}
+/** 单英雄详情请求超时（默认 15s；详情逐条抓取，不重试，失败返回 null）。 */
+const HERO_DETAIL_TIMEOUT_MS = 15_000;
 
 /**
- * 拉 JSON：**单次超时 + 有限重试**（审查 P1）。
+ * 请求公共选项：超时 / 重试 / 条件缓存全部由 core 的 `fetchJsonWithRetry` 统一处理。
  *
- * - 超时：`AbortSignal.timeout` 与调用方取消信号合成，上游半开连接不会挂死同步；
- * - 重试：只对 5xx/429/网络错误重试一次（4xx 是地址/权限问题，重试无意义）；
- * - 外部取消立即冒泡（不等重试）。
+ * ⚠️ 这里只传**显式设置**的字段，不再定义第二套默认值（默认值只在 core 一处，
+ * 否则两处漂移时"到底哪个生效"很难排查）。
  */
-async function fetchJsonWithRetry<T>(
+function httpOptionsOf(
+  options: TencentOptions,
   doFetch: typeof fetch,
-  url: string,
-  label: string,
-  signal: AbortSignal | undefined,
-  policy: RetryPolicy,
-): Promise<T> {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      const res = await doFetch(url, {
-        signal: httpTimeoutSignal(signal, policy.timeoutMs),
-        headers: { 'user-agent': DEFAULT_UA },
-      });
-      if (!res.ok) {
-        const err = new Error(`${label} 请求失败: HTTP ${res.status}`);
-        // 4xx（除 429）不重试：URL/权限错了，重试只会拖慢失败
-        if (res.status < 500 && res.status !== 429) {
-          throw Object.assign(err, { noRetry: true as const });
-        }
-        throw err;
-      }
-      return (await res.json()) as T;
-    } catch (err) {
-      const noRetry = (err as { noRetry?: boolean }).noRetry === true;
-      if (noRetry || signal?.aborted === true || attempt >= policy.attempts) throw err;
-      await sleep(policy.retryDelayMs);
-    }
-  }
+): {
+  fetchImpl: typeof fetch;
+  headers: Record<string, string>;
+  timeoutMs?: number;
+  retryAttempts?: number;
+  retryDelayMs?: number;
+  cache?: HttpCache;
+} {
+  return {
+    fetchImpl: doFetch,
+    headers: { 'user-agent': DEFAULT_UA },
+    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    ...(options.retryAttempts !== undefined ? { retryAttempts: options.retryAttempts } : {}),
+    ...(options.retryDelayMs !== undefined ? { retryDelayMs: options.retryDelayMs } : {}),
+    ...(options.httpCache !== undefined ? { cache: options.httpCache } : {}),
+  };
 }
 
 /** 构造腾讯一方静态图鉴 provider（并入 Dataset.hextechs）。 */
 export function createTencentStaticProvider(options: TencentOptions = {}): StaticProvider {
   const url = options.augmentsUrl ?? KIWI_AUGMENTS_URL;
   const doFetch = options.fetchImpl ?? fetch;
-  const policy = retryPolicyOf(options);
+  const common = httpOptionsOf(options, doFetch);
 
   return {
     info: {
@@ -744,13 +718,12 @@ export function createTencentStaticProvider(options: TencentOptions = {}): Stati
     },
 
     async load(signal?: AbortSignal): Promise<Dataset> {
-      const raws = await fetchJsonWithRetry<RawKiwiAugment[]>(
-        doFetch,
+      const raws = await fetchJsonWithRetry<RawKiwiAugment[]>({
+        ...common,
         url,
-        '腾讯图鉴',
-        signal,
-        policy,
-      );
+        label: '腾讯图鉴',
+        ...(signal !== undefined ? { signal } : {}),
+      });
       const hextechs = normalizeKiwiAugments(raws);
       return {
         meta: {
@@ -778,11 +751,16 @@ export function createTencentRankingProvider(options: TencentOptions = {}): Rank
   const heroUrl = options.heroRankUrl ?? HERO_RANK_URL;
   const doFetch = options.fetchImpl ?? fetch;
   const statDates = options.statDate ? [options.statDate] : fallbackStatDates();
-  const policy = retryPolicyOf(options);
+  const common = httpOptionsOf(options, doFetch);
 
   const getFieldValue = async (u: string, signal?: AbortSignal): Promise<string | null> =>
     extractFieldValue(
-      await fetchJsonWithRetry<unknown>(doFetch, u, '腾讯排行榜', signal, policy),
+      await fetchJsonWithRetry<unknown>({
+        ...common,
+        url: u,
+        label: '腾讯排行榜',
+        ...(signal !== undefined ? { signal } : {}),
+      }),
     );
 
   return {
@@ -915,7 +893,7 @@ export async function fetchHeroDetail(
   try {
     const res = await doFetch(`${url}?championid=${championId}`, {
       // 超时只约束本次请求；外部取消信号仍会立即生效
-      signal: httpTimeoutSignal(options.signal, options.timeoutMs ?? FETCH_TIMEOUT_MS),
+      signal: httpTimeoutSignal(options.signal, options.timeoutMs ?? HERO_DETAIL_TIMEOUT_MS),
       headers: { 'user-agent': DEFAULT_UA },
     });
     if (!res.ok) return null;

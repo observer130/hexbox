@@ -8,6 +8,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { MemoryHttpCache } from '@hexbox/core';
+
 import {
   buildIdBridge,
   createTencentRankingProvider,
@@ -360,4 +362,27 @@ test('fetchHeroDetail：请求带超时，上游不响应时返回 null（不挂
 
   const result = await fetchHeroDetail(1, { fetchImpl, timeoutMs: 10 });
   assert.equal(result, null);
+});
+
+test('腾讯图鉴：条件缓存命中 304 时复用正文（发 If-None-Match）', async () => {
+  const url = 'https://t.test/kiwi.json';
+  const cache = new MemoryHttpCache();
+  cache.set(url, { body: JSON.stringify(KIWI_FIXTURE), etag: '"v1"' });
+  let ifNoneMatch: string | undefined;
+  const provider = createTencentStaticProvider({
+    augmentsUrl: url,
+    httpCache: cache,
+    fetchImpl: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      ifNoneMatch = (init?.headers as Record<string, string> | undefined)?.['if-none-match'];
+      // Response 构造器不允许 304（null body status），测试桩直接给最小形状
+      return { ok: false, status: 304, text: async () => '', headers: { get: () => null } } as unknown as Response;
+    }) as typeof fetch,
+  });
+  const ds = await provider.load();
+  assert.equal(ifNoneMatch, '"v1"');
+  assert.deepEqual(
+    ds.hextechs.map((h) => h.id),
+    normalizeKiwiAugments(KIWI_FIXTURE).map((h) => h.id),
+    '304 时应复用缓存正文（归一化结果与正常路径一致）',
+  );
 });

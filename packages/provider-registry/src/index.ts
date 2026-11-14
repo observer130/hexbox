@@ -15,7 +15,7 @@
  *   3. 跑 pnpm test && pnpm typecheck
  */
 
-import type { RankingProvider, StaticProvider } from '@hexbox/core';
+import type { HttpCache, RankingProvider, StaticProvider } from '@hexbox/core';
 
 import { createCommunityDragonProvider } from '@hexbox/provider-communitydragon';
 import {
@@ -23,12 +23,20 @@ import {
   createTencentStaticProvider,
 } from '@hexbox/provider-tencent';
 
+/** Provider 工厂的可选项（目前只有条件缓存；单测一般不传）。 */
+export interface ProviderFactoryOptions {
+  /** 条件请求缓存（生产装配传 data-store 的文件缓存，命中 304 时跳过下载）。 */
+  readonly httpCache?: HttpCache;
+}
+
 /** 启用的静态图鉴数据源（合并进 dataset.json）。 */
-export function createStaticProviders(): StaticProvider[] {
-  return [createCommunityDragonProvider(), createTencentStaticProvider()];
+export function createStaticProviders(options: ProviderFactoryOptions = {}): StaticProvider[] {
+  const cache = options.httpCache !== undefined ? { httpCache: options.httpCache } : {};
+  return [createCommunityDragonProvider(cache), createTencentStaticProvider(cache)];
 }
 
 /** 启用的官方统计数据源（写入 rankings.json）。 */
-export function createRankingProviders(): RankingProvider[] {
-  return [createTencentRankingProvider()];
+export function createRankingProviders(options: ProviderFactoryOptions = {}): RankingProvider[] {
+  const cache = options.httpCache !== undefined ? { httpCache: options.httpCache } : {};
+  return [createTencentRankingProvider(cache)];
 }

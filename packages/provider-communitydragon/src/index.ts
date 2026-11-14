@@ -11,13 +11,13 @@
  */
 
 import {
-  httpTimeoutSignal,
-  sleep,
+  fetchJsonWithRetry,
   type Augment,
   type AugmentMode,
   type AugmentRarity,
   type Champion,
   type Dataset,
+  type HttpCache,
   type Item,
   type StaticProvider,
 } from '@hexbox/core';
@@ -73,6 +73,8 @@ export interface CommunityDragonOptions {
   retryAttempts?: number;
   /** 重试等待（ms，默认 250；测试可调小）。 */
   retryDelayMs?: number;
+  /** 条件请求缓存（可选；data-cli 传文件缓存时同 URL 不变则走 304）。 */
+  httpCache?: HttpCache;
 }
 
 /** 单次请求超时（上游半开连接不能把整条同步挂死）。 */
@@ -185,36 +187,22 @@ export function createCommunityDragonProvider(
   const url = (file: string): string => `${base}/${locale}/v1/${file}`;
 
   /**
-   * 拉一个 JSON：**单次超时 + 有限重试**（审查 P1）。
+   * 拉一个 JSON：共用 core 的 `fetchJsonWithRetry`（超时 + 有限重试 + 条件缓存）。
    *
-   * - 超时：`AbortSignal.timeout` 与调用方取消信号合成，上游半开连接不会挂死同步；
-   * - 重试：只对 5xx/429/网络错误重试一次（4xx 是地址/权限问题，重试无意义）；
-   * - 外部取消（用户关程序 / 点取消）立即冒泡，不等重试。
+   * 超时/重试语义见 `packages/core/src/json-fetch.ts`；这里只提供 URL、UA 与文案。
    */
-  const getJson = async <T>(file: string, signal?: AbortSignal): Promise<T> => {
-    const u = url(file);
-    for (let attempt = 1; ; attempt++) {
-      try {
-        const res = await doFetch(u, {
-          signal: httpTimeoutSignal(signal, timeoutMs),
-          headers: { 'user-agent': 'hexbox/0.1 (+https://github.com/)' },
-        });
-        if (!res.ok) {
-          const err = new Error(`CommunityDragon ${file} 请求失败: HTTP ${res.status}`);
-          // 4xx（除 429）不重试：URL/权限错了，重试只会拖慢失败
-          if (res.status < 500 && res.status !== 429) {
-            throw Object.assign(err, { noRetry: true as const });
-          }
-          throw err;
-        }
-        return (await res.json()) as T;
-      } catch (err) {
-        const noRetry = (err as { noRetry?: boolean }).noRetry === true;
-        if (noRetry || signal?.aborted === true || attempt >= attempts) throw err;
-        await sleep(retryDelayMs);
-      }
-    }
-  };
+  const getJson = async <T>(file: string, signal?: AbortSignal): Promise<T> =>
+    await fetchJsonWithRetry<T>({
+      url: url(file),
+      label: `CommunityDragon ${file}`,
+      fetchImpl: doFetch,
+      headers: { 'user-agent': 'hexbox/0.1 (+https://github.com/)' },
+      timeoutMs,
+      retryAttempts: attempts,
+      retryDelayMs,
+      ...(signal !== undefined ? { signal } : {}),
+      ...(options.httpCache !== undefined ? { cache: options.httpCache } : {}),
+    });
 
   return {
     info: {
