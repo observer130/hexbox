@@ -20,7 +20,7 @@
     "dev:overlay": "pnpm --filter @hexbox/overlay dev"
   },
   "devDependencies": {
-    "@types/node": "^26.6.2",
+    "@types/node": "^24.19.2",
     "typescript": "^5.7.2"
   }
 }
