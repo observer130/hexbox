@@ -890,10 +890,16 @@ export async function runDataSync(options: SyncOptions): Promise<SyncReport> {
       //   · 覆盖率不足 —— 个别超时无所谓，但 60/173 这种大面积失败必须挡住
       //     （以前只要 `details.length > 0` 就写，等于把 113 个英雄的表静默删掉）。
       if (!aborted() && mayOverwriteDetails(details.length, total)) {
+        // 统计日期取**最大值**：详情按 championId 排序，首个英雄的上游日期可能滞后
+        //（审查 P2：托盘「统计日期」会因此偏旧）。
+        const detailDataDate = details.reduce(
+          (max, d) => (d.dataDate > max ? d.dataDate : max),
+          '',
+        );
         const set: ChampionDetailSet = {
           meta: {
             source: 'tencent-hero-detail',
-            dataDate: details[0]?.dataDate ?? '',
+            dataDate: detailDataDate,
             fetchedAt: now().toISOString(),
             count: details.length,
           },

@@ -65,6 +65,27 @@ test('fetchLatestStatDate：第一次就有数据 → 只请求一次', async ()
   assert.equal(calls, 1);
 });
 
+test('fetchLatestStatDate：候选日期按**北京时间**算，不随宿主机时区漂（审查 P2 回归）', async () => {
+  // 北京 2026-10-07 01:30 = UTC 2026-10-06 17:30。
+  // 本地时区实现（getFullYear/getMonth/getDate）在 UTC 机器上会算成 T-1=10-05，
+  // 固定 +8 口径必须是 10-06 —— CI（windows-latest）跑在 UTC，能抓住这个回归。
+  const beijingEarly = new Date('2026-10-06T17:30:00Z');
+  const seen: string[] = [];
+  const fetchImpl = (async (url: string) => {
+    seen.push(url);
+    return jsonResponse({}, 503);
+  }) as unknown as typeof fetch;
+
+  const r = await fetchLatestStatDate({
+    fetchImpl,
+    now: () => beijingEarly,
+    maxLookbackDays: 2,
+  });
+  assert.equal(r.dataDate, null);
+  assert.equal(seen[0]?.includes('dtstatdate=20261006'), true, `首个候选日应为 20261006，实际 ${seen[0]}`);
+  assert.equal(seen[1]?.includes('dtstatdate=20261005'), true);
+});
+
 test('fetchLatestStatDate：全部失败 → null + 错误摘要（不是"已是最新"）', async () => {
   const fetchImpl = (async () => jsonResponse({}, 503)) as unknown as typeof fetch;
   const r = await fetchLatestStatDate({ fetchImpl, now: () => NOW, maxLookbackDays: 2 });

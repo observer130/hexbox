@@ -18,6 +18,7 @@ import {
   RUNE_RANK_URL,
   extractFieldValue,
   parseDataDate,
+  shanghaiYmd,
 } from '@hexbox/provider-tencent';
 
 export interface StatDateCheckOptions {
@@ -42,11 +43,11 @@ export interface StatDateCheck {
   readonly error?: string;
 }
 
-/** `YYYYMMDD`（本地时间）→ 往前推 `days` 天。 */
+/** `YYYYMMDD`（**北京时间**）→ 往前推 `days` 天。 */
 function statDateDaysAgo(now: Date, days: number): string {
-  const d = new Date(now.getTime() - days * 86_400_000);
-  const pad = (n: number): string => String(n).padStart(2, '0');
-  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
+  // ⚠️ 必须与 provider-tencent 的统计日期口径一致（固定 +8），不能用宿主机本地时区：
+  // 海外用户/凌晨窗口会把 T-1 算成另一天，白试一天（审查 P2）。
+  return shanghaiYmd(new Date(now.getTime() - days * 86_400_000));
 }
 
 const DEFAULT_UA = 'hexbox/0.2 (+https://github.com/)';

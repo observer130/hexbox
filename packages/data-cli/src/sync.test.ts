@@ -726,6 +726,27 @@ test('runDataSync：详情 10/10 → 照常写入（下限不误杀正常情况�
   assert.ok(writes.includes('builds'));
 });
 
+test('runDataSync：详情统计日期取**最大值**（不是排序后第一个英雄；审查 P2）', async () => {
+  const { store, files } = memoryStore();
+  const dates = ['20261004', '20261006', '20261005'];
+  await runDataSync({
+    storeRoot: 'memory',
+    store,
+    staticProviders: [
+      staticProvider('cdragon', async () =>
+        ds('cdragon', { champions: Array.from({ length: 3 }, (_, i) => champion(i + 1)) }),
+      ),
+    ],
+    rankingProviders: [],
+    // 详情按 championId 排序，但各自上游统计日期可能滞后一天 → meta 应取最大日期
+    fetchDetails: async (ids) => ids.map((id, i) => detail(id, dates[i])),
+    buildTemplates: async () => packOf([1]),
+  });
+
+  const written = files.get('builds') as ChampionDetailSet;
+  assert.equal(written.meta.dataDate, '20261006', '托盘统计日期不能取第一个英雄的旧日期');
+});
+
 test('runDataSync：60000+ 变体条目不计入详情分母（真实 254 行图鉴只能抓到 173 条）', async () => {
   const { store, writes } = memoryStore();
   const requested: number[][] = [];
