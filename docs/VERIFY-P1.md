@@ -4,7 +4,7 @@
 > 离线定案了（回放能力 + 留存的选人帧）。仍然必须上机的只剩 3 项 —— 都是
 > "屏幕上的东西人眼才能判断"那一类。
 
-代码侧全绿（`pnpm test` 1192 项 / `pnpm check:docs` 通过）。
+代码侧全绿（`pnpm test` 1175 项 / `pnpm check:docs` 通过）。
 
 > **上机前先跑前置检查**：`scripts\preflight-acceptance.ps1`（见 §D0，只读、不启动覆盖层）。
 
