@@ -3,7 +3,7 @@
  *
  * 一条真机路径就能说明为什么这些断言值得写：
  *   选人 → 进局（正常，不能恢复）→ 掉线（`Reconnect`，只记账）→ 回到 `InProgress`
- *   （**恢复恰好一次**：重置熔断 + 补英雄身份）→ 之后每 2 秒轮询都**不再**恢复。
+ *   （**恢复恰好一次**：重置熔断）→ 之后每 2 秒轮询都**不再**恢复。
  */
 
 import assert from 'node:assert/strict';
@@ -16,8 +16,7 @@ test('正常进入对局：不是重连，不做任何恢复', () => {
     armed: false,
     phase: 'InProgress',
     chainState: 'running',
-    championKnown: true,
-  });
+      });
   assert.equal(step.recover, false);
   assert.equal(step.stage, 'normal');
   assert.equal(step.armed, false);
@@ -28,8 +27,7 @@ test('★ 进入 Reconnect 只记账，不恢复（重连期间不做任何动�
     armed: false,
     phase: RECONNECT_PHASE,
     chainState: 'failed',
-    championKnown: false,
-  });
+      });
   assert.equal(step.armed, true);
   assert.equal(step.recover, false, 'Reconnect 本身不许触发恢复动作');
   assert.equal(step.stage, 'gap');
@@ -40,11 +38,9 @@ test('★ 重连后回到 InProgress：恢复一次，并重置本局熔断', ()
     armed: true,
     phase: 'InProgress',
     chainState: 'failed',
-    championKnown: false,
-  });
+      });
   assert.equal(step.recover, true);
   assert.equal(step.resetChainFuse, true, 'failed = 本局放弃过，必须重置');
-  assert.equal(step.heroFromCache, false, '英雄未知 → 要走 2999 兜底');
   assert.equal(step.armed, false, '必须消费掉记账');
   assert.equal(step.stage, 'recovered');
   assert.ok(step.reason.includes('重置熔断'), '原因要能直接进日志');
@@ -56,29 +52,27 @@ test('重连后回到 InProgress：链路正常时**不**重置熔断（不该�
       armed: true,
       phase: 'InProgress',
       chainState: state,
-      championKnown: true,
-    });
+          });
     assert.equal(step.recover, true, `${state}: 仍要恢复（英雄/标签仍可能要补）`);
     assert.equal(step.resetChainFuse, false, `${state}: 只有 failed 才重置`);
-    assert.equal(step.heroFromCache, true);
   }
 });
 
 test('★ 一次重连只恢复一次：记账被消费后，后续每轮都是 normal', () => {
   let armed = false;
   // 掉线
-  let step = reconnectStep({ armed, phase: RECONNECT_PHASE, chainState: 'failed', championKnown: false });
+  let step = reconnectStep({ armed, phase: RECONNECT_PHASE, chainState: 'failed' });
   armed = step.armed;
   assert.equal(armed, true);
 
   // 回到对局：恢复一次
-  step = reconnectStep({ armed, phase: 'InProgress', chainState: 'failed', championKnown: false });
+  step = reconnectStep({ armed, phase: 'InProgress', chainState: 'failed' });
   armed = step.armed;
   assert.equal(step.recover, true);
 
   // 之后连续三轮（模拟 2 秒轮询）：**一次都不许再恢复**
   for (let i = 0; i < 3; i++) {
-    step = reconnectStep({ armed, phase: 'InProgress', chainState: 'running', championKnown: true });
+    step = reconnectStep({ armed, phase: 'InProgress', chainState: 'running' });
     armed = step.armed;
     assert.equal(step.recover, false, `第 ${i + 1} 轮不该重复恢复`);
     assert.equal(step.stage, 'normal');
@@ -87,11 +81,11 @@ test('★ 一次重连只恢复一次：记账被消费后，后续每轮都是 
 
 test('★ 选人相位把记账清掉：避免"选人 → 进局"被误判成重连恢复', () => {
   // 掉线记账
-  let armed = reconnectStep({ armed: false, phase: RECONNECT_PHASE, chainState: 'idle', championKnown: true }).armed;
+  let armed = reconnectStep({ armed: false, phase: RECONNECT_PHASE, chainState: 'idle' }).armed;
   assert.equal(armed, true);
 
   // 回到选人（真机上重连后可能先回大厅/选人）
-  const cleared = reconnectStep({ armed, phase: 'ChampSelect', chainState: 'idle', championKnown: true });
+  const cleared = reconnectStep({ armed, phase: 'ChampSelect', chainState: 'idle' });
   assert.equal(cleared.armed, false, '记账必须被清掉');
   assert.equal(cleared.recover, false);
   assert.equal(cleared.stage, 'idle');
@@ -102,15 +96,14 @@ test('★ 选人相位把记账清掉：避免"选人 → 进局"被误判成重
     armed: cleared.armed,
     phase: 'InProgress',
     chainState: 'idle',
-    championKnown: true,
-  });
+      });
   assert.equal(then.recover, false);
   assert.equal(then.stage, 'normal');
 });
 
 test('终局/离开相位一律复位（含 None/WaitingForStats/PreEndOfGame/EndOfGame/GameStart）', () => {
   for (const phase of ['None', 'Lobby', 'Matchmaking', 'ReadyCheck', 'GameStart', 'WaitingForStats', 'PreEndOfGame', 'EndOfGame']) {
-    const step = reconnectStep({ armed: true, phase, chainState: 'idle', championKnown: true });
+    const step = reconnectStep({ armed: true, phase, chainState: 'idle' });
     assert.equal(step.armed, false, `${phase}: 必须复位`);
     assert.equal(step.recover, false, `${phase}: 不许恢复`);
     assert.equal(step.stage, 'idle');
@@ -118,7 +111,7 @@ test('终局/离开相位一律复位（含 None/WaitingForStats/PreEndOfGame/En
 });
 
 test('相位名大小写敏感：不认识的字符串按"离开对局"处理（宁可复位，不可误恢复）', () => {
-  const step = reconnectStep({ armed: true, phase: 'inprogress', chainState: 'failed', championKnown: false });
+  const step = reconnectStep({ armed: true, phase: 'inprogress', chainState: 'failed' });
   assert.equal(step.recover, false);
   assert.equal(step.armed, false);
 });

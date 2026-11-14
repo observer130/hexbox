@@ -1,5 +1,5 @@
 /**
- * 悬浮窗可见性与视觉循环开关判定（纯函数）
+ * 覆盖层可见性与视觉循环开关判定（纯函数）
  *
  * 为什么抽出来：主进程需要「用户可见状态」与「实际已应用状态」比较后
  * 才动窗口 —— 直接调 `showInactive()`/`hide()` 有两个真实问题：
@@ -19,24 +19,13 @@
  *     —— 用户反馈"悬浮窗大小和位置不对"即由此而来。
  *   · 连不上客户端时也**不再**弹窗（用户选择"干脆不要了，只写日志"）。
  *
- * ⚠️ 2026-10-04 追加决策（局内海克斯识别开工前确认）：
- *   **局内也不要侧边窗** —— 局内的信息载体是"海克斯卡上的强度标签"
- *   （见 augment-panel.ts 与 docs/AUGMENT-PANEL.md），侧边窗的
- *   "该英雄海克斯强度列表"被它取代。因此 `showPanel` 现恒为 false；
- *   侧边窗代码本身留到 S4 再整体删除（保留是为了让本改动可回退、
- *   且不必在这一步动窗口/渲染端）。
+ * ⚠️ 2026-11：侧边面板已**整体移除**（窗口/渲染端/preload API 全部删除），
+ * 现在只剩"全屏标签画布（选人阶段）"这一块窗口；可见性判定因此只剩
+ * `showVision` / `visionActive` 两个字段。
  */
 
 /** 一份「应该长什么样」的判定结果。 */
 export interface VisibleState {
-  /**
-   * 侧边悬浮窗是否应显示。
-   *
-   * ⚠️ 恒为 false（用户 2026-10-04 决策：局内也不要侧边窗，局内信息由
-   * 海克斯卡上的标签承担）。字段保留到 S4 删除侧边窗为止 ——
-   * 主进程仍在用它决定 show/hide，因此不要在这里改成"删字段"。
-   */
-  readonly showPanel: boolean;
   /** S2 全屏覆盖层是否应显示。 */
   readonly showVision: boolean;
   /**
@@ -60,19 +49,14 @@ export interface VisibleState {
  * 依据当前阶段与连接状态算出应显示什么。
  *
  * @param phase     游戏流阶段（`ChampSelect` / `InProgress` / `None` …）。
- * @param connected 是否已连上客户端（有凭证即视为已连；仅用于日志/诊断语义，
- *                  不再影响窗口显隐）。
+ * @param _connected 是否已连上客户端（仅日志/诊断语义；不影响窗口显隐）。
  *
- * 规则：
- *   - 侧边窗：**不再显示**（选人阶段看覆盖层；局内看海克斯卡上的标签）。
- *   - 覆盖层与视觉循环：**仅选人阶段**（局内海克斯面板的门控在 S5.4 接入）。
+ * 规则：覆盖层与视觉循环 **仅选人阶段**开启；其它阶段都隐藏、不跑识别
+ *（局内海克斯面板的门控由 `augmentChainActive()` 单独判定）。
  */
 export function decideVisible(phase: string, _connected: boolean): VisibleState {
   const inChampSelect = phase === 'ChampSelect';
   return {
-    // connected 目前不改变可见性（用户要求不再弹诊断面板），保留形参
-    // 是为了让调用方不必在阶段判断之外再做一次连接状态分支。
-    showPanel: false,
     showVision: inChampSelect,
     visionActive: inChampSelect,
   };
@@ -80,12 +64,7 @@ export function decideVisible(phase: string, _connected: boolean): VisibleState 
 
 /** 两份判定结果是否等价（用于避免每轮无谓地 show/hide）。 */
 export function sameVisibleState(a: VisibleState | null, b: VisibleState): boolean {
-  return (
-    a !== null &&
-    a.showPanel === b.showPanel &&
-    a.showVision === b.showVision &&
-    a.visionActive === b.visionActive
-  );
+  return a !== null && a.showVision === b.showVision && a.visionActive === b.visionActive;
 }
 
 /* ------------------------------------------------------------------ */

@@ -6,15 +6,13 @@
  * 客户端重启型重连会走 `Reconnect` 相位再回到 `InProgress`。这期间真实发生过的事：
  *   · 屏幕流早就断了，`AugmentController` 那一代已经作废 —— 标签再也不会出现；
  *   · 我们**本局放弃**（`failed`）的闩锁还在：即使流恢复了，本局也不会再起；
- *   · `myChampionId` 可能是 0（重连时选人会话已消失，而 2999 那一刻还没起来）。
- * 三个问题各修一处都不够：必须**只在一个明确的时机**统一处理，且不能误触发。
+ * 两个问题各修一处都不够：必须**只在一个明确的时机**统一处理，且不能误触发。
  *
  * ── 借来的那条规则（参考实现的重连恢复服务）────────────────────────────────
  *
  *   · **动作只在 `InProgress` 上做**：`Reconnect` 本身只"记账"，不恢复；
  *   · **遇到选人/终局相位直接清位**：避免"选人 → 进局"这种正常转移被当成重连恢复；
- *   · **恢复时先重置本局熔断**（原文：进程中断后熔断/重试限制不再可信）；
- *   · 英雄身份**优先本局缓存**，缺了才去 2999 兜底。
+ *   · **恢复时先重置本局熔断**（原文：进程中断后熔断/重试限制不再可信）。
  *
  * 单测锁住的核心不变量：**一次重连只恢复一次**（`armed` 必须被消费掉）——
  * 否则每 2 秒轮询都会重跑一遍恢复，日志刷屏之外还会反复重推标签。
@@ -48,8 +46,6 @@ export interface ReconnectStepInput {
   readonly phase: string;
   /** 局内链路的启停状态（`failed` = 本局放弃了，恢复时必须重置）。 */
   readonly chainState: AugmentChainState;
-  /** 本局英雄身份是否已经知道（`myChampionId > 0`）。 */
-  readonly championKnown: boolean;
 }
 
 export interface ReconnectStep {
@@ -59,8 +55,6 @@ export interface ReconnectStep {
   readonly recover: boolean;
   /** 是否要重置"本局不重试"的熔断（仅当它确实是 `failed`）。 */
   readonly resetChainFuse: boolean;
-  /** 英雄身份是否可以直接用本局缓存（true = 不必去 2999 兜底）。 */
-  readonly heroFromCache: boolean;
   readonly stage: ReconnectStage;
   /** 人类可读的原因（直接进日志；不恢复时也要能看出为什么）。 */
   readonly reason: string;
@@ -73,14 +67,13 @@ export interface ReconnectStep {
  * 把返回值里的 `armed` 存回进程状态。
  */
 export function reconnectStep(input: ReconnectStepInput): ReconnectStep {
-  const { phase, chainState, championKnown } = input;
+  const { phase, chainState } = input;
 
   if (phase === RECONNECT_PHASE) {
     return {
       armed: true,
       recover: false,
       resetChainFuse: false,
-      heroFromCache: championKnown,
       stage: 'gap',
       reason: '进入重连相位（先记账，等回到对局中再恢复；重连期间不做任何动作）',
     };
@@ -92,7 +85,6 @@ export function reconnectStep(input: ReconnectStepInput): ReconnectStep {
         armed: false,
         recover: false,
         resetChainFuse: false,
-        heroFromCache: championKnown,
         stage: 'normal',
         reason: '对局中（不是重连恢复，无需动作）',
       };
@@ -103,12 +95,10 @@ export function reconnectStep(input: ReconnectStepInput): ReconnectStep {
       armed: false,
       recover: true,
       resetChainFuse: fuse,
-      heroFromCache: championKnown,
       stage: 'recovered',
       reason:
         '重连后回到对局中 → 执行恢复' +
-        (fuse ? '（本局链路曾被判 failed，先重置熔断）' : '（链路状态正常）') +
-        (championKnown ? '；英雄身份复用本局缓存' : '；英雄身份缺失，需要 2999 兜底'),
+        (fuse ? '（本局链路曾被判 failed，先重置熔断）' : '（链路状态正常）'),
     };
   }
 
@@ -122,7 +112,6 @@ export function reconnectStep(input: ReconnectStepInput): ReconnectStep {
     armed: false,
     recover: false,
     resetChainFuse: false,
-    heroFromCache: championKnown,
     stage: 'idle',
     reason: stillInMatchFlow
       ? `相位 ${phase} 不属于重连恢复时机（只在 InProgress 上恢复）`

@@ -28,7 +28,6 @@ test('decideVisible：选人阶段**只**显示覆盖层，不弹侧边窗', () 
   // 2026-10-04 用户决策：选人阶段的信息由覆盖层画在游戏画面内
   // （卡片下方 / 顶栏逐格），侧边窗与它重复且会叠在英雄立绘上抢地方。
   assert.deepEqual(decideVisible('ChampSelect', true), {
-    showPanel: false,
     showVision: true,
     visionActive: true,
   });
@@ -38,37 +37,22 @@ test('decideVisible：对局中**也不**显示侧边窗（局内信息在海克
   // 2026-10-04 追加决策：局内的信息载体是"海克斯卡上的强度标签"
   // （augment-panel + docs/AUGMENT-PANEL.md），侧边窗的强度列表被它取代。
   assert.deepEqual(decideVisible('InProgress', true), {
-    showPanel: false,
     showVision: false,
     visionActive: false,
   });
 });
 
-test('decideVisible：任何阶段都不再显示侧边窗（锁住"已移除"这一语义）', () => {
-  for (const phase of ['None', 'Lobby', 'ChampSelect', 'InProgress', 'EndOfGame', '']) {
-    assert.equal(decideVisible(phase, true).showPanel, false, `阶段 ${phase}`);
-    assert.equal(decideVisible(phase, false).showPanel, false, `阶段 ${phase}（未连接）`);
-  }
-});
 
 test('decideVisible：大厅等非对局阶段隐藏侧边窗（已连上，不是故障）', () => {
   for (const phase of ['None', 'Lobby', 'Matchmaking', 'ReadyCheck', 'EndOfGame']) {
     assert.deepEqual(
       decideVisible(phase, true),
-      { showPanel: false, showVision: false, visionActive: false },
+      { showVision: false, visionActive: false },
       `阶段 ${phase} 不该显示侧边窗`,
     );
   }
 });
 
-test('decideVisible：连不上客户端也不再弹窗（用户选择"只写日志"）', () => {
-  // 回归：此处曾是「未连接必须显示诊断面板」。用户 2026-10-04 明确改为
-  // 不弹窗、只写日志 —— 排查信息在终端输出与 overlay-live.log 里。
-  for (const phase of ['None', 'Lobby', 'ChampSelect', '', 'InProgress']) {
-    const v = decideVisible(phase, false);
-    assert.equal(v.showPanel, false, `阶段 ${phase} 的侧边窗显隐`);
-  }
-});
 
 test('decideVisible：未连接时不启动视觉循环（没有客户端就没有选人）', () => {
   const v = decideVisible('None', false);

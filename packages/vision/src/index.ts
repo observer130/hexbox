@@ -10,7 +10,6 @@ export * from './card-overlay.ts';
 export * from './confirmed.ts';
 export * from './label-memory.ts';
 export * from './visibility.ts';
-export * from './panel-geometry.ts';
 export * from './augment-panel.ts';
 export * from './augment-cadence.ts';
 export * from './augment-ocr.ts';
