@@ -67,8 +67,8 @@ pnpm dev:web                                  # http://localhost:5273
 
 `pnpm check:docs` → `pnpm typecheck` → `pnpm test` → `pnpm build` (CI runs the same on
 `windows-latest`). Node's built-in runner; `pnpm --filter @hexbox/core test` is faster.
-**Keep them green and add tests for new behavior.** Current: **1190** — core 68 /
-vision 723 / lcu 147 / overlay 72 / provider-communitydragon 16 / provider-tencent 49 /
+**Keep them green and add tests for new behavior.** Current: **1192** — core 68 /
+vision 723 / lcu 148 / overlay 72 / provider-communitydragon 16 / provider-tencent 50 /
 data-store 25 / data-cli 58 / web 32 (`pnpm test` is the source of truth; the overlay's
 Electron runtime is not testable — its tests cover replay-safe parts and the self-test
 scenario logic only). `pnpm typecheck` also checks `scripts/*.mts`
@@ -139,7 +139,8 @@ Read the doc named per area first; every rule below cost a real bug.
   `requestInsecure`): a bare `fetch` fails with `SELF_SIGNED_CERT_IN_CHAIN` (hit three
   times), so never set `NODE_TLS_REJECT_UNAUTHORIZED` — it is process-wide and disables
   certificate checks for every concurrent HTTPS request (data sync, update check);
-  `getOrNull()` for normal 404s, `LcuHttpError.isAuthFailure` before dropping credentials.
+  `getOrNull()` only swallows 400/404 (normal "no session"); 5xx throws so callers can
+  tell a server failure from an empty session.
 - Writing player data: only ever replace `hexbox…`-titled item sets (Brawl's map ID is
   **12**), and `itemone_json` lists **20** entries = 其余成装 with the top **5** = 出门装
   (we write only the top 1) — that overlap is official, not a bug.
