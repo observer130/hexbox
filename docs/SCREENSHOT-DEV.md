@@ -83,7 +83,7 @@
 | `card-overlay.ts` | 标签布局（卡片下方 / 顶栏槽位下方 → 屏幕坐标）| ✅ |
 | `confirmed.ts` | 确认态**顶栏逐格**识别（占用检测 + 16/24 灰度 NCC）| ✅ |
 | `label-memory.ts` | 按位置记忆标签，TTL 内补齐单轮漏检 | ✅（闭包状态）|
-| `visibility.ts` | 侧边窗/覆盖层/视觉循环何时该活跃 | ✅ |
+| `visibility.ts` | 覆盖层/视觉循环何时该活跃（侧边面板 2026-11 已移除） | ✅ |
 | `types.ts` | `Rect` / `CardSlot` / `MatchResult` | — |
 
 `apps/overlay` 增加：
@@ -194,7 +194,7 @@ pnpm templates   # = data-cli「templates」命令
 
 ### 3.4 绘制
 
-复用现有窗口机制（侧边栏已验证）：
+复用现有覆盖层窗口机制（透明窗口/置顶/定位已在 S2 验证）：
 
 ```js
 transparent: true, frame: false,
@@ -227,7 +227,7 @@ S1 期间的实现要点（都来自真实教训）：
 - **模板离线**：`pnpm templates` 构建期生成 `data/templates.json`，
   调试工具运行时只读本地（此前用隐藏窗口 + Chromium 解码 + 现场联网，又慢又脆）。
 - **窗口矩形统一**：`findGameWindowRect` 抽到 `vision/win-geometry.ts`，
-  悬浮窗主进程与调试工具共用，避免两份实现漂移。
+  覆盖层主进程与调试工具共用，避免两份实现漂移。
 
 **真机迭代回路（需要你）**：在选人阶段运行
 
@@ -274,7 +274,7 @@ node --experimental-strip-types scripts/verify-champ-select-stage.mts [帧目录
 
 | 步骤 | 说明 |
 |---|---|
-| S4.1 | 移除侧边悬浮窗面板（保留截屏覆盖层）|
+| S4.1 | ✅ 已完成（2026-11）：移除侧边悬浮窗面板（保留截屏覆盖层）|
 | S4.2 | 出装已由配装方案承担，覆盖层不显示出装 |
 
 ## 五、风险与对策

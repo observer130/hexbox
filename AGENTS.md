@@ -67,8 +67,8 @@ pnpm dev:web                                  # http://localhost:5273
 
 `pnpm check:docs` → `pnpm typecheck` → `pnpm test` → `pnpm build` (CI runs the same on
 `windows-latest`). Node's built-in runner; `pnpm --filter @hexbox/core test` is faster.
-**Keep them green and add tests for new behavior.** Current: **1175** — core 68 /
-vision 705 / lcu 150 / overlay 72 / provider-communitydragon 16 / provider-tencent 49 /
+**Keep them green and add tests for new behavior.** Current: **1142** — core 53 /
+vision 695 / lcu 142 / overlay 72 / provider-communitydragon 16 / provider-tencent 49 /
 data-store 25 / data-cli 58 / web 32 (`pnpm test` is the source of truth; the overlay's
 Electron runtime is not testable — its tests cover replay-safe parts and the self-test
 scenario logic only). `pnpm typecheck` also checks `scripts/*.mts`
@@ -87,6 +87,10 @@ Read the doc named per area first; every rule below cost a real bug.
 - **Untestable in CI** → keep decisions in pure functions under `packages/core` or
   `packages/vision` (an inline "should the panel show" in the main process once made the
   diagnostic panel appear only on cold start).
+- **Side panel removed (2026-11): do not reintroduce a second window.** Only the full-screen
+  click-through label canvas exists; `decideVisible()` returns just `showVision`/`visionActive`.
+  The old panel window, `renderer.ts`/`index.html`, panel CSS, preload panel APIs and IPC
+  were deleted in S4.
 - **No visible window: the tray is the only entry point and the only way to quit.**
   Closing hides (`attachCloseToTrayHide`); the only exit is the tray's 退出 → `quitApp()`.
   `requestSingleInstanceLock()` is mandatory (two processes = overlapping labels +

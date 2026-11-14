@@ -1,7 +1,10 @@
-# 悬浮窗分阶段设计：调研依据与已确认事实
+# 覆盖层分阶段设计：调研依据与已确认事实
 
-> 本文记录**为什么**悬浮窗按现在这样分阶段设计，以及调研中查证到的事实。
+> 本文记录**为什么**覆盖层按阶段这样设计（选人胜率 / 局内海克斯强度），以及调研中查证到的事实。
 > 目的是避免后人（或 AI）重走弯路。
+>
+> ⚠️ 2026-11：原「侧边悬浮窗面板」已整体移除；选人胜率改由**全屏截屏覆盖层**承担。
+> 下文提到的「悬浮窗」是当时的设计对象，保留作历史依据。
 >
 > 实现状态见 [apps/overlay/README.md](../apps/overlay/README.md)。
 
@@ -14,7 +17,7 @@
 |---|---|---|
 | 英雄选择 | 选**英雄** | 英雄的海斗胜率 |
 | 对局中 | 选**海克斯** | **以该英雄为准**的海克斯强度 |
-| 对局中 | 出装 | 出装建议（→ 配装方案，不在悬浮窗） |
+| 对局中 | 出装 | 出装建议（→ 配装方案，不在覆盖层） |
 
 ## 二、调研对象
 
@@ -100,7 +103,7 @@ https://mlol.qt.qq.com/go/battle_info/odp_proxy/fuwen_hero_rank?championid=<英�
 | 海克斯强度 | 放**局内**，标为「以该英雄为准」 | 与同类工具一致 |
 | 最佳拍档 | 不显示 | 用户明确要求 |
 | 避坑海克斯 | 不做 | 同上 |
-| 出装 | **写入配装方案**，不放悬浮窗 | 见 [build-slots.md](build-slots.md) |
+| 出装 | **写入配装方案**，不放覆盖层 | 见 [build-slots.md](build-slots.md) |
 | 鞋栏 | **不生成** | 一行只有一件装备，游戏内既不好看也无信息量 |
 | 预抓范围 | 254 条英雄条目全抓（**173 真实英雄 + 81 条同一英雄的变体条目**）| 实测 173 个英雄有官方统计；81 条变体条目没有独立统计 |
 
@@ -122,14 +125,14 @@ https://mlol.qt.qq.com/go/battle_info/odp_proxy/fuwen_hero_rank?championid=<英�
 
 | 设计要点 | 实现位置 |
 |---|---|
-| 分阶段视图（胜率/强度/出装） | `packages/core/src/overlay-view.ts` |
+| 英雄 ID 归一化 / 详情查找 | `packages/core/src/overlay-view.ts` |
 | 单英雄详情拉取与解析 | `packages/provider-tencent/src/index.ts` |
 | 落盘 `builds.json` | `packages/data-store` + `packages/data-cli` |
-| 悬浮窗分阶段渲染 | `apps/overlay/src/renderer/renderer.ts` |
+| 全屏标签画布渲染 | `apps/overlay/src/renderer/overlay-canvas.ts` |
 | 出装 → 配装方案 | `packages/core/src/itemset.ts` |
 
 ### 纯函数放 core 的原因
 
-悬浮窗需要**管理员权限 + 真实桌面会话**，CI 根本跑不起来。
+覆盖层（Electron）需要**管理员权限 + 真实桌面会话**，CI 根本跑不起来。
 只有把逻辑抽成纯函数（`overlay-view.ts` / `itemset.ts`），
 才能被单元测试覆盖。

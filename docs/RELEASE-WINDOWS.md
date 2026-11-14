@@ -1,4 +1,4 @@
-# Windows 打包发布说明（hexbox 悬浮窗）
+# Windows 打包发布说明（hexbox 覆盖层）
 
 > 面向"把 `apps/overlay` 做成一个可分发的 `.exe`"这件事的**全部事实与取舍**。
 > 每一条都来自本机实测（命令与输出在文里给出），不是推测。
@@ -51,7 +51,7 @@ files:
 加上排除后（并再去掉 §七 那 4 个诊断入口）asar 只剩 15 个条目、**0.30 MB**：
 
 ```text
-\dist\main\index.cjs  \dist\preload\index.cjs  \dist\renderer\{renderer.js,overlay-canvas.js,
+\dist\main\index.cjs  \dist\preload\index.cjs  \dist\renderer\{overlay-canvas.js,
 capture\worker.js,*.html,styles.css}  \package.json
 ```
 
@@ -117,7 +117,7 @@ Windows 的"文档"可能被 OneDrive / 组策略重定向，只有 known folder
 
 * `packages/data-cli/src/sync.ts` 的 `runDataSync()`（+ `runDefaultSync()` 生产装配）：
   图鉴 → 榜单 → 详情 → 模板，全部可注入、可单测；`cli.ts` 只负责打印进度；
-* 悬浮窗的 `main/data-update-flow.ts` 在**用户确认后**调用同一条流水线，写入
+* 覆盖层（托盘「更新数据」）的 `main/data-update-flow.ts` 在**用户确认后**调用同一条流水线，写入
   `文档\hexbox\data`，成功后重读数据并刷新托盘；
 * 启动检查只做一次轻量探测（`fetchLatestStatDate()`：一个接口、往回最多 3 天），
   24h 节流，**只提示不下载**；
@@ -341,8 +341,8 @@ ode_moduleselectrondist"
 
 ## 九、首次运行体验（用户双击 exe 后看到什么）
 
-**当前行为（如实）**：`decideVisible()` 里 `showPanel` 恒为 `false`（用户 2026-10-04
-的决策：连不上客户端也不弹诊断面板），所以**没有客户端时双击程序 = 屏幕上什么都不出现**，
+**当前行为（如实）**：覆盖层没有可见 UI（只有一块点击穿透的全屏透明标签画布；侧边面板
+已在 2026-11 整体移除），所以**没有客户端时双击程序 = 屏幕上什么都不出现**，
 只有系统托盘外的一个不可见常驻进程。全部信息在**日志文件**里：
 
 | 位置 | 内容 |

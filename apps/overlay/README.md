@@ -1,6 +1,6 @@
-# 悬浮窗（Overlay）
+# 覆盖层（Overlay）
 
-游戏内悬浮窗辅助。**不注入 / 不读内存 / 不打开游戏进程句柄 / 不解析封包**。
+游戏内覆盖层辅助。**不注入 / 不读内存 / 不打开游戏进程句柄 / 不解析封包**。
 
 ## 快速开始
 
@@ -8,7 +8,7 @@
 # 1. 先同步数据（仓库根执行）
 pnpm sync
 
-# 2. 启动悬浮窗（仓库根执行）
+# 2. 启动覆盖层（仓库根执行）
 pnpm dev:overlay
 ```
 
@@ -22,7 +22,7 @@ pnpm dev:overlay
 
 | 阶段 | 显示内容 | 状态 |
 |---|---|---|
-| **英雄选择** | 所选英雄的**海斗胜率**（侧边面板） | 已停用（`showPanel` 恒 false，代码留待 S4 删除） |
+| **英雄选择** | 所选英雄的**海斗胜率**（全屏截屏覆盖层） | 已实现（待真机复验）|
 | **英雄选择** | **截屏覆盖层**：每张英雄卡片下方 → 该英雄胜率 | 已实现（待真机复验）|
 | **英雄选择（已锁定）** | 顶栏「可用」栏**逐格**显示备选英雄胜率 | 已实现（待真机复验）|
 | **对局中** | 该英雄口径的**海克斯强度 S/A/B/C + 登场率** | 已实现 |
@@ -413,7 +413,7 @@ node --experimental-strip-types scripts/preview-augment-labels.mts `
 > 与 `dataset.items` join，不能用 CDragon 的 `Augment.id` 硬匹配 ——
 > 两套官方 ID 不可换算。
 
-> **出装不在悬浮窗里**：出装通过配装方案直接写进客户端
+> **出装不在覆盖层里**：出装通过配装方案直接写进客户端
 > （见 [README.md](../../README.md) 的「配装方案写入」）。
 
 **不采用的手段**：读内存、注入、打开游戏进程句柄、解析封包。
@@ -422,7 +422,7 @@ node --experimental-strip-types scripts/preview-augment-labels.mts `
 ## 架构
 
 ```
-src/main/index.ts       主进程：LCU 轮询、数据读取、窗口定位/穿透
+src/main/index.ts       主进程：LCU 轮询、数据读取、标签画布接线
                         + 阶段启停局内链路 + 画布归属（选人/局内）交接
                         + **单实例锁** + 托盘接线 + 「关窗口 = 最小化到托盘」
 **托盘图标**（常驻覆盖层唯一的交互入口）：菜单（状态/统计日期/
@@ -441,7 +441,7 @@ src/main/augment-stream.ts 常驻截屏流（局内门控/识别的主进程侧�
 src/capture/worker.ts   截屏 worker（渲染端）：取帧 → 门控检测 → 每卡指纹 → 全分辨率识别（可只认指定卡）
 src/debug-augment.ts    录制/验证工具：只用控制器 + 录制专属职责（产物/取证/生命周期/兜底路径）
 src/preload/index.ts    桥接：只暴露白名单 IPC（contextIsolation=true）
-src/renderer/           渲染端：纯浏览器，只接收主进程推送的状态
+src/renderer/           渲染端：overlay-canvas.ts（标签）+ capture/worker.ts（截屏），纯浏览器
 build/tray/             托盘图标（tray.ico + tray-16/20/24/32/48.png，由
                         scripts/make-tray-icon.py 生成；打包走 electron-builder 的 extraResources）
 ```
@@ -462,43 +462,47 @@ build/tray/             托盘图标（tray.ico + tray-16/20/24/32/48.png，由
 
 **为什么渲染端不做 IO**：渲染端是浏览器环境，`@hexbox/lcu`（child_process）、
 `@hexbox/data-store`（fs）无法在浏览器 bundle 中解析。
-所有 Node 工作集中在主进程，渲染端通过 `overlay:state` 单向接收状态。
+所有 Node 工作集中在主进程，标签画布只通过 `overlay:vision` 单向接收"画哪些标签"。
 
 ## 关键实现点
 
 ### 窗口
 
-- 尺寸 340×560，`transparent: true` + `frame: false` + `alwaysOnTop: 'screen-saver'`
-- `focusable: false` —— **不抢焦点**，否则游戏丢输入
-- `showInactive()` 显示，不用 `show()`
-- `setIgnoreMouseEvents(true, { forward: true })` 鼠标穿透（右上角按钮可切换）
+- **只有一块**全屏透明标签画布（`label-overlay.ts`）：铺满游戏所在显示器的
+  `workArea`，`transparent + frame:false + alwaysOnTop:'screen-saver'`，
+  `focusable:false` + `setIgnoreMouseEvents(true, { forward: true })`（永久点击穿透，
+  悬停只读鼠标位置画提示框，点击 100% 落到游戏）
+- 画布位图尺寸 = 窗口内尺寸 × DPR，由渲染端在每帧绘制前按 `innerWidth × dpr` 设置
+- 侧边面板（340×560 那个窗口 + 它的渲染端/preload API）已在 2026-11 **整体移除**
 
 ### 定位
 
-- 定位时轮询游戏窗口矩形（`user32!GetWindowRect`，**只读几何信息**）
-- 贴游戏窗口右侧，多显示器 / DPI 自动适配
-- 查不到游戏窗口时降级到主显示器右侧
+- 标签坐标在主进程按**游戏窗口所在显示器**换算（`label-overlay` 做
+  screen-absolute → window-relative 平移），多显示器 / DPI 自动适配
+- 游戏窗口矩形只读取 `GetWindowRect` 几何信息，不打开游戏进程句柄
 
 ### 数据流
 
 ```
-LCU (127.0.0.1:port) ──poll 2s──→ 主进程 ──overlay:state──→ 渲染端
+LCU (127.0.0.1:port) ──poll 2s──→ 主进程 ──识别/几何──→ overlay:vision ──→ 标签画布
 data/dataset.json  ─┐
-data/rankings.json ─┼─启动时读取一次→ 主进程 join → 随状态推送
+data/rankings.json ─┼─启动时读取一次→ 主进程 join（选人胜率 / 局内强度）
 data/builds.json   ─┘
 ```
 
-数据在**启动时读取一次**，而不是每次轮询重读 —— 它们是日更的静态数据。
-
-分阶段视图逻辑放在 `@hexbox/core/src/overlay-view.ts`（纯函数）。
-放 core 而非主进程的原因：悬浮窗需要管理员权限 + 真实桌面会话，
-**CI 根本跑不起来**，只有把逻辑抽成纯函数才能被单元测试覆盖。
+数据在**启动时读取一次**，而不是每次轮询重读 —— 它们是日更的静态数据；
+局内强度表由 `AugmentController` 按本局英雄取 `builds.json` 的详情。
 
 ### 连不上客户端时
 
-- **读不到凭证** → 显示诊断面板（探测详情 + 编号排查步骤）
-- **有凭证但不在对局** → 显示「已连接客户端，当前未在对局中」的待机说明，
-  **不**显示诊断面板（那会让人误以为工具坏了）
+- **读不到凭证** → 托盘弹**一次**可操作气泡（探测详情 + 编号排查步骤），之后只写日志
+- **有凭证但不在对局** → 不弹任何 UI（画布保持透明）；托盘 tooltip 显示当前状态
+
+### 已移除的侧边面板（历史）
+
+2026-10-04 用户决策后侧边面板一直不显示（`showPanel` 恒 false）；2026-11 已把
+窗口、`renderer/renderer.ts`、`index.html`、面板专属 CSS、preload 的
+`setClickThrough/close/onState/onClickThrough` 与全部面板 IPC **整体删除**。
 
 ### 托盘图标与退出（S6）
 
@@ -518,7 +522,7 @@ data/builds.json   ─┘
 > （打包版 `%LOCALAPPDATA%\hexbox\logs\overlay.log`，开发版 `HEXBOX_LOG_FILE`）。
 > **不要**因为"方便"再把它们加回菜单。
 
-- **关窗口 = 最小化到托盘**：常驻覆盖层自己的两扇窗（侧边面板、全屏标签画布）都挂了
+- **关窗口 = 最小化到托盘**：全屏标签画布挂了
   `attachCloseToTrayHide()` —— 非退出状态下 `preventDefault()` + `hide()`。
   截屏 worker 窗口**不挂**（它是故意 `destroy()` 收掉的，`destroy()` 不发 `close`）。
 - tooltip 恒含「**退出请右键托盘图标**」（Windows 的托盘提示是单行文本）。
@@ -630,7 +634,7 @@ Electron 渲染端也需单文件 IIFE。
    esbuild 的 `outdir` 布局由 **outbase** 决定，而 outbase 是从入口的**公共父目录**
    推断的：入口全在 `src/renderer/` 时产物落在 `dist/renderer/*.js`（正确）；
    一旦加入 `src/capture/worker.ts`，公共父目录变成 `src`，
-   `renderer.js` / `overlay-canvas.js` 就被写到 `dist/renderer/renderer/` ——
+   `overlay-canvas.js` / `capture/worker.js` 就被写到错误子目录 ——
    而 HTML 里写的是 `./overlay-canvas.js` → 模块 **404**。
    **这个 404 是静默的**（Electron 不把它交给 `console-message`，日志转发看不到），
    于是整块画布脚本一行都没跑：`canvas.width/height` 停在 HTML 默认的 **300×150**，
