@@ -55,3 +55,35 @@ a {
   white-space: nowrap;
   border: 0;
 }
+
+/* 数据站共用控件/状态：原先在 App.vue 与 RankView.vue 的 scoped 样式里各写一遍（审查 P3 去重） */
+.state {
+  padding: 40px 0;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.input,
+.select {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.input:focus,
+.select:focus {
+  outline: none;
+  border-color: var(--accent);
+}

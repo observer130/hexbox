@@ -290,31 +290,9 @@ h1 {
   font-size: 12px;
 }
 
-.controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-  margin-bottom: 16px;
-}
-.input,
-.select {
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: 6px;
-  padding: 7px 10px;
-  font-size: 13px;
-  font-family: inherit;
-}
 .input {
   flex: 1;
   min-width: 200px;
-}
-.input:focus,
-.select:focus {
-  outline: none;
-  border-color: var(--accent);
 }
 .count {
   font-size: 12px;
@@ -395,11 +373,6 @@ h1 {
   color: var(--text-dim);
 }
 
-.state {
-  padding: 40px 0;
-  text-align: center;
-  color: var(--text-dim);
-}
 .state.err {
   color: #e08a8a;
   text-align: left;

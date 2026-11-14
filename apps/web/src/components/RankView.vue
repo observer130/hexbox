@@ -290,12 +290,6 @@ h2 {
   font-size: 13px;
 }
 
-.controls {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  margin-bottom: 10px;
-}
 .tabs {
   display: flex;
   gap: 6px;
@@ -313,15 +307,6 @@ h2 {
 .tab.active {
   color: var(--accent);
   border-color: var(--accent);
-}
-.select {
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: 6px;
-  padding: 6px 10px;
-  font-size: 13px;
-  font-family: inherit;
 }
 
 .tablewrap {
@@ -422,10 +407,6 @@ tbody tr:hover {
 .note {
   font-size: 12px;
   margin-top: 10px;
-}
-.state {
-  padding: 30px 0;
-  text-align: center;
 }
 .rank-error {
   background: var(--bg-elev);
