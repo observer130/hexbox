@@ -22,6 +22,9 @@ pnpm --filter @hexbox/overlay package:dir     # 只出免安装目录（验证�
 | `release/…/resources/app.asar` | **0.30 MB** | 只有 `dist/**` + `package.json` |
 | `release/…/resources/data/` | 6.26 MB（2026-11 起**不再打入**） | 旧版数据快照；现在数据在 `文档\hexbox\data`（见 §三） |
 
+> ⚠️ 上表是 **0.1.0** 的本机实测；当前版本（`v0.3.0`）的产物名会变成
+> `hexbox-setup-0.3.0-x64.exe` 等，大小随依赖/代码变化 —— 以 `release/` 实际产物为准。
+
 配置在 **`apps/overlay/electron-builder.yml`**（不新增 `apps/desktop`：
 本包已经是 workspace 项目、已经声明 `main=dist/main/index.cjs`，
 再开一个"打包壳"只会让 `pnpm -r` 多一个项目、多一份要同步的元数据）。
