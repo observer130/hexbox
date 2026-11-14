@@ -62,6 +62,7 @@ import {
   latestReleaseApiUrl,
   releasesPageUrl,
 } from './update-config.ts';
+import { waitWritableClosed } from './writable-close.ts';
 
 /** 下载目录（临时目录下的固定子目录；每次下载前重写同名文件）。 */
 const DOWNLOAD_SUBDIR = 'hexbox-update';
@@ -206,7 +207,8 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlow {
     mkdirSync(dir, { recursive: true });
     // ⚠️ 只取文件名：`asset.name` 来自 GitHub 发布的 JSON，理论上可以含
     //    `..\..\` —— 直接 join 会把文件写到临时目录之外（覆盖任意文件）。
-    const dest = join(dir, basename(asset.name));    rmSync(dest, { force: true });
+    const dest = join(dir, basename(asset.name));
+    rmSync(dest, { force: true });
 
     console.log(
       `[hexbox] 检查更新：开始下载 ${asset.name}（${formatBytes(asset.size)}）\n` +
@@ -262,16 +264,18 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlow {
     } catch (e) {
       // 断开响应体，别把连接挂在那儿
       await reader.cancel().catch(() => undefined);
-      // ⚠️ Windows 上文件被打开时删不掉：先 destroy() 再等 close 事件，最后才删
+      // ⚠️ Windows 上文件被打开时删不掉：先 destroy() 再等关闭，最后才删。
+      //    `waitWritableClosed` 处理"错误关闭后 close 事件已发过"的竞态
+      //    （旧实现在这里 `once('close')` 会永久挂起 → 更新流程卡死）。
       out.destroy();
-      await new Promise<void>((resolve) => out.once('close', () => resolve()));
+      await waitWritableClosed(out);
       rmSync(dest, { force: true });
       throw e;
     }
-    await new Promise<void>((resolve, reject) => {
-      out.end(() => resolve());
-      out.on('error', reject);
-    });
+    // 收尾：`end()` 后等真正关闭。用同一个 helper 而不是 `once('close')`——
+    // 流可能已经因错误销毁，`close` 早发过，旧写法会让成功路径也挂住。
+    out.end();
+    await waitWritableClosed(out);
     if (writeFailure !== null) throw writeFailure;
 
     const sha256 = hash.digest('hex');
