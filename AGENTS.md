@@ -67,9 +67,9 @@ pnpm dev:web                                  # http://localhost:5273
 
 `pnpm check:docs` → `pnpm typecheck` → `pnpm test` → `pnpm build` (CI runs the same on
 `windows-latest`). Node's built-in runner; `pnpm --filter @hexbox/core test` is faster.
-**Keep them green and add tests for new behavior.** Current: **1170** — core 60 /
-vision 723 / lcu 147 / overlay 72 / provider-communitydragon 15 / provider-tencent 48 /
-data-store 19 / data-cli 58 / web 28 (`pnpm test` is the source of truth; the overlay's
+**Keep them green and add tests for new behavior.** Current: **1190** — core 68 /
+vision 723 / lcu 147 / overlay 72 / provider-communitydragon 16 / provider-tencent 49 /
+data-store 25 / data-cli 58 / web 32 (`pnpm test` is the source of truth; the overlay's
 Electron runtime is not testable — its tests cover replay-safe parts and the self-test
 scenario logic only). `pnpm typecheck` also checks `scripts/*.mts`
 (`scripts/tsconfig.json`) and `apps/web` (via `vue-tsc`). `pnpm check:docs` fails on a
@@ -143,6 +143,14 @@ Read the doc named per area first; every rule below cost a real bug.
 - Writing player data: only ever replace `hexbox…`-titled item sets (Brawl's map ID is
   **12**), and `itemone_json` lists **20** entries = 其余成装 with the top **5** = 出门装
   (we write only the top 1) — that overlap is official, not a bug.
+- **Data files carry `meta.schemaVersion`** (`DATA_SCHEMA_VERSION` in `@hexbox/core`):
+  `@hexbox/data-store` is the only writer/reader layer — it stamps the version on every
+  write, migrates v1 (missing `hextechs`) on read, and **rejects newer versions** with an
+  upgrade message. Don't hand-roll JSON parsing or writes elsewhere.
+- **Providers share `fetchJsonWithRetry`** (`@hexbox/core`): timeout + one retry on
+  5xx/429/network errors + optional ETag/Last-Modified cache (data-cli persists it to
+  `data/.http-cache.json`, so an unchanged upstream costs a 304). Never add a second
+  fetch loop in a provider — change the shared helper instead.
 - **No date-dependent tests** (stat dates come from the real clock); keep the
   `isDirectRun()` guard in `packages/data-cli/src/cli.ts`.
 - **Data update = one pipeline**: the overlay calls `runDefaultSync()` (data-cli) only —
