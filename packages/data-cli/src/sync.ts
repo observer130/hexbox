@@ -39,6 +39,7 @@ import {
 } from '@hexbox/core';
 import { fetchHeroDetails } from '@hexbox/provider-tencent';
 import {
+  openHttpCache,
   readBuilds,
   readDataset,
   readRankings,
@@ -1038,13 +1039,20 @@ export interface DefaultSyncOptions {
  * 「接了哪些源」必须只有一处（`provider-registry`），否则应用与 CLI 会漂移。
  */
 export async function runDefaultSync(options: DefaultSyncOptions): Promise<SyncReport> {
-  return await runDataSync({
-    storeRoot: options.storeRoot,
-    store: options.store ?? fileSyncStore,
-    staticProviders: createStaticProviders(),
-    rankingProviders: createRankingProviders(),
-    signal: options.signal,
-    onProgress: options.onProgress,
-    forceTemplates: options.forceTemplates,
-  });
+  // 文件级 ETag 缓存只在**生产装配**启用：单测注入内存 store 时不该碰 fs
+  // （cache 文件写在数据目录，304 命中时 Provider 直接复用上次正文）。
+  const httpCache = options.store === undefined ? await openHttpCache(options.storeRoot) : null;
+  try {
+    return await runDataSync({
+      storeRoot: options.storeRoot,
+      store: options.store ?? fileSyncStore,
+      staticProviders: createStaticProviders(httpCache !== null ? { httpCache } : {}),
+      rankingProviders: createRankingProviders(httpCache !== null ? { httpCache } : {}),
+      signal: options.signal,
+      onProgress: options.onProgress,
+      forceTemplates: options.forceTemplates,
+    });
+  } finally {
+    await httpCache?.flush();
+  }
 }

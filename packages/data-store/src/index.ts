@@ -16,7 +16,8 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-import type { ChampionDetailSet, Dataset, RankingSnapshot } from '@hexbox/core';
+import type { CachedHttpEntry, ChampionDetailSet, Dataset, RankingSnapshot } from '@hexbox/core';
+import { DATA_SCHEMA_VERSION } from '@hexbox/core';
 import type { TemplatePack } from '@hexbox/vision';
 
 export interface StorePaths {
@@ -111,24 +112,75 @@ async function readJson<T>(path: string, label: string): Promise<T | null> {
   }
 }
 
-/** 写入数据集（原子写）。 */
+/* ------------------------------------------------------------------ */
+/* schema 版本：写入时补齐、读取时校验/迁移（审查 P2）                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 校验数据文件版本；返回实际版本（缺省按 1 = 0.2 及以前）。
+ *
+ * 大于当前支持的版本 → **明确拒绝**：未知格式"尽力解析"只会更难排查；
+ * 提示升级程序（或删掉旧数据重新同步）。
+ */
+function readSchemaVersion(label: string, raw: unknown): number {
+  const meta = (raw as { meta?: { schemaVersion?: unknown } } | null)?.meta;
+  const version = meta?.schemaVersion;
+  if (typeof version === 'number' && !Number.isInteger(version)) {
+    throw new Error(`${label}的 schema 版本非法（${String(version)}），请重新同步`);
+  }
+  if (typeof version === 'number' && version > DATA_SCHEMA_VERSION) {
+    throw new Error(
+      `${label}由更新版本的 hexbox 生成（schema ${version}，当前支持 ${DATA_SCHEMA_VERSION}）：` +
+        '请升级程序，或删除旧数据后重新同步',
+    );
+  }
+  return typeof version === 'number' ? version : 1;
+}
+
+/** 写盘前统一盖上当前 schema 版本（所有写入路径唯一入口）。 */
+function stampSchema<T extends { readonly meta: object }>(value: T): T {
+  return { ...value, meta: { ...value.meta, schemaVersion: DATA_SCHEMA_VERSION } };
+}
+
+/**
+ * 迁移数据集：v1（0.2 及以前）没有 `hextechs` → 补空数组（图鉴仍可用 CDragon 口径）。
+ *
+ * 数据不会少（旧文件本来就没有这个字段），也不会凭空造国服数据；
+ * 提示信息由调用方（悬浮窗/CLI）按 `hextechs.length === 0` 给出。
+ */
+function migrateDataset(raw: Dataset): Dataset {
+  const hextechs = (raw as { hextechs?: unknown }).hextechs;
+  return {
+    ...raw,
+    hextechs: Array.isArray(hextechs) ? raw.hextechs : [],
+    meta: { ...raw.meta, schemaVersion: DATA_SCHEMA_VERSION },
+  };
+}
+
+/** 写入数据集（原子写；自动补齐 schema 版本）。 */
 export async function writeDataset(root: string, dataset: Dataset): Promise<string> {
-  return await writeJsonAtomic(resolveStorePaths(root).dataset, dataset);
+  return await writeJsonAtomic(resolveStorePaths(root).dataset, stampSchema(dataset));
 }
 
 /** 读取数据集；不存在时返回 null（而非抛错，便于调用方决定降级策略）。 */
 export async function readDataset(root: string): Promise<Dataset | null> {
-  return await readJson<Dataset>(resolveStorePaths(root).dataset, '数据集');
+  const raw = await readJson<Dataset>(resolveStorePaths(root).dataset, '数据集');
+  if (raw === null) return null;
+  readSchemaVersion('数据集', raw);
+  return migrateDataset(raw);
 }
 
-/** 写入排行榜快照（原子写，与 dataset 独立）。 */
+/** 写入排行榜快照（原子写，与 dataset 独立；自动补齐 schema 版本）。 */
 export async function writeRankings(root: string, snapshot: RankingSnapshot): Promise<string> {
-  return await writeJsonAtomic(resolveStorePaths(root).rankings, snapshot);
+  return await writeJsonAtomic(resolveStorePaths(root).rankings, stampSchema(snapshot));
 }
 
 /** 读取排行榜快照；不存在时返回 null。 */
 export async function readRankings(root: string): Promise<RankingSnapshot | null> {
-  return await readJson<RankingSnapshot>(resolveStorePaths(root).rankings, '排行榜');
+  const raw = await readJson<RankingSnapshot>(resolveStorePaths(root).rankings, '排行榜');
+  if (raw === null) return null;
+  readSchemaVersion('排行榜', raw);
+  return stampSchema(raw);
 }
 
 /**
@@ -139,12 +191,15 @@ export async function readRankings(root: string): Promise<RankingSnapshot | null
  * 且与图鉴/榜单的更新节奏不同；分开才能独立失效、独立排查。
  */
 export async function writeBuilds(root: string, set: ChampionDetailSet): Promise<string> {
-  return await writeJsonAtomic(resolveStorePaths(root).builds, set);
+  return await writeJsonAtomic(resolveStorePaths(root).builds, stampSchema(set));
 }
 
 /** 读取单英雄详情集合；不存在时返回 null（悬浮窗据此降级）。 */
 export async function readBuilds(root: string): Promise<ChampionDetailSet | null> {
-  return await readJson<ChampionDetailSet>(resolveStorePaths(root).builds, '英雄详情');
+  const raw = await readJson<ChampionDetailSet>(resolveStorePaths(root).builds, '英雄详情');
+  if (raw === null) return null;
+  readSchemaVersion('英雄详情', raw);
+  return stampSchema(raw);
 }
 
 /**
@@ -164,6 +219,75 @@ export async function readTemplates(root: string): Promise<string | null> {
   const path = resolveStorePaths(root).templates;
   if (!existsSync(path)) return null;
   return await readFile(path, 'utf8');
+}
+
+/* ------------------------------------------------------------------ */
+/* HTTP 条件缓存（ETag / Last-Modified）—— 文件持久化                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 文件持久化的 HTTP 条件缓存（审查 P2：Provider ETag）。
+ *
+ * 放在 data-store：它是唯一负责 fs/原子写的包；core 只有纯内存实现。
+ * 文件是 `data/.http-cache.json`（gitignored 的 data/ 内），内容就是
+ * `{ [url]: { etag?, lastModified?, body } }` —— 304 时用 body 复用。
+ *
+ * 并发（托盘自动同步 + `pnpm sync`）只写这一份："最后写入者赢"，
+ * 缓存失效的代价只是**下一次重新下载**，不会污染数据文件；写入走原子写，
+ * 读方不会看到半截 JSON。
+ */
+export interface FileHttpCache {
+  /** 缓存文件位置（诊断用）。 */
+  readonly path: string;
+  get(url: string): CachedHttpEntry | undefined;
+  set(url: string, entry: CachedHttpEntry): void;
+  /** 落盘（原子写）；失败不抛（缓存只是优化，不该让同步失败）。 */
+  flush(): Promise<void>;
+}
+
+/** 打开（或创建）`<root>/.http-cache.json`；损坏/不存在按空缓存处理。 */
+export async function openHttpCache(root: string): Promise<FileHttpCache> {
+  const path = join(root, '.http-cache.json');
+  const entries = new Map<string, CachedHttpEntry>();
+  if (existsSync(path)) {
+    try {
+      const raw: unknown = JSON.parse(await readFile(path, 'utf8'));
+      if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
+        for (const [url, value] of Object.entries(raw as Record<string, unknown>)) {
+          const e = value as Partial<CachedHttpEntry> | null;
+          if (
+            typeof e === 'object' &&
+            e !== null &&
+            typeof e.body === 'string' &&
+            (e.etag === undefined || typeof e.etag === 'string') &&
+            (e.lastModified === undefined || typeof e.lastModified === 'string')
+          ) {
+            entries.set(url, {
+              body: e.body,
+              ...(e.etag !== undefined ? { etag: e.etag } : {}),
+              ...(e.lastModified !== undefined ? { lastModified: e.lastModified } : {}),
+            });
+          }
+        }
+      }
+    } catch {
+      // 损坏的缓存直接丢弃（下次重新下载即可，不能阻断同步）
+    }
+  }
+  return {
+    path,
+    get: (url) => entries.get(url),
+    set: (url, entry) => {
+      entries.set(url, entry);
+    },
+    flush: async () => {
+      try {
+        await writeJsonAtomic(path, Object.fromEntries(entries));
+      } catch {
+        // 缓存落盘失败不影响同步结果
+      }
+    },
+  };
 }
 
 export interface FreshnessInfo {

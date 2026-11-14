@@ -13,7 +13,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { Dataset, RankingSnapshot } from '@hexbox/core';
+import { DATA_SCHEMA_VERSION, type Dataset, type RankingSnapshot } from '@hexbox/core';
 
 import {
   checkFreshness,
@@ -120,7 +120,8 @@ test('writeDataset/readDataset：往返一致，且目录不存在时自动创�
     assert.equal(existsSync(path), true);
 
     const back = await readDataset(nested);
-    assert.deepEqual(back, ds);
+    // 写盘自动盖 schema 版本（读回也带当前版本）
+    assert.deepEqual(back, { ...ds, meta: { ...ds.meta, schemaVersion: DATA_SCHEMA_VERSION } });
   });
 });
 
@@ -194,7 +195,10 @@ test('writeRankings/readRankings：往返一致且保留统计日期', async () 
     await writeRankings(dir, snap);
 
     const back = await readRankings(dir);
-    assert.deepEqual(back, snap);
+    assert.deepEqual(back, {
+      ...snap,
+      meta: { ...snap.meta, schemaVersion: DATA_SCHEMA_VERSION },
+    });
     assert.equal(back?.meta.dataDate, '20260925');
   });
 });

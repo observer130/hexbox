@@ -85,6 +85,18 @@ export interface Item {
 }
 
 /**
+ * 数据文件 schema 版本（**写盘方写入、读盘方校验**）。
+ *
+ * 版本历史：1 = 0.2 及以前（`dataset.json` 没有 `hextechs`）；
+ * 2 = 0.3 起（国服图鉴 `hextechs` + 本字段本身）。
+ *
+ * 迁移策略：缺字段按 **1** 处理并由 `@hexbox/data-store` 补齐默认值（可用）；
+ * 版本号 **大于** 本值说明文件来自更新版本的 hexbox → 明确拒绝并提示升级，
+ * 绝不"尽力解析"未知格式。字段本身是可选，是为了让旧文件/测试夹具无需全量改。
+ */
+export const DATA_SCHEMA_VERSION = 2;
+
+/**
  * 数据集元信息 —— 用于版本追踪与缓存失效。
  */
 export interface DatasetMeta {
@@ -96,6 +108,8 @@ export interface DatasetMeta {
   readonly fetchedAt: string;
   /** 数据源的权威日期（若有），如统计数据的 dtstatdate。 */
   readonly dataDate?: string;
+  /** 数据文件 schema 版本（见 {@link DATA_SCHEMA_VERSION}；旧文件缺省=1）。 */
+  readonly schemaVersion?: number;
 }
 
 /** 一个完整的静态数据快照。 */
@@ -178,6 +192,8 @@ export interface RankingsMeta {
   readonly dataDate: string;
   /** 抓取时间 (ISO 8601)。 */
   readonly fetchedAt: string;
+  /** 数据文件 schema 版本（见 {@link DATA_SCHEMA_VERSION}；旧文件缺省=1）。 */
+  readonly schemaVersion?: number;
 }
 
 /* ------------------------------------------------------------------ */
@@ -271,6 +287,8 @@ export interface ChampionDetailSet {
     readonly fetchedAt: string;
     /** 成功抓取的英雄数，便于判断数据完整性。 */
     readonly count: number;
+    /** 数据文件 schema 版本（见 {@link DATA_SCHEMA_VERSION}；旧文件缺省=1）。 */
+    readonly schemaVersion?: number;
   };
   readonly details: readonly ChampionDetail[];
 }
