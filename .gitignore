@@ -9,9 +9,13 @@ data/
 # 也覆盖 debug/augment/（局内海克斯门控录制的时间线 CSV 与帧图）
 debug/
 
-# 本地环境
+# 本地环境（含密钥/证书：任何环境变体与私钥材料都不许入库）
 .env
-.env.local
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
 .DS_Store
 *.log
 

@@ -15,7 +15,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --experimental-strip-types --test src/**/*.test.ts",
+    "test": "node --experimental-strip-types --test src/**/*.test.ts --test-timeout=30000",
     "probe": "node --experimental-strip-types src/cli.ts",
     "probe:live": "node --experimental-strip-types src/probe-live.ts"
   },
