@@ -497,7 +497,6 @@ import {
   decodePack,
   decideVisible,
   denormalizeToGray,
-  findGameWindowRect,
   findGameWindowRectCached,
   prepareTemplates,
   sameVisibleState,

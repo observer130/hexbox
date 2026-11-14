@@ -28,7 +28,6 @@ import {
   dataUpdatePromptText,
   dataUpdateResultText,
   formatStatDate,
-  newDataNoticeText,
   type DataUpdatePhase,
   type DataUpdatePromptText,
 } from '@hexbox/vision';

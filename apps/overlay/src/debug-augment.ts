@@ -54,7 +54,7 @@
  * 合规：只读屏幕像素与窗口几何。不注入、不读内存、不解析封包、不打开游戏进程句柄。
  */
 
-import { app, desktopCapturer, screen } from 'electron';
+import { app, desktopCapturer } from 'electron';
 import { appendFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 

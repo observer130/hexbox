@@ -27,7 +27,6 @@
  */
 
 import {
-  augmentCardFingerprint,
   augmentWatchFingerprints,
   detectAugmentPanelInRegions,
   detectPanelPresenceInRegions,

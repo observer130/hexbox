@@ -94,7 +94,6 @@ import {
   type AugmentCardFingerprint,
   type AugmentSessionFramePayload,
   type CadenceMode,
-  type CloseConfirmDecision,
   type LabelRowLock,
   type PanelDetection,
   type PanelPresence,

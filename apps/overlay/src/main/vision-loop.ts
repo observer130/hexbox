@@ -31,7 +31,6 @@ import {
   detectTopBarCandidates,
   extractGrayRaw,
   extractNameStrip,
-  findGameWindowRect,
   findGameWindowRectCached,
   makeScreenGeometry,
   matchNameCareful,

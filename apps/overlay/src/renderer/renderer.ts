@@ -154,28 +154,6 @@ function augRowHtml(a: AugmentRow): string {
     </div>`;
 }
 
-/** 一个出装槽位（含方案列表）。 */
-function slotHtml(label: string, slots: BuildSlot[], compact = false): string {
-  if (slots.length === 0) return '';
-  const items = slots
-    .map((s) => {
-      const names = s.names.map((n) => esc(n)).join(' <span class="plus">+</span> ');
-      return `
-        <div class="buildrow">
-          <div class="buildnames">${names}</div>
-          <div class="buildstat">
-            <span class="wr">${pct(s.winRate)}</span>
-            <span class="dim pr">登场 ${pct(s.pickRate)}</span>
-          </div>
-        </div>`;
-    })
-    .join('');
-  return `
-    <div class="slot ${compact ? 'compact' : ''}">
-      <div class="slotlabel">${esc(label)}</div>
-      ${items}
-    </div>`;
-}
 
 function render(s: OverlayStateMsg): void {
   if (!s.connected) {

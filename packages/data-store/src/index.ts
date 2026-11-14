@@ -18,7 +18,6 @@ import { dirname, join } from 'node:path';
 
 import type { CachedHttpEntry, ChampionDetailSet, Dataset, RankingSnapshot } from '@hexbox/core';
 import { DATA_SCHEMA_VERSION } from '@hexbox/core';
-import type { TemplatePack } from '@hexbox/vision';
 
 export interface StorePaths {
   readonly root: string;

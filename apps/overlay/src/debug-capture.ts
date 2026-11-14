@@ -23,7 +23,7 @@
  *   result.json    检测结果（坐标、识别、置信度、诊断信息）
  */
 
-import { app, BrowserWindow, desktopCapturer, screen } from 'electron';
+import { app, desktopCapturer, screen } from 'electron';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -39,7 +39,6 @@ import {
   extractGrayRaw,
   extractNameStrip,
   makeGeometry,
-  matchChampionCareful,
   matchName,
   NAME_STRIP,
   normalizedRectToScreen,
