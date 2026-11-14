@@ -86,21 +86,6 @@ function forEachPixel(
   }
 }
 
-/** 填充圆角矩形（抗锯齿）。 */
-export function fillRoundedRect(
-  bmp: Bitmap,
-  rect: Rect,
-  radius: number,
-  color: Rgba,
-  alphaMul = 1,
-): void {
-  if (rect.w <= 0 || rect.h <= 0) return;
-  forEachPixel(bmp, rect, 1, (x, y) => {
-    const cov = Math.max(0, Math.min(1, 0.5 - roundedRectDistance(x + 0.5, y + 0.5, rect, radius)));
-    blendPixel(bmp, x, y, color, cov * alphaMul);
-  });
-}
-
 /** 圆角矩形描边（线宽居中在边界上，抗锯齿）。 */
 export function strokeRoundedRect(
   bmp: Bitmap,

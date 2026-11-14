@@ -78,7 +78,6 @@ import { detectCards } from './grid.ts';
 import { extractGray } from './match.ts';
 import {
   NO_PANEL_PRESENCE,
-  PANEL_PRESENCE_REGION,
   PANEL_PRESENCE_THRESHOLDS,
   detectPanelPresence,
   type PanelPresence,

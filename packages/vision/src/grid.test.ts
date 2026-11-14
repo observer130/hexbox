@@ -19,7 +19,6 @@ import {
   detectCards,
   edgeColumnProjection,
   findBands,
-  toCardSlots,
   type Band,
 } from './grid.ts';
 
@@ -219,15 +218,4 @@ test('detectCards：象牙白边框（低饱和亮色）也能检出 —— 回�
   const res = detectCards(bmp);
   assert.equal(res.confident, true, res.reason ?? '');
   assert.equal(res.cards.length, 2);
-});
-
-/* ------------------------------------------------------------------ */
-/* toCardSlots                                                         */
-/* ------------------------------------------------------------------ */
-
-test('toCardSlots：包装为未识别状态', () => {
-  const slots = toCardSlots([{ x: 0.1, y: 0.2, w: 0.3, h: 0.4 }]);
-  assert.equal(slots.length, 1);
-  assert.equal(slots[0]!.championId, null);
-  assert.equal(slots[0]!.score, 0);
 });

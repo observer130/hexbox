@@ -20,9 +20,6 @@ import {
   TIER_LETTER_EM_METRICS,
   TIER_LETTERS_CAP_RATIO,
   TIER_LETTERS_DESIGN_INK_ASPECT,
-  TIER_LETTERS_EM,
-  TIER_LETTERS_FLATTEN,
-  TIER_LETTERS_FONT,
   tierLetterEmMetrics,
 } from './label-letter.ts';
 import { TIER_LETTER_OUTLINES, tierLetterGlyph } from './label-letter-outlines.ts';
@@ -44,8 +41,6 @@ test('覆盖 A~Z（且只有 A~Z）；度量与轮廓两个文件同源、大小
   assert.equal(tierLetterGlyph(' '), null);
   assert.equal(tierLetterEmMetrics('中'), null);
   assert.equal(tierLetterEmMetrics(''), null);
-  assert.equal(TIER_LETTERS_FONT, 'Segoe UI Black');
-  assert.ok(TIER_LETTERS_EM > 100 && TIER_LETTERS_FLATTEN > 0, '生成参数应被记录下来');
 });
 
 test('轮廓数据自洽：点成对、坐标有限、至少 3 点、首尾不相邻', () => {

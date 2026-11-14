@@ -67,7 +67,7 @@ export interface VisibleState {
  *   - 侧边窗：**不再显示**（选人阶段看覆盖层；局内看海克斯卡上的标签）。
  *   - 覆盖层与视觉循环：**仅选人阶段**（局内海克斯面板的门控在 S5.4 接入）。
  */
-export function decideVisible(phase: string, connected: boolean): VisibleState {
+export function decideVisible(phase: string, _connected: boolean): VisibleState {
   const inChampSelect = phase === 'ChampSelect';
   return {
     // connected 目前不改变可见性（用户要求不再弹诊断面板），保留形参

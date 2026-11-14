@@ -36,13 +36,6 @@ export interface TierLetterEmMetrics {
   readonly inkBottom: number
 }
 
-/** 生成这份数据的字体族 —— `label-draw.ts` 的字体栈**首项必须等于它**（有单测锁）。 */
-export const TIER_LETTERS_FONT = 'Segoe UI Black'
-
-/** 生成时的 em 尺寸（px）与平坦化容差（em 像素）——只用于说明精度，运行时不用。 */
-export const TIER_LETTERS_EM = 512
-export const TIER_LETTERS_FLATTEN = 0.25
-
 /** 大写字高 / em（= `label-draw.ts` 的 `LABEL_CAP_RATIO`，两边不可能漂）。 */
 export const TIER_LETTERS_CAP_RATIO = 0.7002
 

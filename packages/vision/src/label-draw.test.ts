@@ -64,7 +64,6 @@ import {
 import {
   TIER_LETTERS_CAP_RATIO,
   TIER_LETTERS_DESIGN_INK_ASPECT,
-  TIER_LETTERS_FONT,
   tierLetterEmMetrics,
 } from './label-letter.ts';
 import { TIER_LETTER_OUTLINES, tierLetterGlyph } from './label-letter-outlines.ts';
@@ -369,7 +368,8 @@ test('未知字母（没有实测度量）用保守值：内容宽仍不越出�
 
 test('档位字体：重型展示栈 + 900，且与字形数据**同源**（首项 == 生成字体）', () => {
   assert.equal(LABEL_TIER_FONT_WEIGHT, 900);
-  assert.equal(LABEL_TIER_FONT_FAMILY.split(',')[0]!.trim(), `"${TIER_LETTERS_FONT}"`);
+  // 生成字体（`scripts/render-tier-letter-glyphs.ps1` = Segoe UI Black）必须是字体栈首项
+  assert.equal(LABEL_TIER_FONT_FAMILY.split(',')[0]!.trim(), '"Segoe UI Black"');
   assert.ok(LABEL_TIER_FONT_FAMILY.includes('"Arial Black"'), '要含次选 Arial Black');
   assert.ok(LABEL_TIER_FONT_FAMILY.includes('Impact'), '要含 Impact');
   assert.ok(LABEL_TIER_FONT_FAMILY.includes('"Microsoft YaHei UI"'), '要用微软雅黑 UI 兜底');

@@ -15,8 +15,6 @@ import {
   isPlausibleGameWindow,
   createWindowRectCache,
   pickGameWindow,
-  GAME_PROCESS_NAMES,
-  RIOT_CLIENT_PROCESS_NAMES,
   type PhysicalRect,
   type WindowCandidate,
 } from './win-geometry.ts';
@@ -227,25 +225,6 @@ test('窗口缓存：每次 createWindowRectCache 都是独立状态（不互相
 /* ------------------------------------------------------------------ */
 
 const SCREEN = { width: 2400, height: 1350 };
-
-test('进程白名单：只认游戏本体，显式排除 Riot 客户端族', () => {
-  // ⚠️ 真机实测：LeagueClientUx（客户端 UI）的窗口标题就是
-  // "League of Legends"、类名 RCLIENT、尺寸 1600×900 —— 与游戏窗口
-  // 在名称上无法区分。若按名字匹配，没有对局时会返回客户端窗口，
-  // 覆盖层就会贴着客户端摆放、坐标换算全错。
-  assert.deepEqual([...GAME_PROCESS_NAMES], ['League of Legends']);
-  for (const client of ['LeagueClientUx', 'LeagueClient', 'RiotClientServices', 'WeGame']) {
-    assert.ok(
-      (RIOT_CLIENT_PROCESS_NAMES as readonly string[]).includes(client),
-      `${client} 必须被显式排除`,
-    );
-    assert.equal(
-      (GAME_PROCESS_NAMES as readonly string[]).includes(client),
-      false,
-      `${client} 不得出现在游戏进程白名单里`,
-    );
-  }
-});
 
 test('isPlausibleGameWindow：正常全屏游戏窗口通过', () => {
   assert.equal(

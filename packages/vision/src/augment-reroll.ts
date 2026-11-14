@@ -171,14 +171,6 @@ export function augmentFingerprintZoneRect(
   };
 }
 
-/** 主取样区（整体区）的矩形 —— 兼容旧接口。 */
-export function augmentFingerprintRect(
-  card: Rect,
-  zone: AugmentFingerprintZone['zone'] = AUGMENT_FINGERPRINT_ZONE,
-): Rect {
-  return augmentFingerprintZoneRect(card, zone);
-}
-
 /**
  * 算一张卡的指纹（取不到像素返回 `null`：卡太小 / 越界 / 尺寸非法）。
  *

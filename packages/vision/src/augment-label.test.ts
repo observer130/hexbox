@@ -30,7 +30,6 @@ import {
   alignRowLabelsLocked,
   augmentBadgeZone,
   augmentLabelRect,
-  augmentLabelRects,
   labelRowBand,
   lockLabelRowBand,
   median,
@@ -258,20 +257,6 @@ test('尺寸随卡片等比缩放（换分辨率不变形）', () => {
   assert.ok(Math.abs(b.w / a.w - 0.5) < 1e-6, '宽度应等比');
   assert.ok(Math.abs(b.h / a.h - 0.5) < 1e-6, '高度应等比');
   assert.ok(Math.abs((b.x - narrow.x) / narrow.w - (a.x - CARD.x) / CARD.w) < 1e-9, '卡内相对位置一致');
-});
-
-test('认不准的卡不画（augmentId === null 被过滤）—— 语义与改版前一致', () => {
-  const cards = [
-    { card: CARD, augmentId: 1373 },
-    { card: CARD, augmentId: null },
-    { card: CARD, augmentId: 1326 },
-  ];
-  const out = augmentLabelRects(cards);
-  assert.equal(out.length, 2, '只画认出来的两张');
-  assert.deepEqual(
-    out.map((o) => o.card.augmentId),
-    [1373, 1326],
-  );
 });
 
 test('退化输入不炸（零尺寸卡片）', () => {

@@ -182,23 +182,6 @@ export function normalizeGray(gray: Uint8Array): Float32Array {
 }
 
 /**
- * 由灰度数组构造模板。
- *
- * 模板应在**构建期**从本地英雄头像生成（见 vision-cli），
- * 运行时只做比较。
- */
-export function makeTemplate(
-  championId: number,
-  gray: Uint8Array,
-  size: number,
-): PortraitTemplate {
-  if (gray.length !== size * size) {
-    throw new Error(`模板灰度长度 ${gray.length} 与 size² ${size * size} 不符`);
-  }
-  return { championId, size, gray };
-}
-
-/**
  * 相似度：归一化互相关（NCC 的简化形式）。
  *
  * 输入须为 `normalizeGray` 的输出；返回 -1..1，映射到 0..1。

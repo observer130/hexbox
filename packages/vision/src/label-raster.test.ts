@@ -11,8 +11,6 @@ import { test } from 'node:test';
 import {
   blendPixel,
   distanceToSegment,
-  fillRect,
-  fillRoundedRect,
   inkDistanceField,
   rasterizePolygons,
   roundedRectDistance,
@@ -33,9 +31,7 @@ import {
   drawRateLine,
   drawTierLetter,
   drawVectorGlyph,
-  glyphInkAspect,
   glyphInkBox,
-  glyphSupported,
   outlineStrokeRatio,
 } from './label-glyph.ts';
 import { CJK_RATE_GLYPHS, cjkRateGlyph } from './label-cjk.ts';
@@ -99,28 +95,6 @@ test('roundedRectDistance：内部为负、边界为零、外部为正，圆角�
   assert.ok(Math.abs(roundedRectDistance(10, 10, rect, 0)) < 1e-9);
 });
 
-test('fillRoundedRect：中心实心、圆角处留空、外面不画', () => {
-  const bmp = makeBitmap(120, 80);
-  const rect: Rect = { x: 10, y: 10, w: 100, h: 60 };
-  fillRoundedRect(bmp, rect, 16, WHITE);
-  assert.ok(red(bmp, 60, 40) > 250, '中心应完全不透明');
-  assert.ok(red(bmp, 80, 40) > 250, '靠右边（非圆角）也应是实心');
-  // 直角角落被圆角削掉：点 (10,10) 距离场 > 0 → 不画
-  assert.equal(red(bmp, 10, 10), 0, '圆角外应保持背景');
-  assert.equal(red(bmp, 9, 40), 0, '框外不画');
-  assert.equal(red(bmp, 60, 9), 0, '框外不画');
-  const box = inkBox(bmp)!;
-  assert.ok(box.minX >= 9 && box.maxX <= 110, '墨迹不越出矩形 ±1px');
-});
-
-test('fillRoundedRect：半透明底色按 alpha 混合（深色底 0.88）', () => {
-  const bmp = makeBitmap(40, 20);
-  fillRect(bmp, { x: 0, y: 0, w: 40, h: 20 }, WHITE); // 先铺白
-  fillRoundedRect(bmp, { x: 0, y: 0, w: 40, h: 20 }, 0, { r: 10, g: 14, b: 24, a: 0.88 });
-  // 结果 ≈ 白 × 0.12 + 底色 × 0.88 ≈ 39
-  assert.ok(Math.abs(red(bmp, 20, 10) - 39) <= 2, `实际 ${red(bmp, 20, 10)}`);
-});
-
 test('strokeRoundedRect：只画边框带，内部不被填满；线宽加倍则带更宽', () => {
   const rect: Rect = { x: 20, y: 20, w: 100, h: 60 };
   const thin = makeBitmap(140, 100);
@@ -177,16 +151,16 @@ test('distanceToSegment / strokeSegment / strokePolyline：圆头线段与折线
 
 test('S/A/B/C 四个档位字母都有字形，墨迹纵横比合理', () => {
   for (const ch of ['S', 'A', 'B', 'C']) {
-    assert.ok(glyphSupported(ch), `${ch} 应有字形`);
-    const aspect = glyphInkAspect(ch)!;
-    assert.ok(aspect > 0.5 && aspect < 0.9, `${ch} 纵横比 ${aspect.toFixed(3)} 应在 0.5~0.9`);
     const box = glyphInkBox(ch)!;
+    assert.ok(box, `${ch} 应有字形`);
+    const aspect = (box.maxX - box.minX) / (box.maxY - box.minY);
+    assert.ok(aspect > 0.5 && aspect < 0.9, `${ch} 纵横比 ${aspect.toFixed(3)} 应在 0.5~0.9`);
     // 折线采样是离散的：端点外的极值点可能差不到一个采样步（<0.5% cap），容差取 0.01
     assert.ok(Math.abs(box.minY) < 0.01, `${ch} 墨迹上沿应是 cap 顶（y=0），实际 ${box.minY}`);
     assert.ok(Math.abs(box.maxY - 1) < 0.01, `${ch} 墨迹下沿应是基线（y=1），实际 ${box.maxY}`);
   }
-  assert.equal(glyphSupported('D'), false, '没定义的字形要明确不支持（预览会画提示框）');
-  assert.ok(glyphSupported('s'), '小写输入按大写处理');
+  assert.equal(glyphInkBox('D'), null, '没定义的字形要明确不支持（预览会画提示框）');
+  assert.ok(glyphInkBox('s'), '小写输入按大写处理');
 });
 
 test('drawVectorGlyph：画在框心、墨迹高 ≈ 字号 × cap 比，不支持时返回 false', () => {

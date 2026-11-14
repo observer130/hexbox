@@ -10,49 +10,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import {
-  captureRectToNormalized,
-  insetRect,
-  makeGeometry,
-  normalizedRectToScreen,
-  rectArea,
-  rectCenter,
-  rectsOverlap,
-  toCapturePixels,
-  toNormalized,
-} from './geometry.ts';
+import { makeGeometry, normalizedRectToScreen } from './geometry.ts';
 import { windowRectToCapture } from './win-geometry.ts';
 import type { Rect } from './types.ts';
 
 /** 实测环境：全屏窗口。 */
 const REAL = makeGeometry(4587, 1920, { x: 0, y: 0, width: 2294, height: 960 });
-
-test('toNormalized：截屏像素 → 0..1', () => {
-  const p = toNormalized(4587, 1920, REAL);
-  assert.equal(p.x, 1);
-  assert.equal(p.y, 1);
-
-  const half = toNormalized(4587 / 2, 1920 / 2, REAL);
-  assert.ok(Math.abs(half.x - 0.5) < 1e-9);
-  assert.ok(Math.abs(half.y - 0.5) < 1e-9);
-});
-
-test('toNormalized/toCapturePixels：往返一致', () => {
-  const px = 1234;
-  const py = 567;
-  const n = toNormalized(px, py, REAL);
-  const back = toCapturePixels(n.x, n.y, REAL);
-  assert.ok(Math.abs(back.x - px) < 1e-9);
-  assert.ok(Math.abs(back.y - py) < 1e-9);
-});
-
-test('toNormalized：尺寸为 0 时返回 0（不产生 NaN/Infinity）', () => {
-  const bad = makeGeometry(0, 0, { x: 0, y: 0, width: 100, height: 100 });
-  const p = toNormalized(10, 10, bad);
-  assert.equal(p.x, 0);
-  assert.equal(p.y, 0);
-  assert.ok(Number.isFinite(p.x));
-});
 
 test('normalizedRectToScreen：全屏窗口下的换算', () => {
   // 屏幕中间的 10% 宽矩形
@@ -78,50 +41,6 @@ test('normalizedRectToScreen：右下角端点应落在窗口右下', () => {
   const r = normalizedRectToScreen({ x: 0.5, y: 0.5, w: 0.5, h: 0.5 }, geo);
   assert.equal(r.x + r.w, 100 + 1280);
   assert.equal(r.y + r.h, 50 + 720);
-});
-
-test('captureRectToNormalized：截屏像素矩形 → 归一化', () => {
-  const n = captureRectToNormalized({ x: 2293.5, y: 960, w: 2293.5, h: 960 }, REAL);
-  assert.ok(Math.abs(n.x - 0.5) < 1e-9);
-  assert.ok(Math.abs(n.y - 0.5) < 1e-9);
-  assert.ok(Math.abs(n.w - 0.5) < 1e-9);
-  assert.ok(Math.abs(n.h - 0.5) < 1e-9);
-});
-
-test('captureRectToNormalized：尺寸为 0 时安全返回', () => {
-  const bad = makeGeometry(0, 0, { x: 0, y: 0, width: 1, height: 1 });
-  const n = captureRectToNormalized({ x: 1, y: 1, w: 1, h: 1 }, bad);
-  assert.deepEqual(n, { x: 0, y: 0, w: 0, h: 0 });
-});
-
-test('insetRect：收缩四周（用于避开卡片边框）', () => {
-  const r = insetRect({ x: 0.1, y: 0.2, w: 0.4, h: 0.6 }, 0.05);
-  assert.ok(Math.abs(r.x - 0.15) < 1e-9);
-  assert.ok(Math.abs(r.y - 0.25) < 1e-9);
-  assert.ok(Math.abs(r.w - 0.3) < 1e-9);
-  assert.ok(Math.abs(r.h - 0.5) < 1e-9);
-});
-
-test('insetRect：过度收缩时钳到 0，不产生负数宽高', () => {
-  const r = insetRect({ x: 0.4, y: 0.4, w: 0.1, h: 0.1 }, 0.2);
-  assert.equal(r.w, 0);
-  assert.equal(r.h, 0);
-  assert.ok(r.w >= 0 && r.h >= 0);
-});
-
-test('rectsOverlap：重叠/相邻/分离', () => {
-  const a = { x: 0, y: 0, w: 1, h: 1 };
-  assert.equal(rectsOverlap(a, { x: 0.5, y: 0.5, w: 1, h: 1 }), true);
-  assert.equal(rectsOverlap(a, { x: 1, y: 0, w: 1, h: 1 }), false); // 仅相切不算重叠
-  assert.equal(rectsOverlap(a, { x: 5, y: 5, w: 0.1, h: 0.1 }), false);
-});
-
-test('rectArea / rectCenter', () => {
-  const r = { x: 0.1, y: 0.2, w: 0.4, h: 0.5 };
-  assert.ok(Math.abs(rectArea(r) - 0.2) < 1e-9);
-  const c = rectCenter(r);
-  assert.ok(Math.abs(c.x - 0.3) < 1e-9);
-  assert.ok(Math.abs(c.y - 0.45) < 1e-9);
 });
 
 test('makeGeometry：完整保留窗口信息', () => {

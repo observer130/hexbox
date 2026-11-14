@@ -10,7 +10,6 @@ import { test } from 'node:test';
 
 import {
   computePanelBounds,
-  computeVisionBounds,
   PANEL_GAP,
   PANEL_HEIGHT,
   PANEL_WIDTH,
@@ -81,8 +80,4 @@ test('极小工作区：面板尺寸收缩到工作区以内', () => {
   assert.ok(panel.width <= small.width);
   assert.ok(panel.height <= small.height);
   assert.ok(panel.x >= 0 && panel.y >= 0);
-});
-
-test('computeVisionBounds：覆盖层铺满工作区', () => {
-  assert.deepEqual(computeVisionBounds(WORK), { x: 0, y: 0, width: 2294, height: 960 });
 });

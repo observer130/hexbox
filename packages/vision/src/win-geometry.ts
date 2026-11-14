@@ -48,28 +48,6 @@ export interface PhysicalRect {
 export const MIN_GAME_WINDOW_WIDTH = 320;
 export const MIN_GAME_WINDOW_HEIGHT = 240;
 
-/**
- * 游戏**本体**的进程名（白名单）。
- *
- * ⚠️ 为什么必须白名单而不是"找标题像 League 的窗口"：
- * 实测 `LeagueClientUx.exe`（Riot 客户端 UI）的**窗口标题就是
- * `League of Legends`**、窗口类为 `RCLIENT`、尺寸 1600×900 —— 与游戏
- * 窗口在名称上完全无法区分。此前按名字匹配，于是在**没有对局**时
- * 返回了客户端窗口：覆盖层会贴着客户端摆放，坐标换算全错。
- *
- * 客户端 UI、Riot Client、WeGame 一律不在白名单内。
- */
-export const GAME_PROCESS_NAMES = ['League of Legends'] as const;
-
-/** 已知的**非**游戏进程（Riot 客户端族）——显式排除，便于诊断与日志。 */
-export const RIOT_CLIENT_PROCESS_NAMES = [
-  'LeagueClientUx',
-  'LeagueClient',
-  'RiotClientServices',
-  'Riot Client',
-  'WeGame',
-] as const;
-
 export interface GameWindowCheck {
   readonly rect: PhysicalRect;
   /** `IsWindowVisible` 的结果（最小化/隐藏时为 false）。 */
@@ -382,87 +360,6 @@ export async function findGameWindowRect(options: {
 } = {}): Promise<PhysicalRect | null> {
   const candidates = await probeTopLevelWindows();
   return pickGameWindow(candidates, options);
-}
-
-/** 陈旧的精确进程名探针（保留给测试/极端场景；常规路径用 `probeTopLevelWindows`）。 */
-async function findGameWindowRectByProcessName(): Promise<PhysicalRect | null> {
-  const windir = process.env['windir'] ?? 'C:\\Windows';
-  const ps = join(windir, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-
-  // 注意：必须用 Add-Type -TypeDefinition（main/index.ts 有完整踩坑记录）。
-  // 同时报告 IsWindowVisible 与桌面范围 —— 调用方据此排除幽灵窗口。
-  //
-  // ⚠️ 只认游戏本体进程（'League of Legends'）：客户端 UI
-  // `LeagueClientUx` 的窗口标题同样是 'League of Legends'，按名字找必然误选。
-  //
-  // ⚠️⚠️ 真机事故（2026-10-04，标签整体错位到右下角的根因）：
-  // 这里曾直接用 `[System.Windows.Forms.SystemInformation]::VirtualScreen`，
-  // 却在 Windows PowerShell 5.1 下**没有先加载该程序集** —— 该类型不存在会
-  // 抛终止性错误，整个脚本无输出 → 本函数返回 null → 调用方退化到
-  // "截屏≈显示器"的错误假设（横向刻度差 1.34 倍），标签因此右移 + 贴底。
-  // 现在：先 Add-Type 加载，并且**桌面范围只用 try/catch 取**，取不到也不能
-  // 影响窗口矩形本身的输出。
-  const script = `
-$src = @'
-using System;
-using System.Runtime.InteropServices;
-[StructLayout(LayoutKind.Sequential)]
-public struct HEXBOX_RECT { public int Left, Top, Right, Bottom; }
-public static class HexboxWinApi {
-  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out HEXBOX_RECT lpRect);
-  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
-}
-'@
-Add-Type -TypeDefinition $src -ErrorAction SilentlyContinue
-$proc = Get-Process -Name 'League of Legends' -ErrorAction SilentlyContinue |
-  Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
-if (-not $proc) { exit 0 }
-$r = New-Object HEXBOX_RECT
-[HexboxWinApi]::GetWindowRect($proc.MainWindowHandle, [ref]$r) | Out-Null
-$sw = 0; $sh = 0
-try {
-  Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
-  $sm = [System.Windows.Forms.SystemInformation]::VirtualScreen
-  $sw = $sm.Width; $sh = $sm.Height
-} catch { $sw = 0; $sh = 0 }
-[PSCustomObject]@{
-  X=$r.Left; Y=$r.Top; W=($r.Right-$r.Left); H=($r.Bottom-$r.Top)
-  Visible=[HexboxWinApi]::IsWindowVisible($proc.MainWindowHandle)
-  ScreenW=$sw; ScreenH=$sh
-} | ConvertTo-Json -Compress
-`;
-
-  try {
-    const { stdout } = await execFileAsync(
-      existsSync(ps) ? ps : 'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-Command', script],
-      { windowsHide: true, timeout: 8000 },
-    );
-    const text = stdout.trim();
-    if (!text) return null;
-    const o = JSON.parse(text) as {
-      X?: number;
-      Y?: number;
-      W?: number;
-      H?: number;
-      Visible?: boolean;
-      ScreenW?: number;
-      ScreenH?: number;
-    };
-    if (typeof o.X !== 'number' || typeof o.W !== 'number') return null;
-    const rect: PhysicalRect = { x: o.X, y: o.Y ?? 0, width: o.W, height: o.H ?? 0 };
-    const screen =
-      typeof o.ScreenW === 'number' && typeof o.ScreenH === 'number' && o.ScreenW > 0
-        ? { width: o.ScreenW, height: o.ScreenH, slack: 0 }
-        : undefined;
-    // Visible 缺失（老版本 PowerShell 无 SystemInformation）时按可见处理，
-    // 尺寸与范围判据仍然生效。
-    const visible = o.Visible !== false;
-    return isPlausibleGameWindow({ rect, visible, screen }) ? rect : null;
-  } catch {
-    /* 降级到默认位置 */
-  }
-  return null;
 }
 
 /**

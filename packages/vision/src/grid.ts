@@ -21,7 +21,7 @@
  * 宁可漏，不可错（错标胜率比不显示更糟）。
  */
 
-import type { Bitmap, CardSlot, Rect } from './types.ts';
+import type { Bitmap, Rect } from './types.ts';
 import { lumaAt } from './pixels.ts';
 
 export interface EdgeProjectOptions {
@@ -84,7 +84,7 @@ export function edgeRowProjection(
   x1: number,
   options: EdgeProjectOptions = {},
 ): Uint32Array {
-  const { delta, offset, y0, y1 } = projectOptions(bmp, options);
+  const { delta, offset } = projectOptions(bmp, options);
   const proj = new Uint32Array(bmp.height);
   for (let y = offset; y < bmp.height - offset; y++) {
     for (let x = x0; x <= x1; x++) {
@@ -367,9 +367,4 @@ export function detectCards(
   };
   const res = cardsFromBands(bands, bmp.width, bmp.height, options, extentFn);
   return { ...res, lines: bands.map((b) => b.center) };
-}
-
-/** 把检测结果包装为 CardSlot（尚未识别英雄）。 */
-export function toCardSlots(rects: readonly Rect[]): CardSlot[] {
-  return rects.map((rect) => ({ rect, championId: null, score: 0 }));
 }

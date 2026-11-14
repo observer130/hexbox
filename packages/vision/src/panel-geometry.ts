@@ -78,13 +78,3 @@ export function computePanelBounds(game: Bounds | null, workArea: Bounds): Bound
 
   return { x, y, width, height };
 }
-
-/** 全屏透明覆盖层：铺满目标显示器工作区。 */
-export function computeVisionBounds(workArea: Bounds): Bounds {
-  return {
-    x: workArea.x,
-    y: workArea.y,
-    width: workArea.width,
-    height: workArea.height,
-  };
-}

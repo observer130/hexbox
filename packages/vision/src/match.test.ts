@@ -12,7 +12,6 @@ import { test } from 'node:test';
 import type { Bitmap } from './types.ts';
 import {
   extractGray,
-  makeTemplate,
   matchChampion,
   matchChampionCareful,
   normalizeGray,
@@ -166,28 +165,18 @@ test('similarity：长度不一致返回 0（不抛错）', () => {
 });
 
 /* ------------------------------------------------------------------ */
-/* makeTemplate                                                        */
-/* ------------------------------------------------------------------ */
-
-test('makeTemplate：尺寸不符时抛错（构造期错误要早暴露）', () => {
-  assert.throws(() => makeTemplate(1, new Uint8Array(10), 4), /不符/);
-});
-
-test('makeTemplate：正常构造', () => {
-  const t = makeTemplate(266, patternGray(SIZE, 1), SIZE);
-  assert.equal(t.championId, 266);
-  assert.equal(t.size, SIZE);
-  assert.equal(t.gray.length, SIZE * SIZE);
-});
-
-/* ------------------------------------------------------------------ */
 /* matchChampion                                                       */
 /* ------------------------------------------------------------------ */
 
+/** 测试内构造模板（生产模板是构建期生成物，运行时只做比较，见 templates.ts）。 */
+function makeTestTemplate(championId: number, gray: Uint8Array, size: number) {
+  return { championId, size, gray };
+}
+
 const TEMPLATES = prepareTemplates([
-  makeTemplate(266, patternGray(SIZE, 1), SIZE),
-  makeTemplate(1, patternGray(SIZE, 2), SIZE),
-  makeTemplate(902, patternGray(SIZE, 3), SIZE),
+  makeTestTemplate(266, patternGray(SIZE, 1), SIZE),
+  makeTestTemplate(1, patternGray(SIZE, 2), SIZE),
+  makeTestTemplate(902, patternGray(SIZE, 3), SIZE),
 ]);
 
 test('matchChampion：认出正确的英雄', () => {
@@ -215,7 +204,7 @@ test('matchChampion：纯色图（无信息）返回 null，不硬猜', () => {
 });
 
 test('matchChampion：尺寸不符的模板被跳过', () => {
-  const wrongSize = prepareTemplates([makeTemplate(5, patternGray(8, 1), 8)]);
+  const wrongSize = prepareTemplates([makeTestTemplate(5, patternGray(8, 1), 8)]);
   assert.equal(matchChampion(patternGray(SIZE, 1), wrongSize), null);
 });
 
@@ -254,7 +243,7 @@ test('matchChampionCareful：模板库为空返回 null', () => {
 });
 
 test('matchChampionCareful：单个模板时不做区分度校验（无第二名可比）', () => {
-  const one = prepareTemplates([makeTemplate(266, patternGray(SIZE, 1), SIZE)]);
+  const one = prepareTemplates([makeTestTemplate(266, patternGray(SIZE, 1), SIZE)]);
   const m = matchChampionCareful(patternGray(SIZE, 1), one);
   assert.ok(m);
   assert.equal(m!.championId, 266);

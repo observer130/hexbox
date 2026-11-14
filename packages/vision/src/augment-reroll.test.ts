@@ -21,7 +21,7 @@ import {
   AUGMENT_FINGERPRINT_ZONES,
   AUGMENT_REROLL_THRESHOLD,
   augmentCardFingerprint,
-  augmentFingerprintRect,
+  augmentFingerprintZoneRect,
   augmentWatchFingerprints,
   fingerprintDistance,
   fingerprintIsFlat,
@@ -260,7 +260,7 @@ function avgBmp(x: Bitmap, y: Bitmap): Bitmap {
 /* ------------------------------------------------------------------ */
 
 test('指纹取样区：整体区在卡内上部（不含卡底标签带）+ 图标区，网格 16/8', () => {
-  const r = augmentFingerprintRect(CARD);
+  const r = augmentFingerprintZoneRect(CARD, AUGMENT_FINGERPRINT_ZONE);
   assert.ok(Math.abs(r.x - (CARD.x + CARD.w * 0.1)) < 1e-12);
   assert.ok(Math.abs(r.w - CARD.w * 0.8) < 1e-12);
   // 整体区必须整个落在标签带（标签顶 ≥ 卡内 0.788）之上

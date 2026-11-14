@@ -200,11 +200,6 @@ export const LABEL_SYMPTOM_TAXONOMY: readonly SymptomEntry[] = [
   },
 ];
 
-/** 按症状取排查表（找不到返回 null，不抛）。 */
-export function symptomEntry(symptom: string): SymptomEntry | null {
-  return LABEL_SYMPTOM_TAXONOMY.find((e) => e.symptom === symptom) ?? null;
-}
-
 /**
  * 自测/文档用的一整段文本（**与表同源**，不会出现"文档写了、代码没这行"）。
  *

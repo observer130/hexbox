@@ -188,27 +188,6 @@ export function augmentLabelRect(card: Rect, zone: AugmentLabelZone = AUGMENT_LA
   };
 }
 
-/**
- * 一组卡的标签矩形（识别不出来的卡**不画** —— 用户的"认不准就不画"）。
- *
- * ⚠️ 这是**逐卡各自定位**的老几何：三张卡并排时，如果检测给出的卡片矩形
- * 有像素级差异（真机"单卡重随"必然如此，见 `labelRowBand` 的注释），
- * 三个标签就不在同一高度。局内要的是 `alignRowLabels()`。
- *
- * @param cards 每张卡（`card` 为定位矩形；`augmentId` 为 null 表示没认出来）
- */
-export function augmentLabelRects<T extends { readonly card: Rect; readonly augmentId: number | null }>(
-  cards: readonly T[],
-  zone?: AugmentLabelZone,
-): Array<{ readonly card: T; readonly rect: Rect }> {
-  const out: Array<{ readonly card: T; readonly rect: Rect }> = [];
-  for (const c of cards) {
-    if (c.augmentId === null) continue;
-    out.push({ card: c, rect: augmentLabelRect(c.card, zone) });
-  }
-  return out;
-}
-
 /* ------------------------------------------------------------------ */
 /* 行对齐：同一排的标签共用一个纵向基准（用户："三个标签明显不在一个高度"）   */
 /* ------------------------------------------------------------------ */

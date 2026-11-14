@@ -335,7 +335,7 @@ export function diagnoseTopBarSlots(
   bmp: Bitmap,
   captureSlots: readonly Rect[],
   templates: readonly PreparedTemplate[],
-  options: TopBarScanOptions = {},
+  _options: TopBarScanOptions = {},
 ): TopBarSlotDiag[] {
   const out: TopBarSlotDiag[] = [];
   for (let k = 0; k < captureSlots.length && k < TOP_BAR_ROW.count; k++) {

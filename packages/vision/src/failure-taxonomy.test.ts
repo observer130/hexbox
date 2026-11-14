@@ -16,7 +16,6 @@ import {
   failureTaxonomyText,
   LABEL_SYMPTOM_TAXONOMY,
   LABEL_SYMPTOMS,
-  symptomEntry,
 } from './failure-taxonomy.ts';
 import { decideReconnectChainAction } from './reconnect-recovery.ts';
 
@@ -102,14 +101,6 @@ test('★ 跨模块：表里引用的日志片段，确实由我们自己的函�
     AUGMENT_CLEAR_REASONS.rerollNoTier.includes('查不到强度'),
     'grep「查不到强度」必须能命中词表里的字面量（否则用户搜不到）',
   );
-});
-
-test('symptomEntry：按症状取值；未知返回 null（不抛）', () => {
-  for (const s of LABEL_SYMPTOMS) {
-    assert.equal(symptomEntry(s)?.symptom, s);
-  }
-  assert.equal(symptomEntry('没这个症状'), null);
-  assert.equal(symptomEntry(''), null);
 });
 
 test('★ failureTaxonomyText：把整张表都打出来（不许悄悄少打几行）', () => {

@@ -132,11 +132,6 @@ export function vectorGlyph(ch: string): VectorGlyph | null {
   return VECTOR_GLYPHS[key] ?? null;
 }
 
-/** 是否支持该字形（预览用它决定要不要画字母）。 */
-export function glyphSupported(ch: string): boolean {
-  return vectorGlyph(ch) !== null;
-}
-
 export interface InkBox {
   readonly minX: number;
   readonly minY: number;
@@ -144,7 +139,11 @@ export interface InkBox {
   readonly maxY: number;
 }
 
-/** 字形**墨迹**包围盒（cap 单位；已把半个笔画宽算进去）。 */
+/**
+ * 字形**墨迹**包围盒（cap 单位；已把半个笔画宽算进去）。
+ *
+ * 雅黑大写字母的墨迹宽/高实测约 0.6~0.75（诊断几何时用这个范围）。
+ */
 export function glyphInkBox(ch: string): InkBox | null {
   const g = vectorGlyph(ch);
   if (!g) return null;
@@ -166,12 +165,6 @@ export function glyphInkBox(ch: string): InkBox | null {
     maxX: maxX + INSET,
     maxY: maxY + INSET,
   };
-}
-
-/** 字形墨迹 宽/高（诊断与单测用；YaHei 的大写字母约 0.6~0.75）。 */
-export function glyphInkAspect(ch: string): number | null {
-  const b = glyphInkBox(ch);
-  return b ? (b.maxX - b.minX) / (b.maxY - b.minY) : null;
 }
 
 export interface DrawGlyphOptions {
