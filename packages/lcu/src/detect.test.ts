@@ -15,11 +15,10 @@ import {
   parseExplicitCredentials,
   resolveExplicitCredentials,
   probePort,
-  isInInsecureTlsWindow,
-  withInsecureTls,
   LCU_CREDENTIALS_ENV,
   LCU_CREDENTIALS_FILE_ENV,
 } from './detect.ts';
+import type { InsecureRequestFn } from './https.ts';
 
 /* ------------------------------------------------------------------ */
 /* 凭证探活（2026-10-05 事故：装备推荐"完全失效"）                        */
@@ -103,7 +102,7 @@ test('isBrawlSession 对其它模式返回 false', () => {
 });
 
 /* ------------------------------------------------------------------ */
-/* findLcuPort：TLS 豁免与端口判定                                      */
+/* findLcuPort：端口判定（注入 request，不打真实网络）                    */
 /* ------------------------------------------------------------------ */
 
 /**
@@ -114,203 +113,95 @@ test('isBrawlSession 对其它模式返回 false', () => {
  * 于是**即使端口完全正确也判定不出 LCU**，函数恒返回 null ——
  * 用户看到的是"检测到客户端但读不到凭证"，且极难排查。
  *
- * 这里不打真实网络：用 fetch 桩固定行为契约。
+ * 现在 TLS 由 `requestInsecure` 在**每条连接**上关闭（不再改进程级环境变量）；
+ * 本组测试注入 request 桩，固定"哪些状态码才算 LCU"的契约。
  */
 
-/** 可注入的 fetch 桩：记录调用端口，按端口返回预设结果。 */
-function stubFetch(
-  handler: (port: number) => Response,
+/** 可注入的请求桩：记录调用端口，按端口返回预设状态或抛错。 */
+function stubRequest(
+  handler: (port: number) => { status: number } | Error,
   log: number[] = [],
-): typeof fetch {
-  return (async (input: RequestInfo | URL) => {
-    const port = Number(new URL(String(input)).port);
+): InsecureRequestFn {
+  return async (url) => {
+    const port = Number(new URL(url).port);
     log.push(port);
-    return handler(port);
-  }) as typeof fetch;
+    const r = handler(port);
+    if (r instanceof Error) throw r;
+    return { status: r.status, ok: r.status >= 200 && r.status < 300, text: () => '' };
+  };
 }
 
 test('findLcuPort：识别返回 401 的端口为 LCU', async () => {
-  const original = globalThis.fetch;
   const tried: number[] = [];
-  globalThis.fetch = stubFetch((port) => {
-    // 只有 1356 是 LCU（401），其余连接失败
-    if (port === 1356) return new Response('', { status: 401 });
-    throw new TypeError('fetch failed');
-  }, tried);
-
-  try {
-    const hit = await findLcuPort([
+  const hit = await findLcuPort(
+    [
       { port: 53056, pid: 1 },
       { port: 40017, pid: 1 },
       { port: 1356, pid: 1 },
-    ]);
-    assert.deepEqual(hit, { port: 1356, pid: 1 });
-    assert.deepEqual(tried, [53056, 40017, 1356]); // 逐个尝试直到命中
-  } finally {
-    globalThis.fetch = original;
-  }
+    ],
+    stubRequest((port) => (port === 1356 ? { status: 401 } : new TypeError('连接失败')), tried),
+  );
+  assert.deepEqual(hit, { port: 1356, pid: 1 });
+  assert.deepEqual(tried, [53056, 40017, 1356]); // 逐个尝试直到命中
 });
 
 test('findLcuPort：全部不可达时返回 null（不抛错）', async () => {
-  const original = globalThis.fetch;
-  globalThis.fetch = stubFetch(() => {
-    throw new TypeError('fetch failed');
-  });
-  try {
-    assert.equal(await findLcuPort([{ port: 1, pid: 1 }, { port: 2, pid: 2 }]), null);
-  } finally {
-    globalThis.fetch = original;
-  }
+  assert.equal(
+    await findLcuPort(
+      [
+        { port: 1, pid: 1 },
+        { port: 2, pid: 2 },
+      ],
+      stubRequest(() => new TypeError('连接失败')),
+    ),
+    null,
+  );
 });
 
 test('findLcuPort：空候选返回 null 且不发请求', async () => {
-  const original = globalThis.fetch;
   let called = 0;
-  globalThis.fetch = stubFetch(() => {
+  const request = stubRequest(() => {
     called++;
-    return new Response('', { status: 401 });
+    return { status: 401 };
   });
-  try {
-    assert.equal(await findLcuPort([]), null);
-    assert.equal(called, 0);
-  } finally {
-    globalThis.fetch = original;
-  }
+  assert.equal(await findLcuPort([], request), null);
+  assert.equal(called, 0);
 });
 
 test('findLcuPort：非 401 的响应不算 LCU（200/404 都应跳过）', async () => {
-  const original = globalThis.fetch;
-  globalThis.fetch = stubFetch((port) =>
-    new Response('', { status: port === 111 ? 200 : 404 }),
+  assert.equal(
+    await findLcuPort(
+      [
+        { port: 111, pid: 1 },
+        { port: 222, pid: 2 },
+      ],
+      stubRequest((port) => ({ status: port === 111 ? 200 : 404 })),
+    ),
+    null,
   );
-  try {
-    assert.equal(await findLcuPort([{ port: 111, pid: 1 }, { port: 222, pid: 2 }]), null);
-  } finally {
-    globalThis.fetch = original;
-  }
 });
 
-test('findLcuPort：探测后必须还原 NODE_TLS_REJECT_UNAUTHORIZED', async () => {  const KEY = 'NODE_TLS_REJECT_UNAUTHORIZED';
-  const originalFetch = globalThis.fetch;
+test('findLcuPort：不改进程级 NODE_TLS_REJECT_UNAUTHORIZED（per-connection 关校验）', async () => {
+  const KEY = 'NODE_TLS_REJECT_UNAUTHORIZED';
   const prev = process.env[KEY];
-
-  globalThis.fetch = stubFetch(() => new Response('', { status: 401 }));
   try {
-    // 场景 A：调用前未设置 → 调用后应仍为 undefined
+    // 场景 A：调用前未设置 → 调用后仍为 undefined
     delete process.env[KEY];
-    await findLcuPort([{ port: 1, pid: 1 }]);
+    await findLcuPort([{ port: 1, pid: 1 }], stubRequest(() => ({ status: 401 })));
     assert.equal(
       process.env[KEY],
       undefined,
       '不应把 TLS 豁免泄漏到全局（否则影响其它 HTTPS 请求）',
     );
 
-    // 场景 B：调用前已有值 → 调用后应保持原值
+    // 场景 B：调用前已有值 → 调用后保持原值
     process.env[KEY] = '1';
-    await findLcuPort([{ port: 1, pid: 1 }]);
-    assert.equal(process.env[KEY], '1', '应还原为调用前的值');
+    await findLcuPort([{ port: 1, pid: 1 }], stubRequest(() => ({ status: 401 })));
+    assert.equal(process.env[KEY], '1', '不应改动调用前的值');
   } finally {
-    globalThis.fetch = originalFetch;
     if (prev === undefined) delete process.env[KEY];
     else process.env[KEY] = prev;
   }
-});
-
-/* ------------------------------------------------------------------ */
-/* withInsecureTls：并发/嵌套不许把全局豁免泄漏出去                      */
-/* ------------------------------------------------------------------ */
-
-const TLS_KEY = 'NODE_TLS_REJECT_UNAUTHORIZED';
-
-/** 在测试前后可靠地保存/恢复该环境变量（它是**全局**状态）。 */
-function withCleanTlsEnv(fn: () => Promise<void>): Promise<void> {
-  const prev = process.env[TLS_KEY];
-  delete process.env[TLS_KEY];
-  return fn().finally(() => {
-    if (prev === undefined) delete process.env[TLS_KEY];
-    else process.env[TLS_KEY] = prev;
-  });
-}
-
-test('withInsecureTls：单个调用结束后不留全局豁免（原值为空）', async () => {
-  await withCleanTlsEnv(async () => {
-    await withInsecureTls(async () => {
-      assert.equal(process.env[TLS_KEY], '0', '回调期间应处于豁免');
-    });
-    assert.equal(process.env[TLS_KEY], undefined, '结束后必须还原（否则全进程 HTTPS 失去校验）');
-    assert.equal(isInInsecureTlsWindow(), false);
-  });
-});
-
-test('withInsecureTls：原值存在时还原为原值', async () => {
-  await withCleanTlsEnv(async () => {
-    process.env[TLS_KEY] = '1';
-    await withInsecureTls(async () => undefined);
-    assert.equal(process.env[TLS_KEY], '1');
-  });
-});
-
-test('withInsecureTls：并发重叠时**最后一方**才还原（旧实现会永久留下 "0"）', async () => {
-  await withCleanTlsEnv(async () => {
-    let releaseA!: () => void;
-    let releaseB!: () => void;
-    const gateA = new Promise<void>((r) => {
-      releaseA = r;
-    });
-    const gateB = new Promise<void>((r) => {
-      releaseB = r;
-    });
-
-    // 两个调用都以同步方式进入窗口（各 +1），随后各自等待
-    const a = withInsecureTls(async () => {
-      await gateA;
-      return 'a';
-    });
-    const b = withInsecureTls(async () => {
-      await gateB;
-      return 'b';
-    });
-    assert.equal(process.env[TLS_KEY], '0', '两者都在飞时应保持豁免');
-
-    // A 先结束：旧实现会在这一刻还原变量 → B 仍在飞的握手失去豁免
-    releaseA();
-    assert.equal(await a, 'a');
-    assert.equal(process.env[TLS_KEY], '0', 'A 结束后 B 仍在飞，豁免不能被撤');
-
-    releaseB();
-    assert.equal(await b, 'b');
-    assert.equal(process.env[TLS_KEY], undefined, '最后一方结束后必须还原');
-    assert.equal(isInInsecureTlsWindow(), false);
-  });
-});
-
-test('withInsecureTls：嵌套调用只在最外层结束时还原', async () => {
-  await withCleanTlsEnv(async () => {
-    await withInsecureTls(async () => {
-      await withInsecureTls(async () => {
-        assert.equal(process.env[TLS_KEY], '0');
-      });
-      assert.equal(process.env[TLS_KEY], '0', '内层结束不许撤掉外层的豁免');
-    });
-    assert.equal(process.env[TLS_KEY], undefined);
-  });
-});
-
-test('withInsecureTls：回调抛错也必须还原，且不破坏计数', async () => {
-  await withCleanTlsEnv(async () => {
-    await assert.rejects(
-      () =>
-        withInsecureTls(async () => {
-          throw new Error('boom');
-        }),
-      /boom/,
-    );
-    assert.equal(process.env[TLS_KEY], undefined);
-    assert.equal(isInInsecureTlsWindow(), false);
-    // 计数没坏：下一次仍能正常工作
-    await withInsecureTls(async () => undefined);
-    assert.equal(process.env[TLS_KEY], undefined);
-  });
 });
 
 /* ------------------------------------------------------------------ */

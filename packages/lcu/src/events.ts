@@ -403,8 +403,8 @@ export class LcuEventStream {
  * 拿到的是**裸 socket**，正好喂给 `ws-frame.ts` 的解析器。
  *
  * ⚠️ TLS：LCU 是自签证书，这里按 `rejectUnauthorized: false` 关校验 ——
- * 与 `LcuClient` 走 `withInsecureTls()` 是同一件事，只是 WebSocket 没有
- * fetch 那种"临时环境变量"的余地，只能在连接参数上关。
+ * 与 `LcuClient` 的"每个请求单独关校验"是同一件事（都只影响本连接），
+ * 不碰进程级 `NODE_TLS_REJECT_UNAUTHORIZED`。
  * **只连 127.0.0.1**，这个取舍与仓库既有做法一致。
  */
 export async function openLcuSocket(creds: LcuCredentials): Promise<LcuSocketLike> {

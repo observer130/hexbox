@@ -6,7 +6,8 @@
  *  or it ignores that error"）。
  */
 
-import { basicAuthHeader, withInsecureTls, type LcuCredentials } from './detect.ts';
+import { basicAuthHeader, type LcuCredentials } from './detect.ts';
+import { requestInsecure, type InsecureRequestFn } from './https.ts';
 
 export interface LcuRequestOptions {
   readonly signal?: AbortSignal;
@@ -48,9 +49,12 @@ export class LcuHttpError extends Error {
 export class LcuClient {
   // 注意：不使用 TS 参数属性（strip-only 模式不支持）
   private readonly creds: LcuCredentials;
+  /** 注入点：测试替换为桩；生产走 `requestInsecure`（per-connection 关校验）。 */
+  private readonly request: InsecureRequestFn;
 
-  constructor(creds: LcuCredentials) {
+  constructor(creds: LcuCredentials, request: InsecureRequestFn = requestInsecure) {
     this.creds = creds;
+    this.request = request;
   }
 
   get port(): number {
@@ -61,41 +65,36 @@ export class LcuClient {
     return this.creds.source;
   }
 
+  /** 拼 URL（LCU 只连本机回环，不跟随任何外部跳转）。 */
+  private urlOf(path: string): string {
+    return `https://127.0.0.1:${this.creds.port}${path.startsWith('/') ? path : `/${path}`}`;
+  }
+
   /**
-   * 发送 GET 请求。ignoreHTTPSErrors 由调用方通过 NODE_TLS_REJECT_UNAUTHORIZED
-   * 或 undici Agent 处理；这里只负责拼装 URL 与认证头。
+   * 发送 GET 请求。
+   *
+   * TLS：`requestInsecure` 对**本连接** `rejectUnauthorized:false`（LCU 自签证书），
+   * 不再用进程级 `NODE_TLS_REJECT_UNAUTHORIZED` —— 后者会让并发中的其它 HTTPS
+   * （数据同步、更新检查）一起失去证书校验。
    *
    * 非 2xx 抛 `LcuHttpError`（带状态码），便于调用方区分
    * 「无会话」与「鉴权失败」。
    */
   async get<T = unknown>(path: string, opts: LcuRequestOptions = {}): Promise<T> {
-    const url = `https://127.0.0.1:${this.creds.port}${path.startsWith('/') ? path : `/${path}`}`;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 5000);
-    if (opts.signal) {
-      opts.signal.addEventListener('abort', () => controller.abort(), { once: true });
+    const res = await this.request(this.urlOf(path), {
+      headers: {
+        Authorization: basicAuthHeader(this.creds.password),
+        Accept: 'application/json',
+      },
+      ...(opts.signal ? { signal: opts.signal } : {}),
+      timeoutMs: opts.timeoutMs ?? 5000,
+    });
+    if (!res.ok) {
+      throw new LcuHttpError(path, res.status);
     }
-
-    try {
-      // 用 withInsecureTls 包裹：LCU 是自签证书，不豁免会直接
-      // 抛 SELF_SIGNED_CERT_IN_CHAIN（表现为 fetch failed）。
-      // 放在客户端内部而不是让调用方设置环境变量 —— 后者已经漏过三次。
-      const res = await withInsecureTls(() =>
-        fetch(url, {
-          headers: {
-            Authorization: basicAuthHeader(this.creds.password),
-            Accept: 'application/json',
-          },
-          signal: controller.signal,
-        }),
-      );
-      if (!res.ok) {
-        throw new LcuHttpError(path, res.status);
-      }
-      return (await res.json()) as T;
-    } finally {
-      clearTimeout(timer);
-    }
+    const text = res.text();
+    if (!text) return null as T; // 204/空正文（GET 少见，保持与旧行为一致）
+    return JSON.parse(text) as T;
   }
 
   /**
@@ -126,41 +125,28 @@ export class LcuClient {
     body: unknown,
     opts: LcuRequestOptions = {},
   ): Promise<T | null> {
-    const url = `https://127.0.0.1:${this.creds.port}${path.startsWith('/') ? path : `/${path}`}`;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 8000);
-    if (opts.signal) {
-      opts.signal.addEventListener('abort', () => controller.abort(), { once: true });
+    const res = await this.request(this.urlOf(path), {
+      method,
+      headers: {
+        Authorization: basicAuthHeader(this.creds.password),
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      ...(opts.signal ? { signal: opts.signal } : {}),
+      timeoutMs: opts.timeoutMs ?? 8000,
+    });
+    if (!res.ok) {
+      throw new LcuHttpError(path, res.status);
     }
-
+    // 204 No Content 是常见成功响应（写入类接口）
+    if (res.status === 204) return null;
+    const text = res.text();
+    if (!text) return null;
     try {
-      // 同 get：写请求也必须在关闭 TLS 校验的前提下发出
-      const res = await withInsecureTls(() =>
-        fetch(url, {
-          method,
-          headers: {
-            Authorization: basicAuthHeader(this.creds.password),
-            Accept: 'application/json',
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(body),
-          signal: controller.signal,
-        }),
-      );
-      if (!res.ok) {
-        throw new LcuHttpError(path, res.status);
-      }
-      // 204 No Content 是常见成功响应（写入类接口）
-      if (res.status === 204) return null;
-      const text = await res.text();
-      if (!text) return null;
-      try {
-        return JSON.parse(text) as T;
-      } catch {
-        return null; // 非 JSON 响应（如纯文本 OK）也算成功
-      }
-    } finally {
-      clearTimeout(timer);
+      return JSON.parse(text) as T;
+    } catch {
+      return null; // 非 JSON 响应（如纯文本 OK）也算成功
     }
   }
 }

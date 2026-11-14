@@ -67,8 +67,8 @@ async function main(): Promise<void> {
   if (creds.lockfilePath) line('lockfile', creds.lockfilePath);
   console.log('  ✓ 凭证可用\n');
 
-  // LCU 自签名证书：官方要求忽略校验
-  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+  // TLS：LcuClient 对**每个请求**单独 rejectUnauthorized:false（自签证书），
+  // 不再动进程级 NODE_TLS_REJECT_UNAUTHORIZED（那会连带关掉其它 HTTPS 的校验）。
   const client = new LcuClient(creds);
 
   console.log('[2] 连通性 —— /lol-summoner/v1/current-summoner');

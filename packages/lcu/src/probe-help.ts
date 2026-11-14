@@ -12,9 +12,12 @@
  *
  * 用法（在有真实对局时）:
  *   node --experimental-strip-types packages/lcu/src/probe-help.ts
+ *
+ * TLS：2999 也是自签证书。这里用 `requestInsecure` **只对本连接**关校验，
+ * 不再设置 `NODE_TLS_REJECT_UNAUTHORIZED`（进程级开关会连带影响其它 HTTPS）。
  */
 
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+import { requestInsecure } from './https.ts';
 
 const BASE = 'https://127.0.0.1:2999';
 
@@ -31,18 +34,18 @@ const KEYWORDS = [
 ] as const;
 
 async function getJson(path: string): Promise<unknown> {
-  const res = await fetch(BASE + path, { signal: AbortSignal.timeout(5000) });
+  const res = await requestInsecure(BASE + path, { timeoutMs: 5000 });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json() as Promise<unknown>;
+  return JSON.parse(res.text()) as unknown;
 }
 
 async function postJson(path: string): Promise<unknown> {
-  const res = await fetch(BASE + path, {
+  const res = await requestInsecure(BASE + path, {
     method: 'POST',
-    signal: AbortSignal.timeout(8000),
+    timeoutMs: 8000,
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json() as Promise<unknown>;
+  return JSON.parse(res.text()) as unknown;
 }
 
 function countHits(text: string): Map<string, number> {

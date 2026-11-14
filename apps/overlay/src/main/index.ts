@@ -2114,7 +2114,7 @@ app.whenReady().then(() => {
   if (!singleInstanceLock) return;
 
   // 注意：**不要**在这里全局设置 NODE_TLS_REJECT_UNAUTHORIZED。
-  // LcuClient 内部已用 withInsecureTls() 按请求豁免自签证书，
+  // LcuClient 对每个请求单独关校验（per-connection `rejectUnauthorized:false`），
   // 全局关闭会顺带让所有其它 HTTPS 请求（含外部数据源）失去校验。
 
   // ── 覆盖窗自测（`HEXBOX_LABEL_OVERLAY_TEST=1`）────────────────────────

@@ -22,6 +22,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
+import { requestInsecure, type InsecureRequestFn } from './https.ts';
+
 const execFileAsync = promisify(execFile);
 
 /**
@@ -185,82 +187,27 @@ export async function detectPortByListener(): Promise<Array<{ port: number; pid:
  *
  * ⚠️ 必须自行关闭 TLS 校验：LCU 用自签证书，Node 的 fetch 会直接抛
  * `SELF_SIGNED_CERT_IN_CHAIN`（表现为 `TypeError: fetch failed`），
- * 于是**即使端口正确也判定不出来**。不能依赖调用方预先设置
- * `NODE_TLS_REJECT_UNAUTHORIZED` —— 那是全局副作用，设置时机不对或被
- * 其它代码重置就会静默失效（本项目真实踩过）。因此在函数内临时设置并还原。
+ * 于是**即使端口正确也判定不出来**。这里用 `requestInsecure` **只对本连接**
+ * 关校验（`rejectUnauthorized:false`），不碰 `NODE_TLS_REJECT_UNAUTHORIZED`
+ * 进程级开关 —— 后者会让同期其它 HTTPS 请求一起失校验（本项目真实踩过）。
  */
 export async function findLcuPort(
   candidates: readonly { port: number; pid: number }[],
+  request: InsecureRequestFn = requestInsecure,
 ): Promise<{ port: number; pid: number } | null> {
-  return await withInsecureTls(async () => {
-    for (const c of candidates) {
-      try {
-        const res = await fetch(
-          `https://127.0.0.1:${c.port}/lol-summoner/v1/current-summoner`,
-          { signal: AbortSignal.timeout(2500) },
-        );
-        // 401 = 服务存在但缺凭证 → 就是 LCU
-        if (res.status === 401) return c;
-      } catch {
-        // 超时/不可达 → 继续试下一个
-      }
-    }
-    return null;
-  });
-}
-
-/**
- * 正在"临时关闭 TLS 校验"的调用数（**引用计数**）。
- *
- * 为什么必须是计数而不是"存原值/还原原值"：并发或嵌套时，先结束的一方会把
- * 变量还原成"进入时的值"，而那个值可能正是另一方的 `'0'`；等最后一方结束时
- * 又把它写回去 —— 于是 `NODE_TLS_REJECT_UNAUTHORIZED=0` **永久留在进程里**，
- * 之后所有 HTTPS（数据同步、更新检查）都失去证书校验；同时先结束的那一方
- * 还会让仍在握手的一方差掉豁免（`SELF_SIGNED_CERT_IN_CHAIN`）。
- *
- * 计数式的语义：**第一个进来时设 '0'，最后一个出去时还原**，中间无论多少
- * 并发/嵌套都保持豁免。
- */
-let insecureTlsDepth = 0;
-/** 第一个调用进入前的原值（只在计数归零时用它还原）。 */
-let insecureTlsPrevious: string | undefined;
-
-const REJECT_UNAUTHORIZED = 'NODE_TLS_REJECT_UNAUTHORIZED';
-
-/**
- * 在回调执行期间临时关闭 TLS 校验，结束后**无论成败都还原**。
- *
- * 为什么不用 undici.Agent：`undici` 在本仓库不是可解析的依赖
- * （Node 内置，但 `import 'undici'` 会 ERR_MODULE_NOT_FOUND），
- * 为一个探测函数引入新依赖不值得。环境变量方案零依赖、行为一致。
- *
- * 已知取舍：这是进程级开关，回调期间并发的 HTTPS 请求也会被一并豁免。
- * 本函数只用于探测本机 LCU 端口，调用点集中，风险可接受。
- *
- * ⚠️ `LcuClient` 内部也用它包裹每个请求 —— 因为「忘记关闭校验」
- * 这个坑在本项目已经踩过三次（findLcuPort、overlay、itemset-cli）。
- * 与其在每个入口重复设置，不如让客户端自己保证。
- */
-export async function withInsecureTls<T>(fn: () => Promise<T>): Promise<T> {
-  if (insecureTlsDepth === 0) insecureTlsPrevious = process.env[REJECT_UNAUTHORIZED];
-  insecureTlsDepth++;
-  process.env[REJECT_UNAUTHORIZED] = '0';
-  try {
-    return await fn();
-  } finally {
-    insecureTlsDepth--;
-    // 只有最后一个调用才有资格还原：并发中途还原会把别人的豁免一起撤掉
-    if (insecureTlsDepth === 0) {
-      if (insecureTlsPrevious === undefined) delete process.env[REJECT_UNAUTHORIZED];
-      else process.env[REJECT_UNAUTHORIZED] = insecureTlsPrevious;
-      insecureTlsPrevious = undefined;
+  for (const c of candidates) {
+    try {
+      const res = await request(
+        `https://127.0.0.1:${c.port}/lol-summoner/v1/current-summoner`,
+        { timeoutMs: 2500 },
+      );
+      // 401 = 服务存在但缺凭证 → 就是 LCU
+      if (res.status === 401) return c;
+    } catch {
+      // 超时/不可达 → 继续试下一个
     }
   }
-}
-
-/** 当前是否处于"临时关闭 TLS 校验"窗口内（诊断/测试用）。 */
-export function isInInsecureTlsWindow(): boolean {
-  return insecureTlsDepth > 0;
+  return null;
 }
 
 /**
