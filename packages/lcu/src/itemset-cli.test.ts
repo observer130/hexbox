@@ -18,11 +18,12 @@
  */
 
 import assert from 'node:assert/strict';
+import { resolve } from 'node:path';
 import { test } from 'node:test';
 
 import type { ItemSet } from '@hexbox/core';
 
-import { parseRemoteSets, writeGuard } from './itemset-cli.ts';
+import { parseRemoteSets, resolveItemsetDataDir, writeGuard } from './itemset-cli.ts';
 
 /* ------------------------------------------------------------------ */
 /* 夹具                                                                */
@@ -127,4 +128,35 @@ test('writeGuard：可读且非空 → 原样交给调用方（玩家方案必�
   assert.equal(guard.ok, true);
   if (!guard.ok) return;
   assert.equal(guard.sets.itemSets.length, 1);
+});
+
+/* ------------------------------------------------------------------ */
+/* resolveItemsetDataDir：数据目录口径（默认 ./data，可被环境变量覆盖）    */
+/* ------------------------------------------------------------------ */
+
+test('resolveItemsetDataDir：没有 HEXBOX_DATA_DIR → <cwd>/data', () => {
+  const cwd = resolve('fixtures', 'repo');
+  assert.equal(resolveItemsetDataDir(cwd, {}), resolve(cwd, 'data'));
+  assert.equal(
+    resolveItemsetDataDir(cwd, { HEXBOX_DATA_DIR: undefined }),
+    resolve(cwd, 'data'),
+    '显式 undefined 等同未设置',
+  );
+});
+
+test('resolveItemsetDataDir：HEXBOX_DATA_DIR 优先，并 resolve 成绝对路径', () => {
+  const cwd = resolve('fixtures', 'repo');
+  const override = 'D:\\x\\data';
+  assert.equal(resolveItemsetDataDir(cwd, { HEXBOX_DATA_DIR: override }), resolve(cwd, override));
+  assert.equal(
+    resolveItemsetDataDir(cwd, { HEXBOX_DATA_DIR: 'data-alt' }),
+    resolve(cwd, 'data-alt'),
+    '相对值按 cwd 解析（不依赖进程当前目录）',
+  );
+});
+
+test('resolveItemsetDataDir：HEXBOX_DATA_DIR 是空白 → 回退 <cwd>/data', () => {
+  const cwd = resolve('fixtures', 'repo');
+  assert.equal(resolveItemsetDataDir(cwd, { HEXBOX_DATA_DIR: '' }), resolve(cwd, 'data'));
+  assert.equal(resolveItemsetDataDir(cwd, { HEXBOX_DATA_DIR: '   ' }), resolve(cwd, 'data'), '空白要 trim 后判空');
 });

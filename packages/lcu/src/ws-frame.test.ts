@@ -10,7 +10,6 @@ import { test } from 'node:test';
 
 import {
   createFrameParser,
-  encodeCloseFrame,
   encodeFrame,
   encodePongFrame,
   encodeTextFrame,
@@ -56,17 +55,6 @@ test('encodePongFrame：opcode 0x8a + FIN，同样掩码', () => {
   assert.equal(frame[0], 0x8a);
   assert.equal(frame[1], 0x81, '长度 1 + MASK 位');
   assert.equal(frame[6], 0xaa ^ 0x01);
-});
-
-test('encodeCloseFrame：状态码按大端写进载荷前两字节', () => {
-  const frame = encodeCloseFrame(1000, 'bye', MASK);
-  assert.equal(frame[0], 0x88);
-  // 2 头 + 4 掩码 = 6，掩码后载荷需解回
-  const parser = createFrameParser();
-  // 解析器只认服务端帧（不掩码），所以这里改为手工核对：载荷长度 = 2 + 3
-  assert.equal(frame[1]! & 0x7f, 5);
-  assert.deepEqual([...frame.subarray(6)].map((b, i) => b ^ (MASK[i % 4] ?? 0)), [0x03, 0xe8, 0x62, 0x79, 0x65]);
-  assert.equal(parser.push(new Uint8Array(0)).length, 0);
 });
 
 test('encodeFrame：126 与 127 两种扩展长度各写一次（并回读一致）', () => {

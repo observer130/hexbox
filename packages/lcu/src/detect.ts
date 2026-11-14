@@ -15,7 +15,6 @@
  */
 
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { connect } from 'node:net';
 import { homedir } from 'node:os';

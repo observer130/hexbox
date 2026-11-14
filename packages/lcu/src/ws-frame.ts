@@ -110,20 +110,6 @@ export function encodePongFrame(payload: Uint8Array, maskKey?: Uint8Array): Uint
   return encodeFrame(OP_PONG, payload, maskKey);
 }
 
-/** close 帧。 */
-export function encodeCloseFrame(
-  code: number = 1000,
-  reason = '',
-  maskKey?: Uint8Array,
-): Uint8Array {
-  const r = new TextEncoder().encode(reason);
-  const payload = new Uint8Array(2 + r.length);
-  payload[0] = (code >>> 8) & 0xff;
-  payload[1] = code & 0xff;
-  payload.set(r, 2);
-  return encodeFrame(OP_CLOSE, payload, maskKey);
-}
-
 /** close 帧载荷 → 状态码 + 原因（空载荷合法，表示"无状态码"）。 */
 export function parseClosePayload(payload: Uint8Array): { code: number | null; reason: string } {
   if (payload.length === 0) return { code: null, reason: '' };

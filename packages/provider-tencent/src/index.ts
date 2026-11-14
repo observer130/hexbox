@@ -180,25 +180,6 @@ export function normalizeKiwiAugments(raws: readonly RawKiwiAugment[]): HextechS
     }));
 }
 
-/**
- * ID 桥：国服数字 ID ↔ CDragon augmentNameId。
- *
- * 两套官方 ID 不能直接换算（106/248 数字冲突），只能按归一化名称对齐
- * （去 `ARAM_` 前缀、小写）。排行榜条目经此桥取得 CDragon 口径信息。
- */
-export function buildIdBridge(
-  hextechs: readonly HextechStatic[],
-): Map<number, string> {
-  const bridge = new Map<number, string>();
-  for (const h of hextechs) bridge.set(h.id, h.augmentNameId);
-  return bridge;
-}
-
-/** 归一化 augmentNameId（与 provider-communitydragon 的对齐规则一致）。 */
-export function normalizeAugmentNameId(nameId: string): string {
-  return nameId.replace(/^ARAM_/i, '').toLowerCase();
-}
-
 /* ------------------------------------------------------------------ */
 /* 排行榜解析（official-aggregated）                                    */
 /* ------------------------------------------------------------------ */

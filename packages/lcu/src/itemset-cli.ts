@@ -12,6 +12,9 @@
  *   - 永不删除或覆盖玩家手写的方案；
  *   - 默认只处理「有出装统计」的英雄。
  *
+ * 数据目录：默认读 `./data`（相对启动目录），可用 `HEXBOX_DATA_DIR` 指定
+ * （与覆盖层/其它入口一致；否则从 `apps/overlay` 或任意目录启动读不到数据）。
+ *
  * ⚠️ 这是把本地统计推送到**你的真实客户端数据**的操作。
  *    `list` 是只读的，建议先跑它确认现状。
  */
@@ -30,7 +33,21 @@ import {
 } from '@hexbox/core';
 import { LcuClient, detectCredentialsDetailed } from './index.ts';
 
-const DATA_DIR = resolve(process.cwd(), 'data');
+/**
+ * 解析数据目录（**纯函数**，可单测）。
+ *
+ * 默认 `resolve(cwd, 'data')`；`HEXBOX_DATA_DIR` 非空（trim 后）时以它为准，
+ * 相对值按 `cwd` 解析成绝对路径（与覆盖层/其它入口的约定一致）。
+ */
+export function resolveItemsetDataDir(
+  cwd: string,
+  env: Record<string, string | undefined>,
+): string {
+  const override = env['HEXBOX_DATA_DIR']?.trim();
+  return override ? resolve(cwd, override) : resolve(cwd, 'data');
+}
+
+const DATA_DIR = resolveItemsetDataDir(process.cwd(), process.env);
 
 /** 线上方案列表（`GET /lol-item-sets/v1/item-sets/{summonerId}/sets` 的形状）。 */
 export interface RemoteSets {

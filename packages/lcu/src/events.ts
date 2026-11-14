@@ -30,8 +30,6 @@ import { createFrameParser, encodePongFrame, encodeTextFrame, type WsFrame } fro
 
 /** LCU 的 WAMP 订阅命令 opcode（Riot 的本地事件通道用的是标准 WAMP 子协议号）。 */
 export const WAMP_SUBSCRIBE = 5;
-/** 取消订阅。 */
-export const WAMP_UNSUBSCRIBE = 6;
 /** WAMP 事件消息类型号。 */
 export const WAMP_EVENT = 8;
 
@@ -55,11 +53,6 @@ export const LCU_GAMEFLOW_PHASE_EVENT = 'OnJsonApiEvent_lol-gameflow_v1_gameflow
 /** 订阅一条事件（作为 WebSocket 文本帧发送）。 */
 export function wampSubscribeMessage(eventName: string): string {
   return JSON.stringify([WAMP_SUBSCRIBE, eventName]);
-}
-
-/** 取消订阅一条事件。 */
-export function wampUnsubscribeMessage(eventName: string): string {
-  return JSON.stringify([WAMP_UNSUBSCRIBE, eventName]);
 }
 
 /** 一条 WAMP 消息（LCU 用 JSON 数组：`[type, ...]`）。 */

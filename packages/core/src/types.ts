@@ -10,8 +10,8 @@
  *   - 海克斯存在两套官方 ID：
  *     · CDragon 数字 ID（如 1205，来自 cherry-augments.json 的 id 字段）
  *     · 国服官方数字 ID（如 1001，来自腾讯一方 kiwi_augments.json 的 augmentID）
- *     两套 ID **不能互相换算**，按归一化 augmentNameId 对齐（见
- *     provider-tencent 的 buildIdBridge）。海克斯排行榜使用国服 ID。
+ *     两套 ID **不能互相换算**，只能按归一化 augmentNameId 对齐
+ *     （provider-tencent 在合并时做这层映射）。海克斯排行榜使用国服 ID。
  *   - 英雄 ID 全生态一致（championId），排行榜直接可用。
  */
 

@@ -21,7 +21,6 @@ import {
   LCU_GAMEFLOW_PHASE_EVENT,
   openLcuSocket,
   wampSubscribeMessage,
-  wampUnsubscribeMessage,
   webSocketAcceptFor,
   WS_ACCEPT_GUID,
   type LcuSocketLike,
@@ -201,9 +200,8 @@ test('webSocketAcceptFor / isValidWebSocketAccept：RFC6455 标准向量（本�
   assert.equal(isValidWebSocketAccept(webSocketAcceptFor('别的 key'), key), false);
 });
 
-test('wampSubscribeMessage / wampUnsubscribeMessage：锁住字面量（改了就静默收不到事件）', () => {
+test('wampSubscribeMessage：锁住字面量（改了就静默收不到事件）', () => {
   assert.equal(wampSubscribeMessage(LCU_GAMEFLOW_PHASE_EVENT), '[5,"OnJsonApiEvent_lol-gameflow_v1_gameflow-phase"]');
-  assert.equal(wampUnsubscribeMessage('X'), '[6,"X"]');
 });
 
 test('decodeWampMessage：正常数组 / 非 JSON / 非数组 / 空数组', () => {

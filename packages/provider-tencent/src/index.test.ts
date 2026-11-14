@@ -11,12 +11,10 @@ import { test } from 'node:test';
 import { MemoryHttpCache } from '@hexbox/core';
 
 import {
-  buildIdBridge,
   createTencentRankingProvider,
   createTencentStaticProvider,
   extractFieldValue,
   fetchHeroDetail,
-  normalizeAugmentNameId,
   normalizeKiwiAugments,
   parseAugmentRankList,
   parseDataDate,
@@ -92,13 +90,6 @@ test('normalizeKiwiAugments：未知模式与稀有度安全降级', () => {
   const e = out[0]!;
   assert.deepEqual([...e.modes], []);
   assert.equal(e.rarity, 'kSilver');
-});
-
-test('buildIdBridge + normalizeAugmentNameId：与 CDragon 口径对齐规则一致', () => {
-  const bridge = buildIdBridge(normalizeKiwiAugments(KIWI_FIXTURE));
-  assert.equal(bridge.get(1001), 'ARAM_ImTheJuggernaut');
-  assert.equal(normalizeAugmentNameId('ARAM_ImTheJuggernaut'), 'imthejuggernaut');
-  assert.equal(normalizeAugmentNameId('ImTheJuggernaut'), 'imthejuggernaut');
 });
 
 /* ------------------------------------------------------------------ */
