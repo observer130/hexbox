@@ -28,6 +28,9 @@ export * from './augment-recognize.ts';
 // （纯计算/零 Node 依赖；让 preload→主进程→录制器四跳共用一份类型，而不是各写一份匿名类型）
 export * from './augment-session.ts';
 export * from './augment-label.ts';
+// 档位配对色（S/A/B/C）：渲染端画字母/尖括号/发光时取色，必须与主进程标签同一来源。
+// 只依赖 types/geometry（纯计算），可安全进浏览器包。
+export * from './augment-tier-label.ts';
 // 面板停留期间的**单卡刷新**检测（指纹在渲染端算：只有它拿得到门控画布像素）
 export * from './augment-reroll.ts';
 // 覆盖层画布纯计算（渲染端 overlay-canvas.ts 用它算位图尺寸）

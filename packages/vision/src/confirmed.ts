@@ -26,7 +26,8 @@
  *     用独立于 matchChampionCareful 的宽松阈值（0.80/0.05）。
  */
 
-import type { Bitmap, PreparedTemplate, Rect } from './index.ts';
+import type { Bitmap, Rect } from './types.ts';
+import type { PreparedTemplate } from './match.ts';
 import { extractGray, extractGrayRaw, extractRgb, normalizeGray, similarity } from './match.ts';
 
 /* ------------------------------------------------------------------ */

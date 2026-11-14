@@ -26,6 +26,7 @@
  */
 
 import { TIER_FONT_SCALE } from './label-draw.ts';
+import { medianOrNull } from './pixels.ts';
 import type { Rect } from './types.ts';
 
 /** 标签水平对齐：底部居中（默认）或右下角贴边（第一版的做法，保留给测试/将来用）。 */
@@ -250,11 +251,8 @@ export interface LabelRowBand {
  * 纯函数、不排序入参（自己拷一份排），所以调用方的数组不会被改动。
  */
 export function median(values: readonly number[]): number | null {
-  if (values.length === 0) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  if (sorted.length % 2 === 1) return sorted[mid]!;
-  return (sorted[mid - 1]! + sorted[mid]!) / 2;
+  // 实现在 `pixels.ts`（与其它识别链路共用一份；语义：空数组 → null、不动入参）
+  return medianOrNull(values);
 }
 
 /**

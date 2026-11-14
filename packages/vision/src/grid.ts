@@ -22,12 +22,7 @@
  */
 
 import type { Bitmap, CardSlot, Rect } from './types.ts';
-
-/** 亮度（Rec.601）。 */
-function lumaAt(data: Uint8ClampedArray, width: number, x: number, y: number): number {
-  const i = (y * width + x) * 4;
-  return 0.299 * data[i]! + 0.587 * data[i + 1]! + 0.114 * data[i + 2]!;
-}
+import { lumaAt } from './pixels.ts';
 
 export interface EdgeProjectOptions {
   /** 判定为「亮于邻域」的最小亮度差（0-255 亮度空间，与分辨率无关）。 */
@@ -66,10 +61,10 @@ export function edgeColumnProjection(
   const proj = new Uint32Array(bmp.width);
   for (let y = y0; y < y1; y++) {
     for (let x = offset; x < bmp.width - offset; x++) {
-      const c = lumaAt(bmp.data, bmp.width, x, y);
+      const c = lumaAt(bmp, x, y);
       const d = Math.max(
-        c - lumaAt(bmp.data, bmp.width, x - offset, y),
-        c - lumaAt(bmp.data, bmp.width, x + offset, y),
+        c - lumaAt(bmp, x - offset, y),
+        c - lumaAt(bmp, x + offset, y),
       );
       if (d > delta) proj[x]!++;
     }
@@ -93,10 +88,10 @@ export function edgeRowProjection(
   const proj = new Uint32Array(bmp.height);
   for (let y = offset; y < bmp.height - offset; y++) {
     for (let x = x0; x <= x1; x++) {
-      const c = lumaAt(bmp.data, bmp.width, x, y);
+      const c = lumaAt(bmp, x, y);
       const d = Math.max(
-        c - lumaAt(bmp.data, bmp.width, x, y - offset),
-        c - lumaAt(bmp.data, bmp.width, x, y + offset),
+        c - lumaAt(bmp, x, y - offset),
+        c - lumaAt(bmp, x, y + offset),
       );
       if (d > delta) proj[y]!++;
     }

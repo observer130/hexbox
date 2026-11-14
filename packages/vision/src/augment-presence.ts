@@ -96,6 +96,7 @@
  */
 
 import type { Bitmap, Rect } from './types.ts';
+import { lumaAt } from './pixels.ts';
 
 /**
  * 卡片行搜索区（**与 `augment-panel.ts` 的 `PANEL_ROW_REGION` 同一个区**）。
@@ -179,12 +180,6 @@ export const NO_PANEL_PRESENCE: PanelPresence = {
   bottomProminence: 0,
   reason: '未提供面板信号（按"不在"处理）',
 };
-
-/** 像素亮度（Rec.601 近似；与门控其它判据同一套算法）。 */
-function lumaAt(bmp: Bitmap, x: number, y: number): number {
-  const i = (y * bmp.width + x) * 4;
-  return 0.299 * bmp.data[i]! + 0.587 * bmp.data[i + 1]! + 0.114 * bmp.data[i + 2]!;
-}
 
 /**
  * 检测一帧里"面板这个 UI 元素是否仍在"（纯函数；只做一次按行扫描）。

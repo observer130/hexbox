@@ -65,6 +65,7 @@
  */
 
 import type { Bitmap, Rect } from './types.ts';
+import { lumaAt, medianInPlace } from './pixels.ts';
 
 /**
  * 选人候选卡布局（**窗口归一化**）。
@@ -157,22 +158,6 @@ export function champSelectCardRects(
 /* 位图采样                                                            */
 /* ------------------------------------------------------------------ */
 
-/** 亮度（Rec.601），与 `grid.ts` 同一口径。 */
-function lumaAt(data: Uint8ClampedArray, width: number, x: number, y: number): number {
-  const i = (y * width + x) * 4;
-  return 0.299 * data[i]! + 0.587 * data[i + 1]! + 0.114 * data[i + 2]!;
-}
-
-/** 中位数（空数组 → NaN，调用方据此判"取不到样"）。 */
-function median(values: number[]): number {
-  if (values.length === 0) return Number.NaN;
-  values.sort((a, b) => a - b);
-  const mid = values.length >> 1;
-  return values.length % 2 === 1
-    ? values[mid]!
-    : (values[mid - 1]! + values[mid]!) / 2;
-}
-
 /** 采样一个小矩形区域的全部像素亮度（越界部分自动裁剪，x/y 顺序无所谓）。 */
 function sampleRect(
   bmp: Bitmap,
@@ -187,7 +172,7 @@ function sampleRect(
   const ay1 = Math.min(bmp.height, Math.round(Math.max(y0, y1)));
   const out: number[] = [];
   for (let y = ay0; y < ay1; y++) {
-    for (let x = ax0; x < ax1; x++) out.push(lumaAt(bmp.data, bmp.width, x, y));
+    for (let x = ax0; x < ax1; x++) out.push(lumaAt(bmp, x, y));
   }
   return out;
 }
@@ -261,8 +246,8 @@ function edgeProfile(
 ): number {
   const half = Math.max(1, Math.round(scale * 0.001));
   return side === 'left' || side === 'right'
-    ? median(sampleRect(bmp, at - half, at + half + 1, span0, span1))
-    : median(sampleRect(bmp, span0, span1, at - half, at + half + 1));
+    ? medianInPlace(sampleRect(bmp, at - half, at + half + 1, span0, span1))
+    : medianInPlace(sampleRect(bmp, span0, span1, at - half, at + half + 1));
 }
 
 /**
@@ -300,7 +285,7 @@ function snapEdge(
   // 背景 = 剖面**最靠外**那一端的取值（卡外永远是背景）
   const outerCount = Math.max(1, Math.round(positions.length * 0.25));
   const outerVals = outward < 0 ? prof.slice(0, outerCount) : prof.slice(-outerCount);
-  const bg = median(outerVals.filter((v) => Number.isFinite(v)));
+  const bg = medianInPlace(outerVals.filter((v) => Number.isFinite(v)));
 
   // 高光峰
   let peakIdx = 0;
