@@ -407,6 +407,7 @@ test('闭环回放：会话**没有**英雄留档 → 一张标签都不画（�
         dir,
         meta: parseSessionMeta(
           {
+            version: 1,
             trigger: 'pixel',
             region: PANEL_ROW_REGION,
             altRegion: PANEL_ROW_REGION,
@@ -482,6 +483,7 @@ async function replayWithNativeAt(
       dir,
       meta: parseSessionMeta(
         {
+          version: 1,
           trigger: 'pixel',
           gating: { targetScale: 1 / 3, minWidth: 960, width: W, height: H },
           region: PANEL_ROW_REGION,
@@ -574,7 +576,7 @@ test('★诚实边界：只有"很久以前"的原生帧 → 必须报过期，�
 test('闭环回放：没有帧库时不抛异常，并如实报告缺口', async () => {
   const session: LoadedSession = {
     dir: join(tmpdir(), 'hexbox-nonexistent-session'),
-    meta: parseSessionMeta({ trigger: 'pixel' }, { region: PANEL_ROW_REGION, altRegion: PANEL_ROW_REGION }),
+    meta: parseSessionMeta({ version: 1, trigger: 'pixel' }, { region: PANEL_ROW_REGION, altRegion: PANEL_ROW_REGION }),
     frames: [],
     api: [],
     edges: [],
@@ -628,6 +630,7 @@ test('★回归：回放时基 = 会话零点（不许把"第一个事件之前 
         dir,
         meta: parseSessionMeta(
           {
+            version: 1,
             trigger: 'pixel',
             region: PANEL_ROW_REGION,
             altRegion: PANEL_ROW_REGION,

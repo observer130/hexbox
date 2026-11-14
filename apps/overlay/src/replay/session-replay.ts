@@ -47,6 +47,7 @@ import {
   gateCanvasWidth,
   grayToBitmap,
   augmentWatchFingerprints,
+  AUGMENT_SESSION_VERSION,
   parseApiTraceCsv,
   parseFramesIndexJsonl,
   parseSessionMeta,
@@ -193,10 +194,14 @@ function readJsonl<T>(path: string, keep: (o: T) => boolean): T[] {
 export function loadSession(dir: string): LoadedSession {
   const notes: string[] = [];
   const metaPath = join(dir, 'session.json');
-  const meta = parseSessionMeta(
-    existsSync(metaPath) ? JSON.parse(readFileSync(metaPath, 'utf8')) : {},
-    { region: PANEL_ROW_REGION, altRegion: PANEL_ROW_REGION },
-  );
+  const defaultGeometry = { region: PANEL_ROW_REGION, altRegion: PANEL_ROW_REGION };
+  // ⚠️ 两件事必须分开（审查 P2 + vision 的严格版本校验）：
+  //   1. **没有** session.json（老目录/只录了帧）→ 按默认几何降级 + 告警；
+  //   2. 有 session.json 但版本缺失/不支持 → 明确抛错，不静默按默认几何回放
+  //      （几何错位会让回放"什么都没发生"，比直接报错更难排查）。
+  const meta = existsSync(metaPath)
+    ? parseSessionMeta(JSON.parse(readFileSync(metaPath, 'utf8')), defaultGeometry)
+    : parseSessionMeta({ version: AUGMENT_SESSION_VERSION }, defaultGeometry);
   if (!existsSync(metaPath)) notes.push('缺 session.json → 几何/触发方式按默认值（可能与录制时不同）');
 
   const idxPath = join(dir, 'frames.idx.jsonl');

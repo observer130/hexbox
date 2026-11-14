@@ -59,6 +59,8 @@ import {
   UPDATE_API_TIMEOUT_MS,
   UPDATE_DOWNLOAD_TIMEOUT_MS,
   githubToken,
+  isGitHubApiUrl,
+  isTrustedReleasePageUrl,
   latestReleaseApiUrl,
   releasesPageUrl,
 } from './update-config.ts';
@@ -88,12 +90,28 @@ export interface UpdateFlow {
   check(): void;
   /** 自测：按档位跑一次检查（见 vision 的 `UpdateSelfTestMode`）。 */
   runSelfTest(mode: UpdateSelfTestMode): void;
+  /** 取消进行中的检查/下载（退出时调用；幂等，不弹任何窗）。 */
+  cancel(reason?: string): void;
 }
 
 export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlow {
   let phase: UpdatePhase = UPDATE_PHASE_IDLE;
   /** 并发闸门：一次只允许一个"检查/下载"在进行（菜单在此期间也是 disabled）。 */
   let running = false;
+  /**
+   * 当前这次检查/下载的取消句柄（退出时由 `cancel()` 触发）。
+   *
+   * 30 分钟的下载不持有取消句柄 = 退出时只能干等/杀进程，临时文件与连接都留着
+   * （审查 P2）。这里把 timeout 与取消合成一个 signal（`AbortSignal.any`）。
+   */
+  let activeAbort: AbortController | null = null;
+
+  /** 单次请求的 signal = 超时 ∪ 本次流程取消（退出/手动取消）。 */
+  const signalFor = (timeoutMs: number): AbortSignal => {
+    const abort = activeAbort?.signal;
+    const timeout = AbortSignal.timeout(timeoutMs);
+    return abort ? AbortSignal.any([abort, timeout]) : timeout;
+  };
 
   const setPhase = (next: UpdatePhase): void => {
     phase = next;
@@ -108,7 +126,7 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlow {
       Accept: 'application/vnd.github+json',
     };
     const token = githubToken();
-    if (token !== '' && url.includes('api.github.com')) headers['Authorization'] = `Bearer ${token}`;
+    if (token !== '' && isGitHubApiUrl(url)) headers['Authorization'] = `Bearer ${token}`;
     return headers;
   };
 
@@ -154,8 +172,10 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlow {
       noLink: true,
     });
     if (url !== '' && r.response === 0) {
-      // ⚠️ Electron 33 的 openExternal 返回 Promise<void>（不是旧版的错误字符串）
-      await shell.openExternal(url).catch((e: unknown) => {
+      // ⚠️ `url` 来自外部 Release JSON：只允许打开本仓库的 GitHub 网页，
+      //    否则回退到固定的发布页（审查 P2：外部输入不得选择任意打开目标）。
+      const target = isTrustedReleasePageUrl(url) ? url : releasesPageUrl();
+      await shell.openExternal(target).catch((e: unknown) => {
         console.warn(`[hexbox] ⚠ 打开下载页失败：${e instanceof Error ? e.message : String(e)}`);
       });
     }
@@ -217,7 +237,8 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlow {
     const res = await net.fetch(asset.url, {
       redirect: 'follow', // GitHub 资产会 302 到 objects.githubusercontent.com
       headers: headersFor(asset.url),
-      signal: AbortSignal.timeout(UPDATE_DOWNLOAD_TIMEOUT_MS),
+      // 超时 ∪ 退出/取消（`signalFor` 的取消句柄由 run() 持有）
+      signal: signalFor(UPDATE_DOWNLOAD_TIMEOUT_MS),
     });
     if (!res.ok) throw new Error(`下载失败：HTTP ${res.status} ${res.statusText}`);
     const body = res.body;
@@ -342,6 +363,8 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlow {
   const run = async (options: { readonly selfTest: UpdateSelfTestMode | null }): Promise<void> => {
     const selfTest = options.selfTest;
     const current = deps.currentVersion();
+    // 每次检查/下载一个取消句柄：退出时 `cancel()` 触发，网络/下载立刻中止
+    activeAbort = new AbortController();
     setPhase({ kind: 'checking' });
     try {
       const url = latestReleaseApiUrl();
@@ -354,7 +377,7 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlow {
         const res = await net.fetch(url, {
           redirect: 'follow',
           headers: headersFor(url),
-          signal: AbortSignal.timeout(UPDATE_API_TIMEOUT_MS),
+          signal: signalFor(UPDATE_API_TIMEOUT_MS),
         });
         console.log(`[hexbox] 检查更新：HTTP ${res.status} ${res.statusText}`);
         if (res.status === 404) {
@@ -416,11 +439,17 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlow {
       }
       await downloadAndInstall(decision, selfTest !== null);
     } catch (e) {
+      // 退出/取消导致的中止：不弹错误窗（用户已经关程序了）
+      if (activeAbort?.signal.aborted === true) {
+        console.log('[hexbox] 检查更新：已取消（退出/中止），不弹错误窗');
+        return;
+      }
       // 兜底：任何没预料到的异常都要变成人话，绝不让"点了没反应"
       const detail = e instanceof Error ? `${e.message}\n${e.stack ?? ''}` : String(e);
       console.error(`[hexbox] ⚠ 检查更新异常：${detail}`);
       await errorDialog(`检查更新时发生异常：\n${detail}`, releasesPageUrl());
     } finally {
+      activeAbort = null;
       running = false;
       setPhase(UPDATE_PHASE_IDLE);
     }
@@ -428,6 +457,14 @@ export function createUpdateFlow(deps: UpdateFlowDeps): UpdateFlow {
 
   return {
     phase: () => phase,
+    cancel: (reason = '取消') => {
+      if (!running) return;
+      console.log(`[hexbox] 检查更新：${reason} → 中止进行中的检查/下载`);
+      activeAbort?.abort();
+      // 阶段立刻回到 idle：托盘菜单不再显示"正在下载更新…"（真实目录清理由
+      // download 的 catch 路径 destroy/删除临时文件；这里只负责界面状态）
+      setPhase(UPDATE_PHASE_IDLE);
+    },
     check: () => {
       if (running) {
         console.log('[hexbox] 检查更新：已经有一次检查/下载在进行 → 忽略这次点击');

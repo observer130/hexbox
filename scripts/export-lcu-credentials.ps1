@@ -1,4 +1,4 @@
-﻿# 一次性导出 LCU 凭证到用户级凭证文件（之后所有工具免提权可用）
+# 一次性导出 LCU 凭证到用户级凭证文件（之后所有工具免提权可用）
 #
 # 为什么需要：国服 WeGame 的 LeagueClient\lockfile 实测为 0 字节，
 # 而非管理员读不到进程命令行（Windows 屏蔽），于是普通进程拿不到任何凭证，
@@ -53,6 +53,17 @@ New-Item -ItemType Directory -Force -Path $dir | Out-Null
 $path = Join-Path $dir 'lcu-credentials'
 $line = "LeagueClient:$($proc.ProcessId):$port`:$token`:https"
 [System.IO.File]::WriteAllText($path, $line, (New-Object System.Text.UTF8Encoding($false)))
+
+# 3b) 收紧 ACL：默认继承 ACL 可能让**同机其它用户**读到 token。
+#     先移除继承，再只授予当前用户完全控制；失败不阻断（文件仍在用户目录下）。
+try {
+  & icacls.exe $path /inheritance:r /grant:r "$($id.Name):(F)" | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host '⚠ ACL 收紧失败（不影响功能，但建议手动检查该文件权限）' -ForegroundColor Yellow
+  }
+} catch {
+  Write-Host "⚠ ACL 收紧失败：$($_.Exception.Message)" -ForegroundColor Yellow
+}
 
 # 4) 顺手验一次（用官方 LCU 端点），确认凭证可用
 $pair = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("riot:$token"))

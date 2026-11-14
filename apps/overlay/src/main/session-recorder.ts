@@ -28,7 +28,7 @@
  *    提交进仓库的 fixture 一律是"裁到搜索区的小图"，见 `packages/vision/fixtures/`。
  */
 
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
@@ -37,6 +37,20 @@ import {
   type PanelCard,
   type Rect,
 } from '@hexbox/vision';
+
+/**
+ * 原子写 JSON（`.tmp` → rename）。
+ *
+ * 为什么需要（审查 P2）：`session.json` / `report.json` 是回放与 golden 比对的输入，
+ * 崩溃/强杀时直接 `writeFileSync` 可能留下半截 JSON —— 整局录制就白费了。
+ * rename 在同目录内是原子的，读方要么看到旧文件、要么看到完整新文件。
+ * （帧 PNG 仍逐帧直接写：它们是 append-only 且按序号命名，不存在"覆盖半截"。）
+ */
+function writeJsonAtomic(path: string, text: string): void {
+  const tmp = `${path}.tmp-${process.pid}`;
+  writeFileSync(tmp, text);
+  renameSync(tmp, path);
+}
 
 export interface SessionRecorderMeta {
   readonly trigger: 'api' | 'pixel';
@@ -239,7 +253,7 @@ export function createSessionRecorder(options: CreateRecorderOptions): SessionRe
         null,
         2,
       ) + '\n';
-    writeFileSync(join(dir, 'session.json'), text);
+    writeJsonAtomic(join(dir, 'session.json'), text);
   };
   writeMeta();
 
@@ -305,7 +319,7 @@ export function createSessionRecorder(options: CreateRecorderOptions): SessionRe
     },
     close(report): void {
       try {
-        writeFileSync(join(dir, 'report.json'), JSON.stringify(report, null, 2) + '\n');
+        writeJsonAtomic(join(dir, 'report.json'), JSON.stringify(report, null, 2) + '\n');
       } catch {
         /* 收工路径不抛 */
       }

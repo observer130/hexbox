@@ -270,7 +270,7 @@ app.whenReady().then(async () => {
   const windowPhysical = await findGameWindowRect();
   console.log(
     windowPhysical
-      ? `[debug] 游戏窗口物理矩形 ${windowPhysical.width}x${windowPhysical.height} @ (${windowPhysical.x},${windowPhysical.y})`
+      ? `[debug] 游戏窗口矩形(DIP) ${windowPhysical.width}x${windowPhysical.height} @ (${windowPhysical.x},${windowPhysical.y})`
       : '[debug] 未找到游戏窗口矩形（LeagueClientUx 未启动？）',
   );
 
@@ -313,13 +313,15 @@ app.whenReady().then(async () => {
     /* 无名字也能出结果 */
   }
 
-  // 屏幕逻辑坐标换算：物理 → DIP 用主显示器 scaleFactor
+  // 屏幕逻辑坐标换算：窗口矩形探针已是 DIP（与 display.bounds 同口径），
+  // ⚠️ 不得再除 scaleFactor（旧实现多除一次 → 125%/150% 缩放屏上几何整体偏小；
+  //    见 packages/vision/src/win-geometry.ts 文件头 DPI 要点）
   const display = screen.getPrimaryDisplay();
   const geo = makeGeometry(bmp.width, bmp.height, {
-    x: (windowPhysical?.x ?? display.workArea.x) / display.scaleFactor,
-    y: (windowPhysical?.y ?? display.workArea.y) / display.scaleFactor,
-    width: (windowPhysical?.width ?? bmp.width / scale.scale) / display.scaleFactor,
-    height: (windowPhysical?.height ?? bmp.height / scale.scale) / display.scaleFactor,
+    x: windowPhysical?.x ?? display.workArea.x,
+    y: windowPhysical?.y ?? display.workArea.y,
+    width: windowPhysical?.width ?? bmp.width / scale.scale,
+    height: windowPhysical?.height ?? bmp.height / scale.scale,
   });
 
   const nameLibrary = await loadNameLibrary();

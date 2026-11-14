@@ -56,6 +56,41 @@ export function githubToken(): string {
 }
 
 /**
+ * 这个 URL 是否是 GitHub **API** 主机（token 只允许发到这里）。
+ *
+ * 为什么不是 `url.includes('api.github.com')`：`.includes` 会被
+ * `https://evil.test/?x=api.github.com` 这类 URL 骗过，把 token 带出去
+ * （审查 P2）。这里必须用 hostname 全等 + https。
+ */
+export function isGitHubApiUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return u.protocol === 'https:' && u.hostname === 'api.github.com';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 这个 URL 是否是本仓库的 GitHub **网页**（失败弹窗里"打开下载页"只允许这里）。
+ *
+ * `html_url` 来自 Release JSON（外部输入）：不校验就 `shell.openExternal()`
+ * 等于允许远端内容选择任意打开目标。只放行 `https://github.com/<repo>/...`。
+ */
+export function isTrustedReleasePageUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return (
+      u.protocol === 'https:' &&
+      u.hostname === 'github.com' &&
+      (u.pathname === `/${GITHUB_REPO}` || u.pathname.startsWith(`/${GITHUB_REPO}/`))
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 查版本这一步的超时。
  *
  * ⚠️ 国内网络访问 GitHub 常常很慢甚至完全不通，**必须有上限**：

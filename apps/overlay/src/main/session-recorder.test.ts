@@ -11,7 +11,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -257,5 +257,50 @@ test('appendLineSafely：正常路径追加成功', () => {
     assert.equal(appendLineSafely(path, 'a\n').ok, true);
     assert.equal(appendLineSafely(path, 'b\n').ok, true);
     assert.equal(readFileSync(path, 'utf8'), 'a\nb\n');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* 原子写：崩溃不留半截 JSON（审查 P2）                                  */
+/* ------------------------------------------------------------------ */
+
+test('原子写：session.json / report.json 收工后没有 .tmp 残留且可解析', () => {
+  withTempDir((root) => {
+    const rec = createSessionRecorder({
+      rootDir: root,
+      suffix: 'atomic',
+      meta: {
+        trigger: 'pixel',
+        gating: null,
+        region: REGION,
+        altRegion: REGION,
+        windowPhysical: null,
+        display: null,
+        data: null,
+        champion: null,
+      },
+      env: {},
+      log: () => undefined,
+    });
+    // 触发一次元数据重写（线上会在识别到英雄后 setMeta）
+    rec.setMeta({ notes: ['atomic-write'] });
+    rec.close({ ok: true });
+
+    const files = readdirSync(rec.dir);
+    assert.equal(
+      files.some((f) => f.includes('.tmp-')),
+      false,
+      `不应留下临时文件：${files.join(', ')}`,
+    );
+    // 两份 JSON 都必须是完整可解析的
+    const meta = JSON.parse(readFileSync(join(rec.dir, 'session.json'), 'utf8')) as {
+      notes: readonly string[];
+    };
+    // 默认说明行在前、meta.notes 追加在后（writeMeta 的既有契约）
+    assert.ok(meta.notes.includes('atomic-write'), `notes 丢了：${meta.notes.join(' | ')}`);
+    const report = JSON.parse(readFileSync(join(rec.dir, 'report.json'), 'utf8')) as {
+      ok: boolean;
+    };
+    assert.equal(report.ok, true);
   });
 });

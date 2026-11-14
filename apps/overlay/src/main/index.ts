@@ -2389,6 +2389,11 @@ app.on('before-quit', () => {
     // 不留残留字母）；局内正常的"离开对局"停止**不清标签**
     // 同步可能正在拉 173 个英雄详情：先中止，别让一个 245 请求的长任务拖住退出
     dataUpdateFlow?.cancel('程序退出');
+    // 检查更新也持有网络请求/下载：退出时中止，避免残留临时文件与挂起连接（审查 P2）
+    updateFlow?.cancel('程序退出');
+    // 选人视觉循环：停掉在途轮次与定时器（否则关机瞬间仍可能拉一帧并 showInactive）
+    visionLoop?.stop();
+    visionLoop = null;
     augment?.stop('程序退出', { clearLabels: true });
     // LCU 事件订阅收工（它会自己清掉待执行的重连，不会再建连接）
     phaseEvents?.stop();

@@ -263,11 +263,16 @@ export function pushLabelOverlay(
   };
   lastMsg = local;
   positionLabelOverlay(win, display);
-  raiseLabelOverlay(win);
+  // ⚠️ 只有"有内容要画"才 raise/showInactive：`active:false` 是清空消息，
+  //    旧实现无条件 raise 会把一块透明全屏窗"弹"到游戏上方（审查 P2）。
+  //    清空消息照常送给渲染端清画布，但不再把空窗抬到最前；若它此前可见就顺手隐藏，
+  //    避免留下一块空的置顶全屏窗（下一次 active 推送会重新 showInactive）。
+  if (msg.active) raiseLabelOverlay(win);
   win.webContents.send('overlay:vision', local);
   logStateChange(win, msg.active ? '显示画布' : '清空画布');
   if (!msg.active) {
     stopHeartbeat();
+    if (win.isVisible()) win.hide();
     return;
   }
   // showInactive 之后仍不可见 = 覆盖窗根本没能显示（真机事故的唯一硬信号）
