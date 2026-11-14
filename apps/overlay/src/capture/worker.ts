@@ -574,6 +574,23 @@ async function readNeuralRerollNames(
   }
 }
 
+/**
+ * 识别命令**串行化**。
+ *
+ * 引入神经网络 OCR 后 recognize() 里第一次出现真正的 await（IPC 推理 ~5~20ms）；
+ * 若主进程在它完成前又发一条 recognize（面板关闭/重开、重随），并发执行会同时
+ * 改 frozenRects/latestFingerprints，也可能并发调用 ORT session。队列保证与旧版
+ * 同步识别完全相同的时序（一次只跑一条）。
+ */
+let recognizeQueue: Promise<void> = Promise.resolve();
+function enqueueRecognize(opts: { readonly only?: readonly number[] } = {}): void {
+  recognizeQueue = recognizeQueue
+    .then(() => recognize(opts))
+    .catch((err: unknown) => {
+      log(`⛔ 识别命令失败：${err instanceof Error ? err.message : String(err)}`);
+    });
+}
+
 async function recognize(opts: { readonly only?: readonly number[] } = {}): Promise<void> {
   const only = opts.only && opts.only.length > 0 ? opts.only : null;
   // ⚠️ 触发原因由**调用方式**决定（带 `only` = 单卡重随）：失败路径也必须带上它，
@@ -834,7 +851,7 @@ api?.onCommand((cmd, cfg) => {
   else if (cmd === 'recognize') {
     // 带 `only` = 面板停留期间的**单卡重随**重识别（只重认变化的那几张）
     const only = (cfg as { only?: readonly number[] } | undefined)?.only;
-    void recognize(Array.isArray(only) && only.length > 0 ? { only } : {});
+    enqueueRecognize(Array.isArray(only) && only.length > 0 ? { only } : {});
   } else if (cmd === 'cadence') {
     const ms = (cfg as { intervalMs?: number } | undefined)?.intervalMs;
     if (typeof ms === 'number') setCadence(ms);
