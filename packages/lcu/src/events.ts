@@ -36,6 +36,15 @@ export const WAMP_UNSUBSCRIBE = 6;
 export const WAMP_EVENT = 8;
 
 /**
+ * WebSocket 升级的连接超时（毫秒）。
+ *
+ * 本机端口通常立刻 ECONNREFUSED；但若某进程占了 LCU 端口却不应答 TLS/升级，
+ * 没有超时就会永远停在 "connecting"（审计 P3）。超时后按普通连接失败处理，
+ * 走既有的退避重连。
+ */
+export const LCU_SOCKET_CONNECT_TIMEOUT_MS = 5_000;
+
+/**
  * 游戏流相位事件名（`OnJsonApiEvent_` + 端点路径把 `/` 换成 `_`）。
  *
  * 对应 `GET /lol-gameflow/v1/gameflow-phase`；单测里锁住字面量，
@@ -407,7 +416,10 @@ export class LcuEventStream {
  * 不碰进程级 `NODE_TLS_REJECT_UNAUTHORIZED`。
  * **只连 127.0.0.1**，这个取舍与仓库既有做法一致。
  */
-export async function openLcuSocket(creds: LcuCredentials): Promise<LcuSocketLike> {
+export async function openLcuSocket(
+  creds: LcuCredentials,
+  timeoutMs: number = LCU_SOCKET_CONNECT_TIMEOUT_MS,
+): Promise<LcuSocketLike> {
   const key = Buffer.from(
     Array.from({ length: 16 }, () => Math.floor(Math.random() * 256)),
   ).toString('base64');
@@ -420,6 +432,8 @@ export async function openLcuSocket(creds: LcuCredentials): Promise<LcuSocketLik
       method: 'GET',
       rejectUnauthorized: false, // LCU 自签证书（只连本机）
       agent: false, // 升级后的 socket 归我们所有，不要走 keep-alive 池
+      // 连接/升级超时：只对本次请求生效（socket timeout，不会全局生效）
+      timeout: timeoutMs,
       headers: {
         Authorization: basicAuthHeader(creds.password),
         Connection: 'Upgrade',
@@ -427,6 +441,12 @@ export async function openLcuSocket(creds: LcuCredentials): Promise<LcuSocketLik
         'Sec-WebSocket-Version': '13',
         'Sec-WebSocket-Key': key,
       },
+    });
+
+    // `timeout` 只发事件、不会自动销毁：必须显式 destroy，否则 Promise 永远悬着
+    // （调用方一直显示"连接中"，退避重连也不会发生）。
+    req.on('timeout', () => {
+      req.destroy(new Error(`连接超时（${timeoutMs}ms 内未完成 WebSocket 升级）`));
     });
 
     req.on('upgrade', (res, socket) => {

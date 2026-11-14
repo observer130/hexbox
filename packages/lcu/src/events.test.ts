@@ -19,6 +19,7 @@ import {
   isValidWebSocketAccept,
   LcuEventStream,
   LCU_GAMEFLOW_PHASE_EVENT,
+  openLcuSocket,
   wampSubscribeMessage,
   wampUnsubscribeMessage,
   webSocketAcceptFor,
@@ -409,4 +410,25 @@ test('回归：encodeTextFrame 产出的订阅帧确实能被我们自己的解�
   const frame = encodeTextFrame('x');
   assert.equal(frame[0], 0x81);
   assert.equal(((frame[1] ?? 0) & 0x80) !== 0, true, 'MASK 位必须置上');
+});
+
+test('openLcuSocket：对端接受 TCP 但不回应升级 → 按超时失败（不会永远连接中）', async () => {
+  const { createServer } = await import('node:net');
+  const sockets = new Set<import('node:net').Socket>();
+  const srv = createServer((s) => {
+    sockets.add(s);
+    s.on('close', () => sockets.delete(s));
+    // 故意什么都不写：模拟"端口被占但服务不响应"
+  });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+  const port = (srv.address() as { port: number }).port;
+  try {
+    await assert.rejects(
+      () => openLcuSocket({ port, password: 'pw', source: 'cmdline' }, 120),
+      /超时/,
+    );
+  } finally {
+    for (const s of sockets) s.destroy();
+    await new Promise<void>((r) => srv.close(() => r()));
+  }
 });
