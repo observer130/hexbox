@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import { countChampionSet, type AugmentMode } from '@hexbox/core';
-import { MODE_META, useDataset } from './useDataset';
+import { useDataset } from './useDataset';
+import { modeLabel } from './format';
 import { buildAugmentCatalog, type CatalogTile } from './augment-catalog';
 import { RARITY_META, rarityMeta } from './rarity';
 import RankView from './components/RankView.vue';
 
-const { dataset, rankings, loading, error, load } = useDataset();
+const { dataset, rankings, loading, error, rankingsError, load } = useDataset();
 onMounted(load);
 
 const search = ref('');
@@ -79,10 +80,6 @@ const stats = computed(() => {
   };
 });
 
-function modeLabel(m: string): string {
-  return MODE_META[m]?.label ?? m;
-}
-
 // 英雄 ID -> 名称/图标（排行榜 join 用）
 const championMap = computed(() => {
   const m = new Map<number, { name: string; iconPath: string }>();
@@ -109,9 +106,9 @@ const championMap = computed(() => {
       </p>
     </header>
 
-    <div v-if="loading" class="state">加载中…</div>
+    <div v-if="loading" class="state" role="status" aria-live="polite">加载中…</div>
 
-    <div v-else-if="error" class="state err">
+    <div v-else-if="error" class="state err" role="alert">
       <strong>加载失败</strong>
       <p>{{ error }}</p>
       <pre class="dim">pnpm sync</pre>
@@ -154,23 +151,29 @@ const championMap = computed(() => {
       </section>
 
       <section class="controls">
-        <input v-model="search" class="input" type="search" placeholder="搜索海克斯名称…" />
-        <select v-model="modeFilter" class="select">
+        <input
+          v-model="search"
+          class="input"
+          type="search"
+          placeholder="搜索海克斯名称…"
+          aria-label="搜索海克斯名称"
+        />
+        <select v-model="modeFilter" class="select" aria-label="按模式筛选">
           <option v-for="m in modesPresent" :key="m" :value="m">
             {{ m === 'all' ? '全部模式' : modeLabel(m) }}
           </option>
         </select>
-        <select v-model="rarityFilter" class="select">
+        <select v-model="rarityFilter" class="select" aria-label="按品质筛选">
           <option value="all">全部品质</option>
           <option v-for="(meta, key) in RARITY_META" :key="key" :value="key">
             {{ meta.label }}
           </option>
         </select>
-        <select v-model="sortBy" class="select">
+        <select v-model="sortBy" class="select" aria-label="图鉴排序方式">
           <option value="rarity">按品质</option>
           <option value="name">按名称</option>
         </select>
-        <span class="dim count">{{ filtered.length }} 项</span>
+        <span class="dim count" aria-live="polite">{{ filtered.length }} 项</span>
       </section>
 
       <section class="grid">
@@ -197,6 +200,7 @@ const championMap = computed(() => {
       <!-- 官方排行榜（official-aggregated，标注来源与统计日期） -->
       <RankView
         :rankings="rankings"
+        :rankings-error="rankingsError"
         :hextechs="dataset?.hextechs ?? []"
         :champions="championMap"
       />

@@ -39,3 +39,19 @@ a {
 .dim {
   color: var(--text-dim);
 }
+
+/*
+ * 屏幕阅读器专用：视觉上隐藏但读屏软件仍会朗读。
+ * 排行榜表格的 <caption> 用它：视觉表格不需要重复标题，但读屏需要。
+ */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

@@ -4,22 +4,32 @@
  *
  * 数据来源：腾讯 101 官方数据站（101.qq.com）一方公开接口。
  * 展示约定：
- *   - 标注来源与上游统计日期（meta.dataDate）；
- *   - 上游无数据时显示「暂无数据」，不用旧数据冒充。
+ *   - 标注来源与上游统计日期（meta.dataDate 由 `formatStatDate` 转成 YYYY-MM-DD）；
+ *   - 上游无数据时显示「暂无数据」，不用旧数据冒充；
+ *   - 加载/校验失败时在榜单区显示**可操作**原因（`rankingsError`），不再静默
+ *     伪装成「上游未更新」（2026-11 审查 P2 #2）。
+ *
+ * 可访问性（审查 P2 #3）：表格有 caption/scope/aria-sort，tab 有
+ * tablist/tab/tabpanel + aria-selected/aria-controls，排序控件有 aria-label。
+ * 模式中文名统一走 `format.ts` 的 `modeLabel()`（CHERRY 不再漏成英文）。
  */
 import { computed, ref } from 'vue';
 import {
   cnIconUrl,
+  formatStatDate,
+  modeLabel,
   pct,
   rankChangeClass,
   rankChangeText,
-  type RankingSnapshot,
-} from '../useDataset';
+} from '../format';
+import type { RankingSnapshot } from '../useDataset';
 import { rarityMeta } from '../rarity';
 import type { HextechStatic } from '@hexbox/core';
 
 const props = defineProps<{
   rankings: RankingSnapshot | null;
+  /** 排行榜独立加载/校验错误：只在榜单区显示，不阻塞图鉴。 */
+  rankingsError: string | null;
   hextechs: readonly HextechStatic[];
   champions: ReadonlyMap<number, { name: string; iconPath: string }>;
 }>();
@@ -83,44 +93,78 @@ function heroIcon(id: number): string {
           腾讯 101 官方数据站
         </a>
         <template v-if="rankings?.meta.dataDate">
-          · 统计日期 <b>{{ rankings.meta.dataDate }}</b>
+          · 统计日期 <b>{{ formatStatDate(rankings.meta.dataDate) }}</b>
         </template>
-        <template v-if="rankings">
-          · 抓取于 {{ fetchedAtText }}
-        </template>
+        <template v-if="rankings"> · 抓取于 {{ fetchedAtText }} </template>
       </p>
     </header>
 
-    <div v-if="!hasData" class="state dim">暂无排行数据（上游统计未更新或接口维护中）。</div>
+    <!-- 排行榜独立容错：失败时给出可操作原因，不阻塞图鉴（审查 P2 #2） -->
+    <div v-if="rankingsError" class="rank-error" role="alert">
+      <strong>排行榜数据加载失败</strong>
+      <p>{{ rankingsError }}</p>
+      <p class="hint">
+        可重新运行 <code>pnpm sync</code> 生成 data/rankings.json 后刷新页面（图鉴数据不受影响）。
+      </p>
+    </div>
+
+    <div v-else-if="!hasData" class="state dim">暂无排行数据（上游统计未更新或接口维护中）。</div>
 
     <template v-else>
       <div class="controls">
-        <div class="tabs">
-          <button class="tab" :class="{ active: tab === 'augments' }" @click="tab = 'augments'">
+        <div class="tabs" role="tablist" aria-label="排行榜类型">
+          <button
+            id="rank-tab-augments"
+            class="tab"
+            :class="{ active: tab === 'augments' }"
+            role="tab"
+            :aria-selected="tab === 'augments'"
+            aria-controls="rank-panel-augments"
+            @click="tab = 'augments'"
+          >
             海克斯榜
           </button>
-          <button class="tab" :class="{ active: tab === 'heroes' }" @click="tab = 'heroes'">
+          <button
+            id="rank-tab-heroes"
+            class="tab"
+            :class="{ active: tab === 'heroes' }"
+            role="tab"
+            :aria-selected="tab === 'heroes'"
+            aria-controls="rank-panel-heroes"
+            @click="tab = 'heroes'"
+          >
             英雄榜
           </button>
         </div>
-        <select v-model="sortBy" class="select">
+        <select v-model="sortBy" class="select" aria-label="排行榜排序方式">
           <option value="winRate">按胜率</option>
           <option value="pickRate">按选取率</option>
         </select>
       </div>
 
       <!-- 海克斯榜 -->
-      <div v-if="tab === 'augments'" class="tablewrap">
+      <div
+        v-if="tab === 'augments'"
+        id="rank-panel-augments"
+        class="tablewrap"
+        role="tabpanel"
+        aria-labelledby="rank-tab-augments"
+      >
         <table class="tbl">
+          <caption class="sr-only">
+            海克斯排行榜（数据来自腾讯 101 官方数据站，按{{
+              sortBy === 'winRate' ? '胜率' : '选取率'
+            }}降序排列）
+          </caption>
           <thead>
             <tr>
-              <th>#</th>
-              <th class="left">海克斯</th>
-              <th>胜率</th>
-              <th>胜率排名</th>
-              <th>选取率</th>
-              <th>选取排名</th>
-              <th class="left">最适配英雄</th>
+              <th scope="col">#</th>
+              <th scope="col" class="left">海克斯</th>
+              <th scope="col" :aria-sort="sortBy === 'winRate' ? 'descending' : 'none'">胜率</th>
+              <th scope="col">胜率排名</th>
+              <th scope="col" :aria-sort="sortBy === 'pickRate' ? 'descending' : 'none'">选取率</th>
+              <th scope="col">选取排名</th>
+              <th scope="col" class="left">最适配英雄</th>
             </tr>
           </thead>
           <tbody>
@@ -139,7 +183,7 @@ function heroIcon(id: number): string {
                       {{ rarityMeta(r.def.rarity).label }}
                     </span>
                     <span v-for="m in r.def?.modes ?? []" :key="m" class="mtag">
-                      {{ m === 'KIWI_JADE' ? '乱斗 · Jade' : m === 'KIWI' ? '海克斯乱斗' : m }}
+                      {{ modeLabel(m) }}
                     </span>
                   </div>
                 </div>
@@ -175,19 +219,30 @@ function heroIcon(id: number): string {
       </div>
 
       <!-- 英雄榜 -->
-      <div v-else class="tablewrap">
+      <div
+        v-else
+        id="rank-panel-heroes"
+        class="tablewrap"
+        role="tabpanel"
+        aria-labelledby="rank-tab-heroes"
+      >
         <table class="tbl">
+          <caption class="sr-only">
+            英雄排行榜（数据来自腾讯 101 官方数据站，按{{
+              sortBy === 'winRate' ? '胜率' : '选取率'
+            }}降序排列）
+          </caption>
           <thead>
             <tr>
-              <th>#</th>
-              <th class="left">英雄</th>
-              <th>胜率</th>
-              <th>选取率</th>
-              <th>排名变化</th>
-              <th>平均死亡</th>
-              <th>参团率</th>
-              <th>伤害占比</th>
-              <th>承伤占比</th>
+              <th scope="col">#</th>
+              <th scope="col" class="left">英雄</th>
+              <th scope="col" :aria-sort="sortBy === 'winRate' ? 'descending' : 'none'">胜率</th>
+              <th scope="col" :aria-sort="sortBy === 'pickRate' ? 'descending' : 'none'">选取率</th>
+              <th scope="col">排名变化</th>
+              <th scope="col">平均死亡</th>
+              <th scope="col">参团率</th>
+              <th scope="col">伤害占比</th>
+              <th scope="col">承伤占比</th>
             </tr>
           </thead>
           <tbody>
@@ -375,5 +430,23 @@ tbody tr:hover {
 .state {
   padding: 30px 0;
   text-align: center;
+}
+.rank-error {
+  background: var(--bg-elev);
+  border: 1px solid #5a2a2a;
+  border-radius: 8px;
+  padding: 14px 16px;
+  color: #e08a8a;
+}
+.rank-error p {
+  margin: 8px 0 0;
+}
+.rank-error code {
+  background: var(--bg);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+.rank-error .hint {
+  color: var(--text-dim);
 }
 </style>
