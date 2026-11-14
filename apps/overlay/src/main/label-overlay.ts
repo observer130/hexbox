@@ -136,7 +136,7 @@ export interface CreateLabelOverlayOptions {
 /**
  * 创建全屏透明画布（**不显示**，由 `pushLabelOverlay` 在首次推送时显示）。
  *
- * 与侧边悬浮窗的区别：它铺满整个显示器的工作区，内容按屏幕逻辑坐标绝对定位。
+ * 它铺满整个显示器的工作区，内容按屏幕逻辑坐标绝对定位（点击穿透、不抢焦点）。
  */
 export function createLabelOverlay(options: CreateLabelOverlayOptions): BrowserWindow {
   const { display } = options;

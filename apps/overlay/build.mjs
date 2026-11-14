@@ -11,7 +11,7 @@
  * 产物：
  *   dist/main/index.js      （主进程，CommonJS，Node 环境）
  *   dist/preload/index.js   （preload，CommonJS，隔离上下文）
- *   dist/renderer/renderer.js（渲染端，IIFE，含打包进来的业务代码）
+ *   dist/renderer/overlay-canvas.js（全屏标签画布，IIFE）
  */
 
 import { build } from 'esbuild';
@@ -54,8 +54,8 @@ await build({
   logLevel: 'info',
 });
 
-// 2) 渲染端 → IIFE（侧边悬浮窗 + S2 全屏覆盖层 + 常驻截屏 worker）
-//    渲染端只 import preload 暴露的 `window.overlay`（以及 @hexbox/vision/browser
+// 2) 渲染端 → IIFE（S2 全屏标签画布 + 常驻截屏 worker）
+//    渲染端只 import preload 暴露的 `window.visionOverlayApi`（以及 @hexbox/vision/browser
 //    里的纯函数），不 import 任何 Node 依赖（LCU 与数据集读取都在主进程），
 //    因此无需 external，也不会误把 node:* 打进来。
 //
@@ -64,7 +64,7 @@ await build({
 //    esbuild 的 outdir 布局由 **outbase** 决定，而 outbase 是从入口的公共父目录
 //    **推断**的。入口全在 `src/renderer/` 时公共父目录是 `src/renderer`
 //    → `dist/renderer/overlay-canvas.js`（正确）；一旦加入 `src/capture/worker.ts`，
-//    公共父目录变成 `src` → `renderer.js` / `overlay-canvas.js` 被写到
+//    公共父目录变成 `src` → `overlay-canvas.js` / `capture/worker.js` 被写到
 //    `dist/renderer/renderer/` 下，而 `overlay.html` 里写的是 `./overlay-canvas.js`
 //    → 模块 404。**这个 404 是静默的**（Electron 不会把它交给
 //    `console-message`，主进程那层日志转发一个字都看不到），于是整块画布脚本
@@ -74,8 +74,7 @@ await build({
 //    这类静默失败不可能再溜过去。
 await build({
   entryPoints: [
-    { in: join(here, 'src', 'renderer', 'renderer.ts'), out: 'renderer' },
-    { in: join(here, 'src', 'renderer', 'overlay-canvas.ts'), out: 'overlay-canvas' },
+      { in: join(here, 'src', 'renderer', 'overlay-canvas.ts'), out: 'overlay-canvas' },
     // 常驻截屏 worker（局内海克斯门控；用它自己的窗口，见 main/augment-stream.ts）
     { in: join(here, 'src', 'capture', 'worker.ts'), out: 'capture/worker' },
   ],
@@ -91,12 +90,11 @@ await build({
 
 // 3) 静态资源
 const HTML_FILES = [
-  join('renderer', 'index.html'),
   join('renderer', 'overlay.html'),
   join('renderer', 'capture', 'worker.html'),
 ];
 await mkdir(join(out, 'renderer', 'capture'), { recursive: true });
-for (const f of ['index.html', 'overlay.html', 'styles.css']) {
+for (const f of ['overlay.html', 'styles.css']) {
   await cp(join(here, 'src', 'renderer', f), join(out, 'renderer', f));
 }
 await cp(join(here, 'src', 'capture', 'worker.html'), join(out, 'renderer', 'capture', 'worker.html'));

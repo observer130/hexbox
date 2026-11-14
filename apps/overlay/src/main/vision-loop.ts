@@ -51,7 +51,7 @@ import {
   type PreparedTemplate,
   type Rect,
 } from '@hexbox/vision';
-import type { ChampSelectInfo, RankingSnapshot } from '@hexbox/core';
+import type { RankingSnapshot } from '@hexbox/core';
 
 /** 覆盖层推送消息（renderer 只读）。 */
 export interface VisionOverlayMsg {

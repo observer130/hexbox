@@ -140,7 +140,6 @@ export function replayReconnectTimeline(
       phase,
       // 只关心"该不该恢复"：链路状态不影响这一步（`recover` 与状态无关，动作才相关）
       chainState: 'running',
-      championKnown: true,
     });
     armed = step.armed;
     if (step.recover) recoveries++;
