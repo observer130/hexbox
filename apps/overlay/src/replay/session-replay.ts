@@ -640,6 +640,22 @@ export function createReplayCapture(
  */
 export function createReplayLiveData(session: LoadedSession, clock: VirtualClock): AugmentLiveData {
   const samples = session.api;
+  /**
+   * 最早一条 2999 采样 —— **只用于回放**把"第一条采样之前"的窗口兜住。
+   *
+   * 为什么需要它（2026-11-14 真机会话复盘）：录制从"对局还在加载"时就开始了，
+   * 而 2999 第一次可读往往在 6~11 秒后（本会话是 +10.674s，旧会话是 +6.016s）。
+   * 线上控制器在这段会连续 10 次读不到 2999 → 退回像素节流；真实环境里像素帧
+   * 一直都在，退回是安全的。但**回放没有像素帧可退**（api 模式常态不取帧），
+   * 于是整局停在"像素节流、0 帧"：golden 的 4 次开边沿 / 12 次识别在回放里
+   * 全部变成 0（本会话实测）。这里返回"当时唯一已知的状态"（通常等级 1、
+   * 对局 0s），让触发状态机能沿录下来的等级时间线走，而不是卡在降级分支。
+   *
+   * 这不是对"当时真实状态"的断言：第一条采样之前的 API 状态确实未知；
+   * 它只保证回放**不会因为录制起始早于 2999 可用**而失真。`samples` 为空时仍返回
+   * null（没有 2999 的会话该走像素回放）。
+   */
+  const firstSample = samples.length > 0 ? samples[0]! : null;
   let lastError: string | null = null;
   const sampleAt = (): AugmentSessionApiSample | null => {
     const now = clock.now();
@@ -647,7 +663,8 @@ export function createReplayLiveData(session: LoadedSession, clock: VirtualClock
     for (const s of samples) {
       if (s.atMs <= now && (!best || s.atMs > best.atMs)) best = s;
     }
-    return best;
+    // 回放专用兜底：现在还没到第一条采样（线上这段是"API 不可用"）→ 用最早已知状态
+    return best ?? firstSample;
   };
   return {
     async getPlayerState() {

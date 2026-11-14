@@ -30,7 +30,7 @@ import {
   type Rect,
 } from '@hexbox/vision';
 
-import { runReplaySession, type LoadedSession } from './session-replay.ts';
+import { createReplayLiveData, runReplaySession, type LoadedSession } from './session-replay.ts';
 
 const W = 800;
 const H = 450;
@@ -670,4 +670,39 @@ test('★回归：回放时基 = 会话零点（不许把"第一个事件之前 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('createReplayLiveData：第一条 2999 采样之前用最早已知状态兜底（2026-11-14 真机会话复盘）', async () => {
+  // 这条锁的是一个**回放专属**的忠诚度问题：录制从"对局还在加载"就开始，
+  // 而 2999 第一次可读可能晚于控制器的 10 次重试（本会话 +10.674s）。
+  // 线上会退回像素节流（真实环境有帧，安全）；回放没有像素帧，若也退回就会
+  // 整局停在"0 帧"，golden 的 4 次开边沿 / 12 次识别全部消失。
+  const meta = parseSessionMeta(
+    { version: 1, trigger: 'api' },
+    { region: PANEL_ROW_REGION, altRegion: PANEL_ROW_REGION },
+  );
+  const api = [
+    { atMs: 10_674, gameTime: 0.024, level: 1, isDead: false, respawnTimer: 0, capture: true },
+    { atMs: 15_000, gameTime: 4.35, level: 2, isDead: false, respawnTimer: 0 },
+  ] as LoadedSession['api'];
+  const session: LoadedSession = { dir: '', meta, frames: [], api, edges: [], phase: [], notes: [] };
+  let now = 0;
+  const clock = { now: () => now } as unknown as Parameters<typeof createReplayLiveData>[1];
+  const live = createReplayLiveData(session, clock);
+
+  const atZero = await live.getPlayerState();
+  assert.equal(atZero?.level, 1, '第一条采样之前必须返回最早已知状态（等级 1），否则控制器会退回像素节流');
+  assert.equal(live.lastError, null, '兜底状态不是"2999 不可用"');
+
+  now = 8_000;
+  assert.equal((await live.getPlayerState())?.level, 1);
+  now = 12_000;
+  assert.equal((await live.getPlayerState())?.level, 1, '第一条采样之后按 atMs 正常取最近一条');
+  now = 16_000;
+  assert.equal((await live.getPlayerState())?.level, 2);
+
+  // 没有 2999 的会话（api 为空）必须如实返回 null，不能伪造状态
+  const empty = createReplayLiveData({ ...session, api: [] }, clock);
+  assert.equal(await empty.getPlayerState(), null);
+  assert.match(empty.lastError ?? '', /还没有 2999 采样/);
 });

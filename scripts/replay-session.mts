@@ -375,7 +375,7 @@ async function main(): Promise<void> {
         `、出现 ${cmp.goldenOpenEdges} vs ${cmp.replayOpenEdges} 次、消失 ${cmp.goldenCloseEdges} vs ${cmp.replayCloseEdges} 次`,
     );
     console.log(
-      `  整批识别锚点：命中 ${cmp.openEdgeMatched} / golden ${cmp.goldenRecognitions} 条` +
+      `  整批识别锚点：命中 ${cmp.openEdgeMatched} / golden ${cmp.goldenOpenRecognitions} 条` +
         `（缺 ${cmp.openEdgeMissing}、回放多 ${cmp.openEdgeExtra}）`,
     );
     console.log(

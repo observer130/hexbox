@@ -113,6 +113,8 @@ export interface GoldenCompareResult {
   readonly rerollMissing: number;
   /** 回放多出来的单卡刷新（可能是误检，也可能是回放采样节奏更密）。 */
   readonly rerollExtra: number;
+  /** golden 里「整批识别」（origin=open）的记录数（含同一开边沿的重试）。 */
+  readonly goldenOpenRecognitions: number;
   /** 时刻配上「整批识别」记录的开边沿数。 */
   readonly openEdgeMatched: number;
   /** golden 的整批识别锚点里，回放找不到对应开边沿的条数。 */
@@ -228,6 +230,7 @@ export function compareGolden(
     goldenCloseEdges: golden.counts.closeEdges,
     replayCloseEdges: replay.counts.closeEdges,
     goldenRecognitions: golden.recognitions.length,
+    goldenOpenRecognitions: goldenOpens.length,
     replayRecognizeCalls: replay.recognizeCalls,
     goldenRerolls: golden.rerolls.length,
     replayRerolls: replay.rerolls.length,
