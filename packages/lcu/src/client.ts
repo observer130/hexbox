@@ -98,17 +98,20 @@ export class LcuClient {
   }
 
   /**
-   * 同 `get`，但**把「资源不存在」当作 null** 而不是抛错。
+   * 同 `get`，但**把「资源/会话不存在」当作 null** 而不是抛错。
    *
-   * 大厅里 `/lol-gameflow/v1/session` 返回 404 是**正常**的
-   * （当前没有对局），不应被当成故障。401/403 仍会抛出，
-   * 因为那才是真正的凭证问题。
+   * 大厅里 `/lol-gameflow/v1/session` 返回 404 是**正常**的（当前没有对局），
+   * 不应被当成故障；400 同理（请求参数/会话状态不对）。
+   *
+   * ⚠️ 只有 400/404 → null（审查 P2：旧实现的 `!isAuthFailure` 把 **5xx 也一起
+   * 吞成 null**，调用方无法区分"没有对局"和"服务端故障"）。401/403（凭证问题）
+   * 与 5xx（客户端还活着但接口报错）都会抛出，交给调用方决定重试/记录。
    */
   async getOrNull<T = unknown>(path: string, opts: LcuRequestOptions = {}): Promise<T | null> {
     try {
       return await this.get<T>(path, opts);
     } catch (err) {
-      if (err instanceof LcuHttpError && !err.isAuthFailure) return null;
+      if (err instanceof LcuHttpError && (err.status === 400 || err.status === 404)) return null;
       throw err;
     }
   }

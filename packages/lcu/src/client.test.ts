@@ -92,8 +92,20 @@ test('getOrNull：401（鉴权失败）仍抛出，调用方可据此重探凭�
   );
 });
 
-test('getOrNull：500 也返回 null（不把服务端异常当凭证问题）', async () => {
-  assert.equal(await makeClient(stubTransport(500)).getOrNull('/x'), null);
+test('getOrNull：5xx 仍抛出（不许把服务端故障伪装成"没有数据"）', async () => {
+  await assert.rejects(
+    () => makeClient(stubTransport(500)).getOrNull('/lol-gameflow/v1/session'),
+    (err: unknown) => {
+      assert.ok(err instanceof LcuHttpError);
+      assert.equal(err.status, 500);
+      assert.equal(err.isAuthFailure, false, '5xx 不是凭证问题，但也不能静默 null');
+      return true;
+    },
+  );
+});
+
+test('getOrNull：400 也视为"没有数据"（会话状态不对是正常响应）', async () => {
+  assert.equal(await makeClient(stubTransport(400)).getOrNull('/x'), null);
 });
 
 test('getOrNull：2xx 正常返回解析后的 JSON', async () => {
