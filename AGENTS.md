@@ -56,6 +56,7 @@ pnpm install && pnpm sync && pnpm templates   # data + templates
 pnpm dev:web                                  # http://localhost:5273
 ```
 
+- Node ≥ 24 and pnpm 11.7.0 are required (root `engines.node` / `packageManager`).
 - pnpm is not vendored; without it run TS directly with system Node, e.g.
   `node --experimental-strip-types packages/data-cli/src/cli.ts sync`.
 - The overlay needs **admin + a real desktop**; it cannot run in headless CI.
@@ -66,14 +67,16 @@ pnpm dev:web                                  # http://localhost:5273
 
 `pnpm check:docs` → `pnpm typecheck` → `pnpm test` → `pnpm build` (CI runs the same on
 `windows-latest`). Node's built-in runner; `pnpm --filter @hexbox/core test` is faster.
-**Keep them green and add tests for new behavior.** Current: **1133** — core 60 /
-vision 710 / lcu 146 / overlay 69 / provider-communitydragon 15 / provider-tencent 48 /
-data-store 19 / data-cli 56 / web 10 (`pnpm test` is the source of truth; the overlay's
+**Keep them green and add tests for new behavior.** Current: **1163** — core 60 /
+vision 719 / lcu 146 / overlay 72 / provider-communitydragon 15 / provider-tencent 48 /
+data-store 19 / data-cli 58 / web 26 (`pnpm test` is the source of truth; the overlay's
 Electron runtime is not testable — its tests cover replay-safe parts and the self-test
 scenario logic only). `pnpm typecheck` also checks `scripts/*.mts`
 (`scripts/tsconfig.json`) and `apps/web` (via `vue-tsc`). `pnpm check:docs` fails on a
-broken local link, a test count that disagrees between AGENTS/README/ROADMAP, or a
-reference to a script that doesn't exist.
+broken local link, a test count that disagrees between AGENTS/README/ROADMAP (including
+the per-package sum), a version mismatch between root and `apps/overlay` or a missing
+`docs/RELEASE-NOTES-v<version>.md`, a Node-major mismatch between `engines.node` and the
+README/AGENTS text, or a reference to a script that doesn't exist.
 
 ## Rules that must not be broken
 
