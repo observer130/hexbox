@@ -6,6 +6,8 @@
 
 代码侧全绿（`pnpm test` 1192 项 / `pnpm check:docs` 通过）。
 
+> **上机前先跑前置检查**：`scripts\preflight-acceptance.ps1`（见 §D0，只读、不启动覆盖层）。
+
 ---
 
 ## A. 已经离线定案的（**不用再上机**）
@@ -67,11 +69,64 @@ node --experimental-strip-types scripts/replay-session.mts debug/sessions/<目�
 
 ---
 
-## D. 上机时的产物（失败才需要发回）
+## D. 录制与回放（本次验收**强制**开启）
 
-1. `debug/p1.log`（或整段终端输出）
-2. 截图：B1/B2 的画面各一张（含任务栏，能看出是不是副屏）
-3. 会话目录 `debug/sessions/<时间戳>/` —— 环境变量快照已自动脱敏，不含 LCU 令牌
+目的：验收完把整局录成**可回放会话** —— 出问题不用"再打一局"，
+`replay-session` 几秒内就能复跑，并与录制时的 `report.json` 逐项比对
+（门控出现/消失、整批识别、单卡刷新、标签）。录制默认**关闭**，必须显式打开。
 
-录制一局：`$env:HEXBOX_AUGMENT_RECORD='1'; pnpm --filter @hexbox/overlay debug:augment`
-收尾按 **Ctrl+C**（哨兵路径已对齐，会打印"会话录制收工"）。
+### D0. 上机前先跑前置检查（只读，不启动任何东西）
+
+```powershell
+# 以管理员身份打开 PowerShell（普通窗口也能跑，但会报"不是管理员"硬阻塞）
+powershell -ExecutionPolicy Bypass -File scripts\preflight-acceptance.ps1
+```
+
+它检查：管理员 / Node / pnpm、数据文件（图鉴/榜单/详情/模板/名字指纹 + `schemaVersion`
++ 新鲜度 + 关键计数）、覆盖层 `dist` 是否已构建、LCU 凭证是否可得、录制与日志目录是否
+可写，并打印下面 D1/D4 两段可直接复制的命令。退出码 **1 = 有硬阻塞**，先修再上机。
+
+### D1. 启动（管理员 PowerShell；路径换成前置检查打印的绝对路径）
+
+```powershell
+# 1) 固定数据目录与日志：dev:overlay 的 cwd 是 apps/overlay，相对路径会落到错误位置
+$env:HEXBOX_DATA_DIR  = '<仓库>\data'
+$env:HEXBOX_LOG_FILE  = '<仓库>\debug\p1.log'
+# 2) 开启会话录制（录制根目录由数据目录推导：<仓库>\debug\sessions）
+$env:HEXBOX_AUGMENT_RECORD = '1'
+# 3) 启动常驻覆盖层：选人胜率标签 + 局内海克斯强度标签（同一条链路）
+pnpm dev:overlay
+```
+
+录制内容（一局一个目录 `debug/sessions/<时间戳>-InProgress/`）：
+`session.json`（几何/身份/脱敏环境快照）+ `frames.idx.jsonl` + 门控/原生帧 PNG +
+`api.jsonl` + `edges.jsonl` + `phase.jsonl`；收工补 `report.json`（golden）。
+**选人阶段不录**（录制器随"进对局"启停），选人标签仍按 B1/B2 人眼验收。
+
+### D2. 收尾（决定会话完整不完整）
+
+- **打完一局**：从托盘菜单「退出」→ `before-quit` 调 `recorder.close()` 写 `report.json`。
+  日志应出现 `[record] 🎥 会话录制收工：门控帧 N / 原生帧 M` 与 `退出清理：…`。
+- **不要**任务管理器强杀 / 直接关终端：那样只有帧库没有 `report.json`，
+  回放会退化成"只能看，不能逐项比对"。
+- 若改用独立录制工具（只录局内海克斯链、Ctrl+C 收尾）：
+  `$env:HEXBOX_AUGMENT_RECORD='1'; pnpm --filter @hexbox/overlay debug:augment`
+  （哨兵路径会打印"会话录制收工"，见 `apps/overlay/run-electron.mjs`）。
+
+### D3. 回放验证（几分钟，不需要游戏）
+
+```powershell
+node --experimental-strip-types scripts/replay-session.mts debug\sessions\<时间戳>-InProgress
+```
+
+判读标准同 §C：**门控缺口 0**、**识别锚点缺 0**、面板帧数 ±几帧、识别次数差 ≤2；
+输出中「与 golden 对比」段有差异会逐条打印（如 `认定面板的帧数不一致`），无差异则只列统计。
+
+## E. 上机时的产物（失败才需要发回）
+
+1. `debug/p1.log`（`HEXBOX_LOG_FILE` 指向的那份完整日志）
+2. **`debug/sessions/<时间戳>-InProgress/` 整个目录**（必发；环境变量快照已脱敏，无 LCU token）
+3. 回放的终端输出（`debug/replay-*.log`）
+4. 截图：B1/B2 各一张（含任务栏，能看出是否副屏）
+5. 若数据是旧版本/降级过的：附 `node --experimental-strip-types packages/data-cli/src/cli.ts status` 输出
+
