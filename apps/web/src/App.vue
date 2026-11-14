@@ -1,13 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
-import { countChampionSet } from '@hexbox/core';
-import {
-  iconUrl,
-  MODE_META,
-  useDataset,
-  type Augment,
-  type HextechStatic,
-} from './useDataset';
+import { countChampionSet, type AugmentMode } from '@hexbox/core';
+import { MODE_META, useDataset } from './useDataset';
+import { buildAugmentCatalog, type CatalogTile } from './augment-catalog';
 import { RARITY_META, rarityMeta } from './rarity';
 import RankView from './components/RankView.vue';
 
@@ -19,31 +14,29 @@ const modeFilter = ref<string>('KIWI');
 const rarityFilter = ref<string>('all');
 const sortBy = ref<'name' | 'rarity'>('rarity');
 
-// 图鉴主体：CDragon 口径 + 国服官方口径合并展示（去重按名称归一化）
-const augments = computed<readonly Tile[]>(() => {
+// 图鉴主体：**国服口径优先**，CDragon 只补全国服未收录的条目。
+// 同名两源品质冲突时以国服为准（如 ChainReaction / Quest_UrfsChampion），
+// 合并规则与理由见 augment-catalog.ts。
+const catalog = computed<readonly CatalogTile[]>(() => {
   const ds = dataset.value;
-  if (!ds) return [];
-  const norm = (s: string): string => s.replace(/^ARAM_/i, '').toLowerCase();
-  const seen = new Set(ds.augments.map((a) => norm(a.augmentNameId)));
-  const extra: readonly Tile[] = ds.hextechs.filter((h) => !seen.has(norm(h.augmentNameId)));
-  return [...ds.augments, ...extra];
+  return ds ? buildAugmentCatalog(ds.augments, ds.hextechs) : [];
 });
 
-/** 图鉴瓦片：两种官方口径的联合。 */
-type Tile = Augment | HextechStatic;
+const cnCount = computed(() => catalog.value.filter((t) => t.source === 'cn').length);
+const cdragonOnlyCount = computed(() => catalog.value.filter((t) => t.source === 'cdragon').length);
 
 const modesPresent = computed(() => {
   const s = new Set<string>();
-  for (const a of augments.value) for (const m of a.modes) s.add(m);
+  for (const a of catalog.value) for (const m of a.modes) s.add(m);
   return ['all', ...[...s].sort()];
 });
 
 const filtered = computed(() => {
   const q = search.value.trim().toLowerCase();
-  let list = augments.value;
+  let list = catalog.value;
 
   if (modeFilter.value !== 'all') {
-    list = list.filter((a) => a.modes.includes(modeFilter.value as Augment['modes'][number]));
+    list = list.filter((a) => a.modes.includes(modeFilter.value as AugmentMode));
   }
   if (rarityFilter.value !== 'all') {
     list = list.filter((a) => a.rarity === rarityFilter.value);
@@ -56,23 +49,18 @@ const filtered = computed(() => {
     );
   }
 
-  return [...list].sort((x: Tile, y: Tile) => {
+  return [...list].sort((x: CatalogTile, y: CatalogTile) => {
     if (sortBy.value === 'name') return x.name.localeCompare(y.name, 'zh-CN');
     const dr = rarityMeta(x.rarity).order - rarityMeta(y.rarity).order;
     return dr !== 0 ? dr : x.name.localeCompare(y.name, 'zh-CN');
   });
 });
 
-/** 图鉴条目图标：CDragon 为资源路径，国服官方为直链。 */
-function tileIcon(a: Tile): string {
-  return 'iconPath' in a ? iconUrl(a.iconPath) : a.smallIcon || a.largeIcon;
-}
-
 const stats = computed(() => {
   const ds = dataset.value;
   if (!ds) return null;
   const byMode = new Map<string, number>();
-  for (const a of ds.augments) for (const m of a.modes) byMode.set(m, (byMode.get(m) ?? 0) + 1);
+  for (const a of catalog.value) for (const m of a.modes) byMode.set(m, (byMode.get(m) ?? 0) + 1);
   // ⚠️ **英雄数不是 `champions.length`**（真机数字描述错误）：CommunityDragon 的
   // `champion-summary.json` 里同一英雄有**两套 ID**（基础 ID + 60000+ 的 `Jade_*`
   // 变体条目）。实测 245 行 = **173 真实英雄** + 72 变体条目，而官方强度表
@@ -80,8 +68,9 @@ const stats = computed(() => {
   // 英雄显示 173，变体条目**单独说明它是什么**，绝不混进英雄数里。
   const championCounts = countChampionSet(ds.champions);
   return {
-    augments: ds.augments.length,
-    cnAugments: ds.hextechs.length,
+    augments: catalog.value.length,
+    cnAugments: cnCount.value,
+    cdragonOnly: cdragonOnlyCount.value,
     champions: championCounts.champions,
     championVariants: championCounts.variants,
     items: ds.items.length,
@@ -112,12 +101,7 @@ const championMap = computed(() => {
         <span class="badge">海克斯乱斗数据站</span>
       </div>
       <p class="dim sub">
-        静态图鉴 · 数据来源
-        <a href="https://raw.communitydragon.org/latest/" target="_blank" rel="noreferrer">
-          CommunityDragon
-        </a>
-        与
-        <a href="https://101.qq.com/" target="_blank" rel="noreferrer">腾讯一方官方 CDN</a>
+        静态图鉴以 <b>国服官方</b>数据为准（腾讯一方 CDN），CommunityDragon 补全国服未收录条目
         · 排行榜来自
         <a href="https://101.qq.com/#/rankings/hextech" target="_blank" rel="noreferrer">
           腾讯 101 官方数据站
@@ -137,11 +121,15 @@ const championMap = computed(() => {
       <section v-if="stats" class="cards">
         <div class="card">
           <div class="num">{{ stats.augments }}</div>
-          <div class="dim">海克斯 (CDragon)</div>
+          <div class="dim">海克斯（国服优先 + CDragon 补全）</div>
         </div>
         <div class="card">
           <div class="num">{{ stats.cnAugments }}</div>
-          <div class="dim">海克斯 (国服官方)</div>
+          <div class="dim">国服官方收录</div>
+        </div>
+        <div class="card">
+          <div class="num">{{ stats.cdragonOnly }}</div>
+          <div class="dim">CDragon 补充（非国服池）</div>
         </div>
         <div class="card">
           <div class="num">{{ stats.champions }}</div>
@@ -186,8 +174,8 @@ const championMap = computed(() => {
       </section>
 
       <section class="grid">
-        <article v-for="a in filtered" :key="a.id" class="tile">
-          <img v-if="tileIcon(a)" :src="tileIcon(a)" :alt="a.name" loading="lazy" />
+        <article v-for="a in filtered" :key="a.key" class="tile">
+          <img v-if="a.iconUrl" :src="a.iconUrl" :alt="a.name" loading="lazy" />
           <div v-else class="noicon">?</div>
           <div class="meta">
             <div class="name">{{ a.name }}</div>
@@ -220,8 +208,9 @@ const championMap = computed(() => {
         财产的人士的观点或意见。Riot Games 及所有相关财产均为 Riot Games, Inc. 的商标或注册商标。
       </p>
       <p class="dim small">
-        本站只使用官方一方公开数据：静态图鉴来自 CommunityDragon 与腾讯官方 CDN，
-        排行榜来自腾讯 101 官方数据站（101.qq.com）并随数据标注统计日期。
+        本站只使用官方一方公开数据：静态图鉴以腾讯官方 CDN 的国服数据为准，
+        CommunityDragon 补全国服未收录条目；排行榜来自腾讯 101 官方数据站
+        （101.qq.com）并随数据标注统计日期。
         不读内存、不注入、不解析封包，也不识别对局内被提供的海克斯。
       </p>
     </footer>

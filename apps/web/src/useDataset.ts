@@ -2,10 +2,14 @@
  * 前端数据加载
  *
  * 两个数据文件（均由 `pnpm sync` 生成）：
- *   - /data/dataset.json  静态图鉴（CDragon + 腾讯一方，合并落盘）
- *   - /data/rankings.json 官方排行榜（腾讯 101 数据站，official-aggregated）
+ *   - data/dataset.json  静态图鉴（CDragon + 腾讯一方，合并落盘）
+ *   - data/rankings.json 官方排行榜（腾讯 101 数据站，official-aggregated）
  *
- * 不在源码中打包数据 —— 800KB+ JSON 会让构建产物无谓膨胀。
+ * 用**相对路径**而不是 `/data/...`：Vite `base: './'`，构建产物可部署到任意
+ * 子路径（`vite.config.ts` 的 `serveDataFiles`/`copyDataToDist` 分别负责
+ * dev 挂载与 build 拷贝）。
+ *
+ * 不在源码中打包数据 —— 800KB+ JSON 会让构建产物无谓膨胀（构建期拷入 dist/data）。
  * 排行榜加载失败不应影响图鉴展示（两份状态独立）。
  *
  * 排行榜展示应标注来源与统计日期（meta.dataDate），便于用户甄别出处。
@@ -50,12 +54,12 @@ export function useDataset(): DataState {
       // 排行榜独立容错：失败不阻塞图鉴
       const [ds, rk] = await Promise.all([
         fetchJson<Dataset>(
-          '/data/dataset.json',
-          '未找到数据集。请先在项目根目录运行 `pnpm sync` 生成数据。',
+          'data/dataset.json',
+          '未找到数据集。开发环境请先在项目根目录运行 `pnpm sync`；已部署站点请确认构建前已生成 data/（构建时会拷入 dist/data）。',
         ),
         fetchJson<RankingSnapshot>(
-          '/data/rankings.json',
-          '未找到排行榜数据。请先在项目根目录运行 `pnpm sync`。',
+          'data/rankings.json',
+          '未找到排行榜数据。开发环境请先在项目根目录运行 `pnpm sync`；已部署站点请确认构建前已生成 data/。',
         ).catch(() => null),
       ]);
       dataset.value = ds;
@@ -75,11 +79,6 @@ export const MODE_META: Record<string, { label: string; hint: string }> = {
   KIWI_JADE: { label: '海克斯乱斗 · Jade', hint: 'Jade 变体池（更大）' },
   CHERRY: { label: '斗魂竞技场', hint: 'Arena（2v2v2v2）' },
 };
-
-export function iconUrl(iconPath: string): string {
-  // CDragon 资源路径形如 /lol-game-data/assets/...
-  return iconPath ? `https://raw.communitydragon.org/latest/plugins${iconPath}` : '';
-}
 
 /** 国服官方图标（kiwi_augments 自带绝对直链）。 */
 export function cnIconUrl(h: HextechStatic): string {
