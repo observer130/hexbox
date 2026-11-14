@@ -13,6 +13,7 @@ import {
   createTencentRankingProvider,
   createTencentStaticProvider,
   extractFieldValue,
+  fetchHeroDetail,
   normalizeAugmentNameId,
   normalizeKiwiAugments,
   parseAugmentRankList,
@@ -321,4 +322,42 @@ test('statDateCandidates：跨月/跨年边界不跳日', () => {
     '20260228',
     '20260227',
   ]);
+});
+
+/* ------------------------------------------------------------------ */
+/* 超时 / 重试（审查 P1：原实现无超时，半开连接会挂死整条同步）            */
+/* ------------------------------------------------------------------ */
+
+test('腾讯图鉴：5xx 重试一次后成功', async () => {
+  let calls = 0;
+  const provider = createTencentStaticProvider({
+    fetchImpl: (async () => {
+      calls++;
+      if (calls === 1) return new Response('busy', { status: 503 });
+      return jsonResponse(KIWI_FIXTURE);
+    }) as typeof fetch,
+    retryDelayMs: 1,
+  });
+  const ds = await provider.load();
+  assert.equal(calls, 2, '首次 503 + 一次重试');
+  assert.ok(ds.hextechs.length > 0);
+});
+
+test('fetchHeroDetail：请求带超时，上游不响应时返回 null（不挂住整批）', async () => {
+  const fetchImpl = ((_input: RequestInfo | URL, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      if (!signal) {
+        reject(new Error('缺少超时信号'));
+        return;
+      }
+      if (signal.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    })) as typeof fetch;
+
+  const result = await fetchHeroDetail(1, { fetchImpl, timeoutMs: 10 });
+  assert.equal(result, null);
 });

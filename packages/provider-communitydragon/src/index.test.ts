@@ -257,3 +257,76 @@ test('provider：上游非 2xx 时抛出且带状态码', async () => {
   });
   await assert.rejects(() => provider.load(), /HTTP 500/);
 });
+
+/* ------------------------------------------------------------------ */
+/* 超时 / 重试（审查 P1：原实现无超时，上游半开连接会挂死整条同步）        */
+/* ------------------------------------------------------------------ */
+
+test('provider：5xx 重试一次后成功（一次抖动不让整条同步失败）', async () => {
+  const routes: Record<string, unknown> = {
+    'cherry-augments.json': [],
+    'augment-lists.json': [],
+    'champion-summary.json': [],
+  };
+  let calls = 0;
+  const fetchImpl = (async (input: RequestInfo | URL) => {
+    calls++;
+    if (calls === 1) return new Response('busy', { status: 503 });
+    const url = String(input);
+    for (const [file, body] of Object.entries(routes)) {
+      if (url.includes(file)) return jsonResponse(body);
+    }
+    return new Response('not found', { status: 404 });
+  }) as typeof fetch;
+
+  const provider = createCommunityDragonProvider({
+    fetchImpl,
+    includeItems: false,
+    retryDelayMs: 1,
+  });
+  const ds = await provider.load();
+  assert.deepEqual(ds.augments, []);
+  assert.equal(calls, 4, '3 个端点 + 1 次重试');
+});
+
+test('provider：4xx 不重试（URL/权限错误重试无意义）', async () => {
+  let calls = 0;
+  const provider = createCommunityDragonProvider({
+    fetchImpl: (async () => {
+      calls++;
+      return new Response('forbidden', { status: 403 });
+    }) as typeof fetch,
+    includeItems: false,
+    retryAttempts: 3,
+    retryDelayMs: 1,
+  });
+  await assert.rejects(() => provider.load(), /HTTP 403/);
+  assert.equal(calls, 3, '三个端点各请求一次，均不重试');
+});
+
+test('provider：请求带超时信号，上游不响应时超时失败（不无限挂起）', async () => {
+  let calls = 0;
+  const fetchImpl = ((_input: RequestInfo | URL, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      calls++;
+      const signal = init?.signal;
+      if (!signal) {
+        reject(new Error('缺少超时信号'));
+        return;
+      }
+      if (signal.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    })) as typeof fetch;
+
+  const provider = createCommunityDragonProvider({
+    fetchImpl,
+    includeItems: false,
+    timeoutMs: 10,
+    retryDelayMs: 1,
+  });
+  await assert.rejects(() => provider.load());
+  assert.equal(calls, 6, '3 个端点 × 2 次尝试（超时后重试一次）');
+});
