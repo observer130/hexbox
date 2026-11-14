@@ -11,7 +11,16 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { deflateSync } from 'node:zlib';
 
-import { bitmapToGray, decodePng, encodeGrayPng, encodePng, grayToBitmap } from './png.ts';
+import {
+  PNG_IHDR_LENGTH,
+  PNG_MAX_DIMENSION,
+  PNG_MAX_RAW_BYTES,
+  bitmapToGray,
+  decodePng,
+  encodeGrayPng,
+  encodePng,
+  grayToBitmap,
+} from './png.ts';
 
 /* ------------------------------------------------------------------ */
 /* 手工 PNG 编码（测试专用，未做任何优化）                              */
@@ -146,6 +155,44 @@ function expectRgba(img: { data: Uint8ClampedArray }, i: number, r: number, g: n
   assert.equal(img.data[d + 1], g, `#${i} G`);
   assert.equal(img.data[d + 2], b, `#${i} B`);
   assert.equal(img.data[d + 3], a, `#${i} A`);
+}
+
+/**
+ * 只拼「签名 + 任意 IHDR + IDAT + IEND」的 PNG（不构造真实像素）。
+ *
+ * 尺寸/头校验必须发生在 zlib 解压**之前**，所以这些用例的 IDAT 只需要一段
+ * 合法（但内容退化）的 zlib 流 —— 检测器在解压前就该拒绝，用不到像素。
+ */
+function pngWithHeader(o: {
+  readonly width: number;
+  readonly height: number;
+  readonly bitDepth?: number;
+  readonly colorType?: number;
+  readonly interlace?: number;
+  /** 覆盖 IHDR 数据段（默认 13 字节正常头；用于"长度非法"用例）。 */
+  readonly ihdrData?: Uint8Array;
+}): Uint8Array {
+  const ihdr = new Uint8Array(PNG_IHDR_LENGTH);
+  const dv = new DataView(ihdr.buffer);
+  dv.setUint32(0, o.width);
+  dv.setUint32(4, o.height);
+  ihdr[8] = o.bitDepth ?? 8;
+  ihdr[9] = o.colorType ?? 6;
+  ihdr[12] = o.interlace ?? 0;
+  const parts = [
+    new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', o.ihdrData ?? ihdr),
+    // 空 deflate 流（zlib 头 + 终止块 + adler32）；即使被解压也只是 0 字节。
+    chunk('IDAT', new Uint8Array([0x78, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01])),
+    chunk('IEND', new Uint8Array(0)),
+  ];
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let off = 0;
+  for (const p of parts) {
+    out.set(p, off);
+    off += p.length;
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ */
@@ -313,6 +360,74 @@ test('decodePng：截断的 IDAT 数据报错', () => {
   // 砍掉文件尾部：IEND 被移除，且 IDAT 缺 CRC —— 解析必然失败
   const cut = png.subarray(0, png.length - 12);
   assert.throws(() => decodePng(cut));
+});
+
+/* ------------------------------------------------------------------ */
+/* 防御性上限（外部 PNG 不可信：损坏/恶意帧不得触发超大分配）            */
+/* ------------------------------------------------------------------ */
+
+test('decodePng：IHDR 数据长度不是 13 时明确报错', () => {
+  for (const len of [PNG_IHDR_LENGTH - 1, PNG_IHDR_LENGTH + 1, 0]) {
+    assert.throws(
+      () => decodePng(pngWithHeader({ width: 1, height: 1, ihdrData: new Uint8Array(len) })),
+      /IHDR 数据长度非法/,
+      `IHDR 数据长度 ${len} 必须被拒绝`,
+    );
+  }
+});
+
+test('decodePng：宽高超过单边上限时明确报错（解压前拒绝）', () => {
+  const over = PNG_MAX_DIMENSION + 1;
+  assert.throws(
+    () => decodePng(pngWithHeader({ width: over, height: 1 })),
+    /尺寸超出上限/,
+    '超宽必须被拒绝',
+  );
+  assert.throws(
+    () => decodePng(pngWithHeader({ width: 1, height: over })),
+    /尺寸超出上限/,
+    '超高必须被拒绝',
+  );
+});
+
+test('decodePng：解压后大小超过上限时明确报错（先算再解压）', () => {
+  // 两个方向都没超单边上限，但 RGBA 总字节远超 PNG_MAX_RAW_BYTES ——
+  // 必须有独立的"解压后大小"上限，否则 16384×16384 RGBA 仍是 1 GiB 分配。
+  assert.ok(
+    (PNG_MAX_DIMENSION * 4 + 1) * PNG_MAX_DIMENSION > PNG_MAX_RAW_BYTES,
+    '用例前提：单边上限内的 RGBA 帧仍可超过解压后上限',
+  );
+  assert.throws(
+    () =>
+      decodePng(
+        pngWithHeader({
+          width: PNG_MAX_DIMENSION,
+          height: PNG_MAX_DIMENSION,
+          colorType: 6,
+        }),
+      ),
+    /解压后数据过大/,
+  );
+});
+
+test('decodePng：宽或高为 0 时明确报错', () => {
+  assert.throws(() => decodePng(pngWithHeader({ width: 0, height: 1 })), /尺寸非法/);
+  assert.throws(() => decodePng(pngWithHeader({ width: 1, height: 0 })), /尺寸非法/);
+});
+
+test('decodePng：恰好等于单边上限仍可解码（上限只拒绝"超出"，不收紧正常输入）', () => {
+  const png = buildPng({
+    width: PNG_MAX_DIMENSION,
+    height: 1,
+    colorType: 0,
+    samples: new Uint8Array(PNG_MAX_DIMENSION),
+  });
+  const img = decodePng(png);
+  assert.equal(img.width, PNG_MAX_DIMENSION);
+  assert.equal(img.height, 1);
+  assert.equal(img.data.length, PNG_MAX_DIMENSION * 4);
+  expectRgba(img, 0, 0, 0, 0, 255);
+  expectRgba(img, PNG_MAX_DIMENSION - 1, 0, 0, 0, 255);
 });
 
 /* ------------------------------------------------------------------ */

@@ -9,6 +9,8 @@
  *   - Interlace 一律不支持（CDragon 图标均不隔行；遇到即报错，
  *     静默产出错误像素比报错更糟）
  *   - 解压用 Node 内置 zlib（inflate），PNG 的 zlib 流即原始 deflate
+ *   - 防御性上限（外部字节不可信）：IHDR 数据必须 13 字节、宽高 > 0 且
+ *     ≤ `PNG_MAX_DIMENSION`、解压后 ≤ `PNG_MAX_RAW_BYTES`，超出即明确报错
  *
  * 输出统一为 RGBA（每像素 4 字节），与 `Bitmap` 的约定一致。
  */
@@ -17,6 +19,34 @@ import { deflateSync, inflateSync } from 'node:zlib';
 
 /** PNG 文件签名（8 字节）。 */
 const SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] as const;
+
+/**
+ * IHDR 数据段长度（PNG 规范固定 13 字节：宽 4 + 高 4 + 位深 1 +
+ * 颜色类型 1 + 压缩方法 1 + 滤波方法 1 + 隔行 1）。
+ *
+ * 长度不对说明不是正常 PNG：后面按固定偏移取宽高/位深/隔行，
+ * 长度不符时读到的就是相邻 chunk 的字节（甚至越界），必须拒绝。
+ */
+export const PNG_IHDR_LENGTH = 13;
+
+/**
+ * 单边像素上限（外部 PNG 输入的防御值）。
+ *
+ * `decodePng` 解的是外部字节（CDragon 图标、会话帧、调试截图），损坏/恶意帧的
+ * IHDR 宽高可以任意大（PNG 规范允许到 2^31−1）—— 不设上限就会按那个尺寸分配
+ * `width*height*4` 的输出，并给 inflate 一个巨大的 `maxOutputLength`。
+ * 16384 已远大于任何真实截屏（8K 宽 7680），只拦病态输入。
+ */
+export const PNG_MAX_DIMENSION = 16384;
+
+/**
+ * 解压后原始扫描线的字节上限（防解压炸弹/超大分配）。
+ *
+ * 非交错 PNG 解压后**恰好**是 `(width*channels + 1) * height` 字节；单边
+ * 16384 的 RGBA 帧也有 1 GiB，所以除单边上限外还要卡总字节数。
+ * 256 MiB 能放下 8K RGBA 帧（约 127 MiB），只拦病态输入。
+ */
+export const PNG_MAX_RAW_BYTES = 256 * 1024 * 1024;
 
 /** CRC32 查表（PNG chunk 校验用）。 */
 const CRC_TABLE = (() => {
@@ -270,7 +300,8 @@ function paeth(a: number, b: number, c: number): number {
 /**
  * 解码 PNG → RGBA 位图。
  *
- * @throws 不是 PNG、含不支持的特性（隔行/位深）或数据损坏时抛错。
+ * @throws 不是 PNG、含不支持的特性（隔行/位深）、尺寸/解压后大小超出上限
+ *         （见 `PNG_MAX_DIMENSION` / `PNG_MAX_RAW_BYTES`）或数据损坏时抛错。
  *         调用方（模板构建）应让它失败而不是静默跳过 —— 坏图标不如不建模板。
  */
 export function decodePng(buf: Uint8Array): PngImage {
@@ -284,6 +315,13 @@ export function decodePng(buf: Uint8Array): PngImage {
   if (!chunks.some((c) => c.type === 'IEND')) throw new Error('PNG 被截断（缺少 IEND）');
   const ihdr = chunks.find((c) => c.type === 'IHDR');
   if (!ihdr) throw new Error('PNG 缺少 IHDR');
+  // IHDR 数据段必须恰好 13 字节（规范固定）。长度不可信时先拒绝：
+  // 下面按固定偏移取宽高/位深/隔行，长度不对就是读相邻 chunk 的字节。
+  if (ihdr.end - ihdr.start !== PNG_IHDR_LENGTH) {
+    throw new Error(
+      `PNG 的 IHDR 数据长度非法：${ihdr.end - ihdr.start}（应为 ${PNG_IHDR_LENGTH}）`,
+    );
+  }
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const width = dv.getUint32(ihdr.start);
   const height = dv.getUint32(ihdr.start + 4);
@@ -291,9 +329,25 @@ export function decodePng(buf: Uint8Array): PngImage {
   const colorType = buf[ihdr.start + 9]!;
   const interlace = buf[ihdr.start + 12]!;
   if (width <= 0 || height <= 0) throw new Error(`PNG 尺寸非法 ${width}x${height}`);
+  // 尺寸上限必须在算 expectedRaw / 给 inflate 传 maxOutputLength **之前**校验：
+  // 外部字节不可信，病态宽高会变成超大分配与解压炸弹（见常量注释）。
+  if (width > PNG_MAX_DIMENSION || height > PNG_MAX_DIMENSION) {
+    throw new Error(
+      `PNG 尺寸超出上限 ${width}x${height}（单边最大 ${PNG_MAX_DIMENSION}）`,
+    );
+  }
   if (bitDepth !== 8) throw new Error(`不支持的位深 ${bitDepth}（仅支持 8）`);
   if (interlace !== 0) throw new Error('不支持隔行 PNG（Adam7）');
   const channels = channelsOf(colorType);
+
+  // 解压后大小：非交错 PNG 解压后**恰好**是 (stride+1)×height。先算并校验总字节，
+  // 避免把病态尺寸直接喂给 inflate 的 maxOutputLength（超大分配/解压炸弹）。
+  const expectedRaw = (width * channels + 1) * height;
+  if (expectedRaw > PNG_MAX_RAW_BYTES) {
+    throw new Error(
+      `PNG 解压后数据过大：预计 ${expectedRaw} 字节（上限 ${PNG_MAX_RAW_BYTES}）`,
+    );
+  }
 
   const idat = chunks
     .filter((c) => c.type === 'IDAT')
@@ -309,7 +363,6 @@ export function decodePng(buf: Uint8Array): PngImage {
   // ⚠️ 必须给 maxOutputLength：IDAT 是 zlib 流，一个 10KB 的 PNG 可以解出几个 GB
   //    （解压炸弹）。上限按"这张图本来应该有多大"算（非交错 PNG 解压后**恰好**是
   //    (stride+1)×height），超出的输入一律拒绝。留 4KB 余量给编码器的块尾。
-  const expectedRaw = (width * channels + 1) * height;
   const raw = inflateSync(compressed, { maxOutputLength: expectedRaw + 4096 });
 
   const stride = width * channels;

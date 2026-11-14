@@ -10,14 +10,22 @@
  *   两处各写一份必然漂移（这是坐标换算最容易出错的环节，
  *   见 docs/SCREENSHOT-DEV.md §3.1）。
  *
- * DPI 要点（实测）：
- *   - Electron 主进程默认 Per-Monitor-V2 DPI 感知，GetWindowRect
- *     返回**物理像素**；Electron 的 screen/display 使用**逻辑 DIP**。
- *   - desktopCapturer 的缩略图尺寸 = 物理像素 × 未知内部缩放。
- *   三者混用必然错位，因此换算链必须显式：
- *     截图像素 → ÷captureScale → 物理像素 → ÷scaleFactor → 逻辑 DIP
- *   - captureScale 运行时自校准：物理窗口尺寸与截屏尺寸同源
- *     （都是物理像素），比值即缩放，无需假设固定 2.0。
+ * DPI 要点（S2 验收三轮实测，2026-09-27 定稿；与下方 `makeScreenGeometry`
+ * 头注的"坐标系结论"同一口径）：
+ *   - 本文件的窗口矩形探针跑在**非 DPI 感知**的 PowerShell 进程里，
+ *     GetWindowRect 返回的是 **DPI 虚拟化逻辑坐标（DIP）** —— 与 Electron
+ *     `display.bounds` 同一口径，换算链**不得再除以 scaleFactor**。
+ *     （旧头注写的"GetWindowRect 返回物理像素、链里 ÷scaleFactor"是错的：
+ *      物理像素只在 DPI 感知进程里直调 user32 时才会拿到。）
+ *   - 截屏（desktopCapturer / 屏幕流）给的是**像素**。截屏像素相对窗口的比例
+ *     由 `captureScale` 运行时自校准：**captureScale = 截屏像素 ÷ 窗口矩形宽**
+ *     （同一窗口里量，不假设固定 2.0；窗口矩形是 DIP 口径，所以比值 =
+ *     每个逻辑单位对应多少截屏像素）。它只用于"截屏像素 ↔ 窗口"换算，
+ *     **不是** DPI 倍率，不能再乘/除 scaleFactor。
+ *   - 于是归一化卡片矩形 → 屏幕逻辑坐标只有一条链：
+ *       rect × display 逻辑宽高 + display 逻辑原点
+ *     全程不出现 ×/÷scaleFactor（见 `normalizedRectToScreen` /
+ *     `makeScreenGeometry`）。
  */
 
 import { execFile } from 'node:child_process';
@@ -458,10 +466,11 @@ try {
 }
 
 /**
- * 换算链第一步：截图像素 → 窗口物理像素的缩放。
+ * 换算链第一步：截屏像素 → 窗口矩形（DIP）的缩放。
  *
- * 自校准原理：GetWindowRect 与 desktopCapturer 都工作在物理像素层，
- * 二者尺寸之比即 captureScale（因 UI 主题/显示器组合而异，不假设定值）。
+ * 自校准原理：截屏给的是**像素**，窗口矩形探针给的是 **DIP**（见文件头 DPI 要点），
+ * 二者尺寸之比 = captureScale（每个逻辑单位对应多少截屏像素；因 UI 主题/显示器
+ * 组合而异，不假设定值）。它**不是** DPI 倍率，换算链里不再乘/除 scaleFactor。
  * 任一来源缺失时按 1.0 处理并让调用方知情（返回值带 estimated 标记）。
  */
 export function captureScale(

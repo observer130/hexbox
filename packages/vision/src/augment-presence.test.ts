@@ -43,14 +43,26 @@ function blank(v: number): Bitmap {
   return { width: W, height: H, data };
 }
 
+/** 指定宽度的全暗帧（"搜索区宽非步长整倍数"回归用；高度仍为 H）。 */
+function blankOfWidth(w: number, v = 60): Bitmap {
+  const data = new Uint8ClampedArray(w * H * 4);
+  for (let i = 0; i < data.length; i += 4) {
+    data[i] = v;
+    data[i + 1] = v;
+    data[i + 2] = v;
+    data[i + 3] = 255;
+  }
+  return { width: w, height: H, data };
+}
+
 function fill(bmp: Bitmap, r: Rect, v: number): void {
-  const x0 = Math.max(0, Math.round(r.x * W));
-  const y0 = Math.max(0, Math.round(r.y * H));
-  const x1 = Math.min(W, Math.round((r.x + r.w) * W));
-  const y1 = Math.min(H, Math.round((r.y + r.h) * H));
+  const x0 = Math.max(0, Math.round(r.x * bmp.width));
+  const y0 = Math.max(0, Math.round(r.y * bmp.height));
+  const x1 = Math.min(bmp.width, Math.round((r.x + r.w) * bmp.width));
+  const y1 = Math.min(bmp.height, Math.round((r.y + r.h) * bmp.height));
   for (let y = y0; y < y1; y++) {
     for (let x = x0; x < x1; x++) {
-      const i = (y * W + x) * 4;
+      const i = (y * bmp.width + x) * 4;
       bmp.data[i] = v;
       bmp.data[i + 1] = v;
       bmp.data[i + 2] = v;
@@ -200,6 +212,31 @@ test('detectPanelPresence：采样步长（xStep）不改变判定（离线省�
   });
   assert.equal(a.present, true, a.reason);
   assert.equal(b.present, true, b.reason);
+});
+
+test('detectPanelPresence：**搜索区宽不是采样步长整倍数**时行占比仍 ≤ 1（回归：分母曾用 floor，占比可 >1 抬高突出量）', () => {
+  // 800×450 的默认搜索区宽 608 = 2×304，正好整除 —— 旧测试盖不到这个边界。
+  // 801/803 宽时搜索区列数不是步长整倍数：旧分母 floor 少算一列，整行亮时
+  // rowFrac = 样本数/floor(...) ≈ 1.003（>1），而本信号的真实约束是突出量
+  // （带内占比 − 带外占比）—— 等于系统性放大它。正确分母是实际采样列数 ceil。
+  const cases = [
+    { w: 801, step: 2 }, // 搜索区像素宽 609，样本 305（floor 会是 304）
+    { w: 803, step: 3 }, // 搜索区像素宽 611，样本 204（floor 会是 203）
+  ] as const;
+  for (const { w, step } of cases) {
+    const bmp = blankOfWidth(w);
+    drawBrightRowAtRegionY(bmp, 0.15);
+    drawBrightRowAtRegionY(bmp, 0.75);
+    const p = detectPanelPresence(bmp, PANEL_PRESENCE_REGION, {
+      ...PANEL_PRESENCE_THRESHOLDS,
+      xStep: step,
+    });
+    assert.equal(p.present, true, `w=${w} step=${step}: ${p.reason}`);
+    assert.ok(p.topFrac <= 1, `w=${w} step=${step}: topFrac=${p.topFrac} 必须 ≤ 1`);
+    assert.ok(p.bottomFrac <= 1, `w=${w} step=${step}: bottomFrac=${p.bottomFrac} 必须 ≤ 1`);
+    assert.equal(p.topFrac, 1, `整行亮 → 上带占比应为 1（w=${w} step=${step}）`);
+    assert.equal(p.bottomFrac, 1, `整行亮 → 下带占比应为 1（w=${w} step=${step}）`);
+  }
 });
 
 test('detectPanelPresenceInRegions：主区未命中时用备用区（与卡片判据同一套回退语义）', () => {

@@ -14,6 +14,7 @@ import { test } from 'node:test';
 import type { PanelDetection } from './augment-panel.ts';
 import type { PanelPresence } from './augment-presence.ts';
 import {
+  AUGMENT_SESSION_VERSION,
   parseApiTraceCsv,
   parseCsvRows,
   parseFramesIndexJsonl,
@@ -133,6 +134,42 @@ test('parseApiTraceCsv：按列名取，不因新增列而错位', () => {
   assert.equal(rows[0]!.reason, '等死亡');
 });
 
+test('parseApiTraceCsv：pending 列**顺序变化**时仍按表头名解析（回归：曾硬编码第 6 列）', () => {
+  // 旧实现把"合回未转义 pending"的起点写死在第 6 列：列顺序一变，它就会从
+  // capture 列开始拼接，pending 变空、后续列错位，且**不报错**。
+  // 这里把 pending 放到最后一列（前移一列），两种行形态都必须解析正确。
+  const header = 'reason,ms,gameTime,level,isDead,respawnTimer,capture,pending\n';
+  const text =
+    header +
+    '开局,2348,0.0,1,0,0.0,1,[0,7,11,15]\n' + // 旧版：pending 未转义 → 被拆成 4 格
+    '待选,3382,1.0,2,0,0.5,0,"[7]"\n'; // 新版：标准 CSV（带引号）
+  const rows = parseApiTraceCsv(text);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows[0], {
+    atMs: 2348,
+    gameTime: 0,
+    level: 1,
+    isDead: false,
+    respawnTimer: 0,
+    capture: true,
+    pending: [0, 7, 11, 15],
+    reason: '开局',
+  });
+  assert.equal(rows[1]!.capture, false);
+  assert.deepEqual(rows[1]!.pending, [7]);
+  assert.equal(rows[1]!.reason, '待选');
+});
+
+test('parseApiTraceCsv：表头没有 pending 列时跳过旧格式合并（兼容回退，不猜列号）', () => {
+  // 老/裁剪过的文件可能没有 pending 列：此时绝不能按历史下标 6 去"合回"——
+  // 那会把 reason 当成 pending 拆掉。其余列仍按列名解析。
+  const text = 'ms,gameTime,level,isDead,respawnTimer,capture,reason\n' + '5,1,2,0,0,1,等死亡\n';
+  const rows = parseApiTraceCsv(text);
+  assert.equal(rows[0]!.capture, true);
+  assert.equal(rows[0]!.reason, '等死亡');
+  assert.equal('pending' in rows[0]!, false, '没有 pending 列就不该凭空产出 pending');
+});
+
 test('parseApiTraceCsv：空文件与只有表头都不炸', () => {
   assert.deepEqual(parseApiTraceCsv(''), []);
   assert.deepEqual(parseApiTraceCsv(API_HEADER), []);
@@ -176,10 +213,13 @@ test('parseFramesIndexJsonl：坏行跳过并计数，按时间排序', () => {
   assert.equal(frames[1]!.crop.w, 1); // 缺 crop → 整幅
 });
 
-test('parseSessionMeta：缺字段降级而不抛（回放按缺失能力降级）', () => {
+test('parseSessionMeta：version=1 时缺字段降级而不抛（回放按缺失能力降级）', () => {
   const fallback = { region: { x: 0.12, y: 0.1, w: 0.76, h: 0.66 }, altRegion: { x: 0, y: 0, w: 1, h: 1 } };
-  const meta = parseSessionMeta({ trigger: 'api', gating: { width: 1147, height: 480 } }, fallback);
-  assert.equal(meta.version, 1);
+  const meta = parseSessionMeta(
+    { version: AUGMENT_SESSION_VERSION, trigger: 'api', gating: { width: 1147, height: 480 } },
+    fallback,
+  );
+  assert.equal(meta.version, AUGMENT_SESSION_VERSION);
   assert.equal(meta.trigger, 'api');
   assert.equal(meta.gating?.width, 1147);
   assert.equal(meta.gating?.targetScale, 1 / 3);
@@ -187,10 +227,20 @@ test('parseSessionMeta：缺字段降级而不抛（回放按缺失能力降级�
   assert.deepEqual(meta.region, fallback.region);
   assert.equal(meta.windowPhysical, null);
 
-  const broken = parseSessionMeta(null, fallback);
+  // 版本匹配之后，其余字段才允许缺失降级
+  const broken = parseSessionMeta({ version: AUGMENT_SESSION_VERSION }, fallback);
   assert.equal(broken.trigger, 'pixel');
   assert.equal(broken.gating, null);
   assert.deepEqual(broken.env, {});
+});
+
+test('parseSessionMeta：版本不匹配/缺失/非法**直接拒绝**（不静默降级解析旧/未来格式）', () => {
+  const fallback = { region: { x: 0.12, y: 0.1, w: 0.76, h: 0.66 }, altRegion: { x: 0, y: 0, w: 1, h: 1 } };
+  assert.throws(() => parseSessionMeta({ version: 999 }, fallback), /版本不支持：999/);
+  assert.throws(() => parseSessionMeta({}, fallback), /版本缺失/);
+  assert.throws(() => parseSessionMeta(null, fallback), /版本缺失/);
+  // 字符串 "1" 看似相等，但不是合法版本号 —— 必须拒绝而不是隐式转换
+  assert.throws(() => parseSessionMeta({ version: '1' }, fallback), /版本非法：/);
 });
 
 /* ------------------------------------------------------------------ */

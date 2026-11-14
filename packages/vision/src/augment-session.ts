@@ -22,7 +22,7 @@
 import type { PanelCard } from './augment-panel.ts';
 import type { Rect } from './types.ts';
 
-/** 会话格式版本（不兼容时回放工具应明确拒绝，而不是猜）。 */
+/** 会话格式版本：`parseSessionMeta` **强制校验**（不匹配直接抛错，不静默降级）。 */
 export const AUGMENT_SESSION_VERSION = 1;
 
 /* ------------------------------------------------------------------ */
@@ -260,8 +260,15 @@ export function parseApiTraceCsv(text: string): AugmentSessionApiSample[] {
     if (row.length <= at) continue;
     // 合回被逗号拆散的 pending（旧版未转义）：标准形态是完整的一格 `[...]`，
     // 否则说明这一格被拆了 —— 一直合到出现 `]` 为止。
-    const pendingAt = 6;
-    if (row.length > pendingAt && !/^\[[^\]]*\]$/.test((row[pendingAt] ?? '').trim())) {
+    // ⚠️ 起点**按表头列名取**，不硬编码第 6 列：录制器在前面加一列时，硬编码
+    //    下标会把别的列（例如 reason）当成 pending 拆开再合回，静默产出错位数据。
+    //    表头没有该列 → 跳过修复（兼容回退：其余列仍按列名解析，不猜列号）。
+    const pendingAt = idx.get('pending');
+    if (
+      pendingAt !== undefined &&
+      row.length > pendingAt &&
+      !/^\[[^\]]*\]$/.test((row[pendingAt] ?? '').trim())
+    ) {
       const rest = row.splice(pendingAt);
       const joined = rest.join(',');
       const end = joined.indexOf(']');
@@ -376,18 +383,37 @@ export function parseFramesIndexJsonl(text: string): {
   return { frames, skipped };
 }
 
-/** 解析 `session.json`（容错：缺字段给默认值，**不抛**，回放时按缺失能力降级）。 */
+/**
+ * 解析 `session.json`。
+ *
+ * **版本先校验**：`version` 必须精确等于 `AUGMENT_SESSION_VERSION`；缺失、旧版、
+ * 未来版一律抛错 —— 不同版本的列/几何语义可能不同，静默降级解析会产出
+ * "看着正常、实际错位"的回放结果（比明确拒绝更糟）。
+ * 版本匹配之后，其余字段才容错：缺字段给默认值（**不抛**），回放按缺失能力降级。
+ */
 export function parseSessionMeta(json: unknown, fallback: {
   readonly region: Rect;
   readonly altRegion: Rect;
 }): AugmentSessionMeta {
   const o = (typeof json === 'object' && json !== null ? json : {}) as Record<string, unknown>;
+  const version = o['version'];
+  if (typeof version !== 'number' || version !== AUGMENT_SESSION_VERSION) {
+    const got =
+      typeof version === 'number'
+        ? `不支持：${version}`
+        : typeof version === 'undefined'
+          ? '缺失'
+          : `非法：${JSON.stringify(version)}`;
+    throw new Error(
+      `会话格式版本${got}（本工具只认 ${AUGMENT_SESSION_VERSION}，拒绝静默降级解析旧/未来格式）`,
+    );
+  }
   const g = (o['gating'] ?? null) as Record<string, unknown> | null;
   const d = (o['display'] ?? null) as Record<string, unknown> | null;
   const wa = (d?.['workArea'] ?? null) as Record<string, unknown> | null;
   const numOr = (v: unknown, f: number): number => (typeof v === 'number' && Number.isFinite(v) ? v : f);
   return {
-    version: numOr(o['version'], AUGMENT_SESSION_VERSION),
+    version: AUGMENT_SESSION_VERSION,
     startedAt: typeof o['startedAt'] === 'string' ? o['startedAt'] : '',
     trigger: o['trigger'] === 'api' ? 'api' : 'pixel',
     gating:

@@ -204,7 +204,10 @@ export function detectPanelPresence(
     return { ...NO_PANEL_PRESENCE, reason: '搜索区越界（太小或超出帧）' };
   }
   const step = Math.max(1, Math.round(thresholds.xStep));
-  const cols = Math.floor((x1 - x0) / step);
+  // 扫描是 `x = x0; x < x1; x += step`，采样列数是 **ceil**（不是 floor）：
+  // 宽不是步长整倍数时，floor 会少算分母，整行亮时 rowFrac 可 > 1（约 +2%），
+  // 而本信号的真实约束正是**突出量**（见文件头）—— 等于系统性放大它。
+  const cols = Math.ceil((x1 - x0) / step);
   const rows = y1 - y0;
   const topLimitIdx = Math.round(rows * thresholds.maxTopRowFrac);
   const bottomStartIdx = Math.round(rows * thresholds.minBottomRowFrac);
