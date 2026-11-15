@@ -61,6 +61,7 @@ import {
   AUGMENT_CLEAR_REASONS,
   AUGMENT_CLOSE_CONFIRM_MS,
   AUGMENT_REROLL_THRESHOLD,
+  advanceRerollBaseline,
   apiCaptureInterval,
   augmentChainStopKeepsLabelsLine,
   augmentClearLogLine,
@@ -87,7 +88,6 @@ import {
   mergeRefreshedCards,
   panelGateEvidence,
   rerolledCardIndices,
-  shouldAdoptReportedBaseline,
   toScreenTierLabels,
   withLogOffset,
   type AugmentBadgeAlign,
@@ -1953,24 +1953,21 @@ export class AugmentController {
     // 万一它是**变化之前**那一帧，基线就被倒回旧内容 → 同一次刷新被重复检出
     //（真机日志里同一个结构距离 0.0735 出现两次）。判据是纯函数（有单测）。
     if (rep.fingerprints && rep.fingerprints.length > 0) {
-      const adopt =
-        origin !== 'reroll' ||
-        shouldAdoptReportedBaseline({
-          previous: this.lastRerollPreviousBaseline,
-          detection: this.lastRerollDetectionFingerprints,
-          reported: rep.fingerprints,
-        });
-      if (adopt) {
+      if (origin === 'reroll') {
+        // ⚠️ **重随路径不整排采信回传指纹**（2026-11-15 真机 bug）：
+        //    检测时按卡推进基线（只推进真正重认的卡），而回传的 `rep.fingerprints`
+        //    是渲染端**最近一帧门控画面**的整排指纹 —— 同一帧里可能已经包含
+        //    "本轮被稳定性判据跳过、还没重认"的那张卡的新内容。整排采信会把它的
+        //    旧基线覆盖成新内容 → 下一帧不再判定"变化" → 永远不重认，标签停在
+        //    刷新前（用户报的"卡片刷新后标签不更新"）。
+        //    基线已经在检测路径按卡推进；这里只更新采样起点，不做覆盖。
+        this.watchingSinceMs = this.now();
+      } else {
+        // 开边沿：回传指纹就是这批标签的基线，整排采信（旧行为不变）。
         this.baselineFingerprints = rep.fingerprints;
         this.lastFrameFingerprints = rep.fingerprints;
-      } else {
-        // 留一行：这是"同一次刷新被重复检出"的直接嫌疑（下一次真机复盘靠它定性）
-        this.logLine(
-          '[augment] ♻ 重认回传的指纹比检测帧更旧（像变化之前那一帧）→ **不采信**，' +
-            '基线保持在新内容上（否则同一次刷新会被再检出一次）',
-        );
+        this.watchingSinceMs = this.now();
       }
-      this.watchingSinceMs = this.now();
     }
     this.recognizedRows.push({
       atMs: this.now() - this.startedAt,
@@ -2248,7 +2245,10 @@ export class AugmentController {
       `[augment] 🔄 检测到${which} 刷新（结构距离 ${distances.join('/')} ≥ 阈值 ${AUGMENT_REROLL_THRESHOLD}）` +
         ' → 只重认这几张…',
     );
-    this.baselineFingerprints = current;
+    // ⚠️ **只推进真正重认的卡**（2026-11-15 真机 bug）：被 `previous` 稳定性
+    // 判据跳过的卡（同一帧里还在翻转）必须保留旧基线，否则它稳定后不会再被判
+    // "相对基线变了" → 永远不重认，标签停在刷新前。
+    this.baselineFingerprints = advanceRerollBaseline(baselineBefore, current, changed) ?? current;
     // 单调保护的参照：这次重认**之前**的基线 vs 判定"变了"那一帧
     this.lastRerollPreviousBaseline = baselineBefore;
     this.lastRerollDetectionFingerprints = current;

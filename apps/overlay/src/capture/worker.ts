@@ -384,7 +384,6 @@ function tick(): void {
   //    未命中帧的 `det.cards` 可能只有候选、甚至为空，不能当兜底依据。
   if (det.found && det.cards.length > 0) lastHitCards = det.cards;
   latestGatingBmp = bmp;
-  latestFingerprints = augmentWatchFingerprints(bmp, watchRects, det);
 
   // "面板仍在"的**独立信号**：只在卡片判据**未命中**的帧上算。
   //
@@ -393,6 +392,10 @@ function tick(): void {
   // 候选搜索区**（主区 + 全屏备用区），回退语义与 `detectAugmentPanelInRegions`
   // 完全一致 —— 探针认错窗口时两边一起退化，不会出现"一个信号看得见、另一个看不见"。
   const presence = det.found ? undefined : detectPanelPresenceInRegions(bmp, regions).presence;
+
+  // 指纹：翻牌动画期间卡片判据会失效，但**面板信号仍在** → 继续按冻结矩形算
+  //（否则重随检测在动画窗口里完全瞎掉，第二次连续刷新会漏掉；2026-11-15 真机）。
+  latestFingerprints = augmentWatchFingerprints(bmp, watchRects, det, presence?.present === true);
 
   frames++;
   const now = performance.now();

@@ -232,9 +232,23 @@ export function augmentWatchFingerprints(
   bmp: Bitmap,
   frozenRects: readonly Rect[] | null | undefined,
   detection: WatchDetection,
+  /**
+   * "面板信号"（独立于卡片判据）是否认定面板仍在。
+   *
+   * 翻牌动画会让卡片判据连续失效（真机约 1.1s），但冻结矩形仍然有效；
+   * 这时如果面板信号说"仍在"，就必须**继续按冻结矩形算指纹**，否则重随检测
+   * 在动画期间完全瞎掉 —— 2026-11-15 真机：连续两次刷新，第二次正好落在
+   * 卡片判据失效窗口，标签永远停在第一次刷新的内容上。
+   *
+   * 默认 false = 旧行为（没有面板信号时不冒险算）。
+   */
+  panelPresent = false,
 ): readonly (AugmentCardFingerprint | null)[] {
   if (!frozenRects || frozenRects.length === 0) return [];
-  if (!detection.found) return [];
+  if (!detection.found) {
+    if (!panelPresent) return [];
+    return frozenRects.map((r) => augmentCardFingerprint(bmp, r));
+  }
   if (detection.cards.length !== frozenRects.length) return [];
   return frozenRects.map((r) => augmentCardFingerprint(bmp, r));
 }
@@ -417,6 +431,34 @@ export function mergeRefreshedCards(
     const old = out[index]!;
     const fresh = next[k] ?? null;
     out[index] = fresh ?? { ...old, augmentId: null, name: null, score: null, margin: null };
+  }
+  return out;
+}
+
+/**
+ * 检测到刷新后，**只推进真正被重认的那些卡的基线**。
+ *
+ * ⚠️ 这是 2026-11-15 真机 bug 的修法：旧实现把整排基线都推进到"当前帧"，
+ * 但 `rerolledCardIndices` 会**跳过**"本帧还在动画里（与上一帧不一致）"的卡。
+ * 被跳过的那张卡基线也被推走 → 它下一次稳定时不再"相对旧基线有变化"，
+ * 于是**永远不会被重认**，标签停在刷新前（用户看到的"卡片刷新后标签不更新"）。
+ *
+ * 例：一次 reroll 同时换了卡1/卡2，检测帧里卡2已稳定、卡1还在翻转：
+ *   · 旧：基线[卡1]=新、基线[卡2]=新 → 下一帧卡1稳定也不再触发；
+ *   · 新：只推进卡2 → 下一帧卡1相对旧基线仍变化，稳定后触发重认。
+ *
+ * 一句话：**基线只跟随"画到屏幕上的标签内容"**，不跟随"检测帧长什么样"。
+ */
+export function advanceRerollBaseline(
+  baseline: readonly (AugmentCardFingerprint | null)[] | null | undefined,
+  current: readonly (AugmentCardFingerprint | null)[] | null | undefined,
+  detected: readonly number[],
+): readonly (AugmentCardFingerprint | null)[] | null {
+  if (!baseline || !current || detected.length === 0) return baseline ?? null;
+  const out = [...baseline];
+  for (const index of detected) {
+    if (!Number.isInteger(index) || index < 0 || index >= out.length || index >= current.length) continue;
+    out[index] = current[index] ?? null;
   }
   return out;
 }

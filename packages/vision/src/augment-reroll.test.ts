@@ -22,6 +22,7 @@ import {
   AUGMENT_REROLL_THRESHOLD,
   augmentCardFingerprint,
   augmentFingerprintZoneRect,
+  advanceRerollBaseline,
   augmentWatchFingerprints,
   fingerprintDistance,
   fingerprintIsFlat,
@@ -650,4 +651,45 @@ test('阈值标定锁：真机噪声上界 < 阈值 < 真机真变化下界，�
   );
   // ⑤ 两组分布不许重叠（标定脚本的退出码判据）
   assert.ok(REAL_STATIC_MAX < REAL_NOISE_MAX && REAL_NOISE_MAX < REAL_REROLL_MIN);
+});
+
+test('advanceRerollBaseline：只推进已重认的卡，动画中被跳过的卡保留旧基线（真机 2026-11-15 bug）', () => {
+  const oldA = fp(makeCardBmp('a'));
+  const oldB = fp(makeCardBmp('b'));
+  const oldC = fp(makeCardBmp('a'));
+  const newB = fp(makeCardBmp('b'));
+  const newC = fp(makeCardBmp('b'));
+  const baseline = [oldA, oldB, oldC];
+  const current = [oldA, newB, newC];
+  // 本次只判定出卡2（卡3 还在动画里，被 rerolledCardIndices 跳过）
+  const next = advanceRerollBaseline(baseline, current, [1]);
+  assert.ok(next !== null);
+  assert.equal(next[0], oldA, '没变的卡基线不动');
+  assert.equal(next[1], newB, '已重认的卡推进到新基线');
+  assert.equal(next[2], oldC, '**动画中跳过的卡必须保留旧基线**（否则它永远不会被重认）');
+  // 下一帧卡3稳定：相对旧基线仍然"变化"，于是能被检测/重认
+  assert.deepEqual(
+    rerolledCardIndices({ baseline: next, current, previous: current }),
+    [2],
+    '卡2 已推进基线 → 不再重复；卡3 相对旧基线仍变化（previous=current 稳定）→ 下一次检测到',
+  );
+});
+
+test('advanceRerollBaseline：边界输入不炸', () => {
+  assert.equal(advanceRerollBaseline(null, null, [0]), null);
+  assert.deepEqual(advanceRerollBaseline([], [], [0]), []);
+  const f = fp(makeCardBmp('a'));
+  assert.deepEqual(advanceRerollBaseline([f], [f], [9, -1]), [f]);
+});
+
+test('augmentWatchFingerprints：卡片判据失效但**面板信号仍在** → 按冻结矩形继续算（2026-11-15 真机）', () => {
+  const bmp = makeCardBmp('a');
+  const frozen: Rect[] = [CARD, { ...CARD, x: 0.45 }, { ...CARD, x: 0.7 }];
+  // 翻牌动画：本帧检不出卡片，但面板信号说"仍在" → 不能整帧跳过，
+  // 否则重随检测在动画窗口里瞎掉（连续第二次刷新会漏）。
+  const onlyPresence = augmentWatchFingerprints(bmp, frozen, { found: false, cards: [] }, true);
+  assert.equal(onlyPresence.length, 3);
+  assert.ok(onlyPresence.every((x) => x !== null));
+  // 默认（不传面板信号）保持旧行为：空数组
+  assert.deepEqual(augmentWatchFingerprints(bmp, frozen, { found: false, cards: [] }), []);
 });

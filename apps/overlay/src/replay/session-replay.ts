@@ -488,6 +488,8 @@ export function createReplayCapture(
       watchRects,
       // 指纹判据只看"面板是否在屏 + 卡片数是否与冻结矩形数一致"（在纯函数里）
       { found: det.found, cards: det.cards.map((c) => ({ rect: rectToCrop(c.rect, ref.crop) ?? c.rect })) },
+      // 翻牌动画卡片判据失效、但面板信号仍在 → 继续按冻结矩形算（与线上同条件）
+      presence?.present === true,
     );
 
     frames++;
