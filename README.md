@@ -44,7 +44,7 @@
 **点「更多信息」→「仍要运行」** 即可。
 
 > 企业环境（AppLocker / 只允许已签名程序的组策略）**可能直接拦截**，这不是文档能绕过的。
-> 安装包哈希（SHA256）在 [发布说明](docs/RELEASE-NOTES-v0.3.0.md) 与 Release 页给出，
+> 安装包哈希（SHA256）在 [发布说明](docs/RELEASE-NOTES-v0.4.0.md) 与 Release 页给出，
 > 可用 `Get-FileHash .\hexbox-setup-<版本>-x64.exe -Algorithm SHA256` 自行校验。
 
 ### 数据：放在你的文档目录（不随安装包）
@@ -247,7 +247,7 @@ docs/                               设计文档
 | [docs/NEURAL-OCR.md](docs/NEURAL-OCR.md) | 局内海克斯名字神经网络 OCR（PP-OCRv5 + CTC 闭集） |
 | [docs/OVERLAY-STAGES.md](docs/OVERLAY-STAGES.md) | 覆盖层分阶段决策与调研 |
 | [docs/RELEASE-WINDOWS.md](docs/RELEASE-WINDOWS.md) | Windows 打包发布全部事实 |
-| [docs/RELEASE-NOTES-v0.3.0.md](docs/RELEASE-NOTES-v0.3.0.md) | 当前版本发布说明（升级/校验） |
+| [docs/RELEASE-NOTES-v0.4.0.md](docs/RELEASE-NOTES-v0.4.0.md) | 当前版本发布说明（升级/校验） |
 | [docs/SESSION-NOTES.md](docs/SESSION-NOTES.md) | 真机事故与修复记录 |
 | [docs/VERIFY-P1.md](docs/VERIFY-P1.md) | 真机验收清单 |
 | [apps/web/README.md](apps/web/README.md) | 数据站：开发/构建/部署/排查 |

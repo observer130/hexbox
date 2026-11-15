@@ -30,8 +30,16 @@ pnpm --filter @hexbox/overlay package:dir     # 只出免安装目录（验证�
 > 但新功能等于没生效。构建机需要允许 `onnxruntime-node` 的 postinstall
 > （见 `pnpm-workspace.yaml` 的 `allowBuilds`）。
 >
-> ⚠️ 上表是 **0.1.0** 的本机实测；当前版本（`v0.3.0`）的产物名会变成
-> `hexbox-setup-0.3.0-x64.exe` 等，大小随依赖/代码变化 —— 以 `release/` 实际产物为准。
+> ⚠️ 上表是 **0.1.0** 的本机实测；当前版本（`v0.4.0`）的产物名会变成
+> `hexbox-setup-0.4.0-x64.exe` 等，大小随依赖/代码变化 —— 以 `release/` 实际产物为准。
+>
+> **0.4.0 本机实测（2026-11-15）**：`hexbox-setup-0.4.0-x64.exe` 115,058,831 B
+> （SHA256 `df10542303e9bd91065e9959eec8a5318555328bfc4bdde807c7494660bb5ba1`）、
+> `hexbox-portable-0.4.0-x64.exe` 114,823,951 B
+> （SHA256 `fd4f78edd513cbd2924370f4e8e8f784d1f1012a77b593ac1da2222c76154ca8`）；
+> `win-unpacked/resources/app.asar` 575K，`app.asar.unpacked/dist/native` 81M；
+> 打包后从解包目录直接 `require('onnxruntime-node')` 并加载
+> `ocr/ppocrv5-ch-mobile-rec.onnx` 成功（CPU session 输入 `x`、输出 `fetch_name_0`）。
 
 配置在 **`apps/overlay/electron-builder.yml`**（不新增 `apps/desktop`：
 本包已经是 workspace 项目、已经声明 `main=dist/main/index.cjs`，
@@ -704,10 +712,10 @@ GET https://api.github.com/repos/observer130/hexbox/releases/latest → 404     
 3. 建 Release，**tag 必须是合法的语义化版本**（`v0.2.0` / `0.2.0` 都认；`nightly-2026` 这种会被判"不是版本号"）：
 
    ```powershell
-   gh release create v0.3.0 `
-     release/hexbox-setup-0.3.0-x64.exe `
-     release/hexbox-portable-0.3.0-x64.exe `
-     --title "hexbox 0.3.0" --notes-file docs/RELEASE-NOTES-v0.3.0.md
+   gh release create v0.4.0 `
+     release/hexbox-setup-0.4.0-x64.exe `
+     release/hexbox-portable-0.4.0-x64.exe `
+     --title "hexbox 0.4.0" --notes-file docs/RELEASE-NOTES-v0.4.0.md
    ```
 
    > 发布说明的文件名是 **`docs/RELEASE-NOTES-v<版本>.md`**（早期文档里写成
